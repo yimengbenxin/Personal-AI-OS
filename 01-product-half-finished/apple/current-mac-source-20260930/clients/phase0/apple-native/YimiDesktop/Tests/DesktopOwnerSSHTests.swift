@@ -108,11 +108,15 @@ extension DesktopOwnerSSHTests {
         Ext13RevokeRequest.status = 403
         do { try await ssh.retryRevocations(); XCTFail("A generic denial does not prove revocation") } catch { }
         XCTAssertEqual(store.intents.count, 1)
-        Ext13RevokeRequest.body = #"{"error":"PAIRED_DEVICE_REVOKED"}"#
+        for (status, code) in [(403, "PAIRED_DEVICE_REVOKED"), (401, "CONTROL_CAPABILITY_INVALID")] {
+            store.intents = [.init(origin: "https://example.test", deviceID: "old-device", token: "test-token")]
+            Ext13RevokeRequest.status = status
+            Ext13RevokeRequest.body = "{\"error\":\"\(code)\"}"
+            try await ssh.retryRevocations()
+            XCTAssertTrue(store.intents.isEmpty, "The authority confirms revocation after a lost success response")
+        }
         try await ssh.retryRevocations()
-        XCTAssertTrue(store.intents.isEmpty)
-        try await ssh.retryRevocations()
-        XCTAssertEqual(Ext13RevokeRequest.requests.count, 2, "A completed intent never sends again")
+        XCTAssertEqual(Ext13RevokeRequest.requests.count, 3, "A completed intent never sends again")
     }
 }
 

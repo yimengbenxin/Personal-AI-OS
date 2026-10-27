@@ -1,0 +1,141 @@
+{
+  "server_now": "2026-10-01T00:00:00.000Z",
+  "previous": {
+    "operation": "move_hud",
+    "kind": "ride_nav",
+    "at": "2026-10-01T00:00:00.000Z",
+    "seq": 23,
+    "coordinate_system": "wgs84",
+    "position": {
+      "lat": 31,
+      "lng": 121,
+      "accuracy_m": 5,
+      "at": "2026-10-01T00:00:00.000Z"
+    },
+    "ride": {
+      "speed_kmh": 18,
+      "avg_kmh": 16,
+      "max_kmh": 25,
+      "distance_m": 100,
+      "moving_s": 20,
+      "elapsed_s": 30,
+      "hr_alert": false
+    },
+    "nav": {
+      "nav_id": "bedb3997-d7cc-47ae-9c80-855e8e6106a8",
+      "revision": 1,
+      "step_index": 0,
+      "maneuver": "right",
+      "distance_to_maneuver_m": 300,
+      "remaining_m": 1000,
+      "remaining_s": 400,
+      "route_segment_index": 0,
+      "segment_fraction": 0.25,
+      "maneuver_location": {
+        "lat": 31,
+        "lng": 121
+      }
+    },
+    "session_id": "glasses-continuity",
+    "schema_version": "paios.central.text-envelope.v1"
+  },
+  "packets": [
+    {
+      "operation": "nav_route",
+      "coordinate_system": "wgs84",
+      "nav_id": "bedb3997-d7cc-47ae-9c80-855e8e6106a8",
+      "revision": 1,
+      "mode": "walking",
+      "destination": {
+        "name": "公司",
+        "lat": 31.01,
+        "lng": 121.01
+      },
+      "total_m": 1500,
+      "total_s": 600,
+      "steps": [
+        {
+          "index": 0,
+          "maneuver": "right",
+          "instruction": "前面右转，进滨河路",
+          "road": "滨河路",
+          "distance_m": 500,
+          "duration_s": 200,
+          "polyline": [
+            {
+              "lat": 30.999,
+              "lng": 120.999
+            },
+            {
+              "lat": 31,
+              "lng": 121
+            }
+          ],
+          "maneuver_location": {
+            "lat": 31,
+            "lng": 121
+          }
+        },
+        {
+          "index": 1,
+          "maneuver": "left",
+          "instruction": "前面左转",
+          "distance_m": 1000,
+          "duration_s": 400,
+          "polyline": [
+            {
+              "lat": 31,
+              "lng": 121
+            },
+            {
+              "lat": 31.01,
+              "lng": 121.01
+            }
+          ],
+          "maneuver_location": {
+            "lat": 31.01,
+            "lng": 121.01
+          }
+        }
+      ],
+      "overview": {
+        "version": 1,
+        "selected": 0,
+        "alternatives": [],
+        "show": false
+      },
+      "session_id": "glasses-continuity",
+      "schema_version": "paios.central.text-envelope.v1"
+    },
+    {
+      "operation": "move_hud",
+      "kind": "walk_nav",
+      "at": "2026-10-01T00:00:00.000Z",
+      "seq": 23,
+      "coordinate_system": "wgs84",
+      "position": {
+        "lat": 31,
+        "lng": 121,
+        "accuracy_m": 5,
+        "at": "2026-10-01T00:00:00.000Z"
+      },
+      "nav": {
+        "nav_id": "bedb3997-d7cc-47ae-9c80-855e8e6106a8",
+        "revision": 1,
+        "step_index": 1,
+        "maneuver": "left",
+        "distance_to_maneuver_m": 1000,
+        "remaining_m": 1000,
+        "remaining_s": 400,
+        "route_segment_index": 2,
+        "segment_fraction": 0,
+        "maneuver_location": {
+          "lat": 31.01,
+          "lng": 121.01
+        }
+      },
+      "session_id": "glasses-continuity",
+      "schema_version": "paios.central.text-envelope.v1"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import {migrateLegacyOriginals,readTurnCorpus,readTurnAudio} from '../tools/turn
 import {acquireProcessLock} from '../src/process-lock.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {fileURLToPath} from 'node:url';
 
 const device = {principal_id: 'owner', device_id: 'phone', device_type: 'phone' as const, consent_ref: 'consent', channel: 'formal'};
 const policy: AdmissionPolicy = {max_pending_events: 4, max_pending_bytes: 100000, max_event_age_ms: 10000,
@@ -164,6 +165,6 @@ test('explicit legacy import resumes without a new call or enabled collection an
   assert.equal(frame.original,'frames/photo.jpg');assert.match(String(frame.raw_ref),/^l5:/);assert.equal(frame.payload_sha256,sha256(photo));
   const lock_file=join(root,'central.lock'),configuration=join(root,'private-config.json'),release=await acquireProcessLock(lock_file);
   await fs.writeFile(configuration,JSON.stringify({storage_root:storage.root,max_event_bytes:100000,lock_file}));
-  try{await assert.rejects(promisify(execFile)(process.execPath,[new URL('../tools/turn-eval.ts',import.meta.url).pathname,'--migrate-legacy',root,
+  try{await assert.rejects(promisify(execFile)(process.execPath,[fileURLToPath(new URL('../tools/turn-eval.ts',import.meta.url)),'--migrate-legacy',root,
     '--config',configuration,'--provenance',manifest,'--output',report]),/PERSONAL_AIOS_ALREADY_RUNNING/);}finally{await release();}
 });

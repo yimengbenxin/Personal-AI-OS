@@ -13,7 +13,7 @@ import tempfile
 import time
 
 from staging_snapshot_stack import Stack, WRITERS
-from staging_snapshot_transfer import encrypt, night, retain, taiwan, transfer
+from staging_snapshot_transfer import encrypt, night, retain, local_time, transfer
 
 # Manual daytime capture is separate from the timer. Calls prevent capture and take priority over upload.
 # Writers stop for at most the configured stop budget. Any capture may omit raw L5 when the loose per-chunk
@@ -22,7 +22,7 @@ DAYTIME_STOP_SECONDS = 1800
 
 
 def capture(settings, daytime=False, bwlimit=244, stop_seconds=DAYTIME_STOP_SECONDS, raw=True):
-    local = taiwan() if daytime else night()
+    local = local_time() if daytime else night()
     for tool in ('age', 'rsync', 'docker'):
         if not shutil.which(tool):
             raise ValueError('Required installed tool is missing: ' + tool)
@@ -149,7 +149,7 @@ def main():
     parser.add_argument('--settings', type=Path, required=True)
     parser.add_argument('--snapshot', type=Path)
     parser.add_argument('--replace-staging', action='store_true')
-    parser.add_argument('--daytime', action='store_true', help='manual capture outside Taiwan 03:00-06:00')
+    parser.add_argument('--daytime', action='store_true', help='manual capture outside deployment-local 03:00-06:00')
     parser.add_argument('--bwlimit', type=int, default=244, help='capture upload KiB/s')
     parser.add_argument('--daytime-minutes', type=int, default=DAYTIME_STOP_SECONDS // 60,
                         help='writer stop budget of a daytime capture')

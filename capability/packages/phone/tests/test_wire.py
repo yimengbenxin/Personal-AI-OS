@@ -27,16 +27,18 @@ class Wire(unittest.IsolatedAsyncioTestCase):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         catalog = await session.list_tools()
-                        self.assertEqual(len(catalog.tools), 8)
+                        self.assertEqual(len(catalog.tools), 9)
                         async def call(name, **args):
                             result = await session.call_tool(name, {"principal_id": "owner", **args})
                             self.assertFalse(result.isError)
                             Draft202012Validator(SCHEMA).validate(result.structuredContent)
                             self.assertEqual(len(result.content), 1)
                             self.assertEqual(result.content[0].type, "text")
-                            self.assertIsNotNone(result.structuredContent.get("job"))
                             return result.structuredContent
-                        await call("phone_status")
+                        query = await call("phone_status")
+                        self.assertNotIn("job", query)
+                        self.assertEqual(query["status"]["state"], "succeeded")
+                        await call("phone_check", job_id="job-0123456789ab")
                         await call("phone_control_link")
                         await call("phone_start")
                         await call("phone_restore_apps", apps=["千问"])

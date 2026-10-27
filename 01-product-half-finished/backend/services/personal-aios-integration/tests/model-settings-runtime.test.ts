@@ -14,7 +14,7 @@ import {PHONE_CAPABILITIES,StaticFixtureDeviceAuthority} from '../src/source-aut
 import {EVENT_SCHEMA,sha256,ContractError} from '../src/contracts.ts';
 import {policy} from './sealed-replay-check.ts';
 import {keyPair,signed} from './payment-fixture.ts';
-async function fixture(t:TestContext){
+async function fixture(t:TestContext,activationHook?:(group:'brain'|'build',revision:number,authority:ModelSettingsAuthority)=>Promise<void>){
   const home=await mkdtemp(join(tmpdir(),'model-runtime-')),storage=new PosixStorage(home),observed=Promise.withResolvers<void>();
   const native=sourceClient({create:async()=>({run_id:'run',session_id:'session',conversation_session_id:'session',status:'running'}),
     status:async()=>{observed.resolve();return {run_id:'run',session_id:'session',conversation_session_id:'session',status:'running'};},
@@ -22,8 +22,9 @@ async function fixture(t:TestContext){
   const payment=PaymentAuthority.open(join(home,'payment')),user=keyPair();
   payment.store.db.prepare('INSERT INTO device_keys VALUES(?,?,?,?,?,NULL)').run('phone','user','owner',user.public_x963_b64,Date.now());
   let busy=false,broken=false,activations=0,usage:ModelUsage|undefined;
-  const authority=ModelSettingsAuthority.open(join(home,'models'),{environment_id:'test',master_key:Buffer.alloc(32,7),activate:async()=>{
-    activations++;if(busy)throw Object.assign(Error('busy'),{code:'MODEL_SETTINGS_BUSY'});if(broken)throw Error('ACTIVATE_FAILED');},
+  const authority=ModelSettingsAuthority.open(join(home,'models'),{environment_id:'test',master_key:Buffer.alloc(32,7),activate:async(group,revision,owner)=>{
+    activations++;if(busy)throw Object.assign(Error('busy'),{code:'MODEL_SETTINGS_BUSY'});if(broken)throw Error('ACTIVATE_FAILED');
+    await activationHook?.(group,revision,owner);},
     onAction:draft=>{if(draft.action==='resume')usage!.resume('test','owner');
       if(draft.action==='pause')usage!.setPausePolicy('test','owner',draft.payload.pause_on_limit===true,draft.payload.owner_reserve_cny as number|undefined);}});
   const providers=[{id:'custom',display_name:'Custom',wire_protocol:'chat_completions' as const,base_url:'https://example.test/v1',credential_ref:'custom'}];
@@ -114,4 +115,36 @@ test('formal model settings read exposes only authenticated owner spend through 
   await f.admit();
   const tool=await f.runtime.tool('paios_model_settings_read',{context:{run_id:'run',session_id:'session',tool_call_id:'usage-read'},args:{}}) as {usage:unknown};
   assert.deepEqual(tool.usage,read.usage);
+});
+
+
+for(const outcome of ['effective','busy','failed'] as const)test(`concurrent signed key rotations drain the newer desired once and stop on ${outcome}`,async t=>{
+  const entered=Promise.withResolvers<void>(),ack=Promise.withResolvers<void>(),committed=Promise.withResolvers<void>();
+  const revisions:number[]=[];
+  const f=await fixture(t,async(group,revision)=>{
+    assert.equal(group,'brain');revisions.push(revision);
+    if(revision===2){entered.resolve();await ack.promise;}
+    if(revision===3&&outcome==='busy')throw Object.assign(Error('busy'),{code:'MODEL_SETTINGS_BUSY'});
+    if(revision===3&&outcome==='failed')throw Error('ACTIVATE_FAILED');
+  });
+  const unwatch=f.authority.watch(()=>{if(f.authority.read().groups.brain.desired===3)committed.resolve();});
+  let first:Promise<unknown>|undefined,second:Promise<unknown>|undefined,firstSettled=false,secondSettled=false;
+  try{
+    const B=f.authority.keyDraft(f.source,{expected_revision:1,credential_ref:'custom',key:'signed-key-B-1234'});
+    first=f.execute(B).finally(()=>{firstSettled=true;});await entered.promise;
+    const C=f.authority.keyDraft(f.source,{expected_revision:2,credential_ref:'custom',key:'signed-key-C-5678'});
+    second=f.execute(C).finally(()=>{secondSettled=true;});await committed.promise;
+    await new Promise<void>(done=>setImmediate(done));
+    assert.equal(firstSettled,false);assert.equal(secondSettled,false);
+    assert.equal(f.authority.read().groups.brain.effective,1);
+    const leased=f.authority.resolve('test','owner','main',2);
+    assert.equal(f.authority.credential({environment_id:'test',profile:'owner',revision:2,handle:leased.credential_handle!}),'signed-key-B-1234');
+    ack.resolve();await Promise.all([first,second]);
+    const state=f.authority.read().groups.brain;
+    assert.equal(state.desired,3);assert.equal(state.effective,outcome==='effective'?3:2);
+    assert.equal(state.status,outcome==='busy'?'pending':outcome);
+    assert.deepEqual(revisions,[2,3],'newer desired gets one activation attempt without manual apply');
+    await new Promise<void>(done=>setImmediate(done));
+    assert.deepEqual(revisions,[2,3],'busy or failed activation does not auto-retry');
+  }finally{ack.resolve();unwatch();await Promise.allSettled([first,second].filter((value):value is Promise<unknown>=>!!value));}
 });

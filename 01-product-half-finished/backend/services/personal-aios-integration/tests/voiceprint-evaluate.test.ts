@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {evaluateVoiceprints,type EvaluationManifest} from '../tools/voiceprint-evaluate.ts';
 import {PosixStorage} from '../src/storage.ts';
 import {digest} from '../src/contracts.ts';
+import {fileURLToPath} from 'node:url';
 const fixture=new URL('./fixtures/voiceprint-evaluation-synthetic.json',import.meta.url);
 const manifest=async()=>JSON.parse(await readFile(fixture,'utf8')) as EvaluationManifest;
 test('synthetic harness compares all ablations and channel denominators without claiming acoustic performance',async()=>{
@@ -31,7 +32,7 @@ test('CLI records its result only to the explicitly selected local storage root'
   const root=await mkdtemp(join(tmpdir(),'voiceprint-evaluation-result-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const output=join(root,'result.json');
   const {execFile}=await import('node:child_process'),{promisify}=await import('node:util');
-  const cli=await promisify(execFile)(process.execPath,[new URL('../tools/voiceprint-evaluate.ts',import.meta.url).pathname,
+  const cli=await promisify(execFile)(process.execPath,[fileURLToPath(new URL('../tools/voiceprint-evaluate.ts',import.meta.url)),
     '--manifest',fixture.pathname,'--output',output,'--record-result',join(root,'store')]);
   assert.equal(JSON.parse(cli.stdout).schema,'voiceprint-evaluation-result/v1');
   const storage=new PosixStorage(join(root,'store'));

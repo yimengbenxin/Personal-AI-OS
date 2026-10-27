@@ -78,7 +78,7 @@ test('the block answers who the owner is, what they prefer, when and where they 
   const l3 = {query: async (owner: {principal_id: string}) => {assert.equal(owner.principal_id, OWNER); return {assertions: [
     assertion('preference', '咖啡', '燕麦拿铁，不加糖'), assertion('inference', '可能失眠', true),
     assertion('fact', '旧住址', '西湖区', {applicability_status: 'stopped'})]};}};
-  const block = await buildCallContext(base({profile_home: profile, native: reader, l3}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
+  const block = await buildCallContext(base({profile_home: profile, native: reader, l3,time_zone:'Asia/Shanghai'}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
   for (const expected of ['示例用户', '小例', '常温无糖', '咖啡：燕麦拿铁', '2026年10月9日', '22:51', 'Asia/Shanghai', '上海市陆家嘴（公开地标）',
     '主人：明天早上提醒我开会', '依米：好，明早八点提醒你。', '主人：今天杭州天气怎么样', '依米：好，稍等，我去办', '依米：杭州今天晴，最高27度。', '主人：谢谢'])
     assert.ok(block.includes(expected), `missing ${expected}\n${block}`);
@@ -137,7 +137,7 @@ test('device observations join native conversation in chronological order within
   assert.ok(Array.from(block).length<=CALL_CONTEXT_MAX_CHARS);
 });
 
-async function lookup(t:test.TestContext,reads:Partial<NativeClient>={},facts?:L3Assertion[],profile?:{enabled:true;profile_home:string;principal_id?:string}) {
+async function lookup(t:test.TestContext,reads:Partial<NativeClient>={},facts?:L3Assertion[],profile?:{enabled:true;profile_home:string;principal_id?:string},time_zone='Asia/Taipei') {
   const root=await fs.mkdtemp(join(tmpdir(),'paios-front-lookup-')),storage=new PosixStorage(root),health=HealthStore.open(join(root,'health'));
   const token='front-owner-fixture-token',other='front-other-fixture-token';
   const native=sourceClient({create:async()=>{throw new Error('lookup must not run an LLM');},status:async()=>{throw new Error('lookup must not poll runs');},
@@ -152,7 +152,7 @@ async function lookup(t:test.TestContext,reads:Partial<NativeClient>={},facts?:L
     await storage.publish('core-profile-migrations',digest({profile_home:profile.profile_home}),
       Buffer.from(JSON.stringify({principal_id:profile.principal_id??OWNER,profile_home:profile.profile_home,files:[],assertions:[]})));
   }
-  const runtime=new PersonalAIOSRuntime({storage,native,archive:new RawArchive(storage,8192),admission:new RunAdmission(storage,native,
+  const runtime=new PersonalAIOSRuntime({time_zone,storage,native,archive:new RawArchive(storage,8192),admission:new RunAdmission(storage,native,
     {max_pending_events:8,max_pending_bytes:65536,max_event_age_ms:10000,poll_interval_ms:10,native_idempotency_retention_ms:86400000,policy_version:'lookup'}),
     output:new OutputAuthority(storage),skill:'fixture',max_read_bytes:8192,health,...(profile?{core_profile:profile}:{}),...(facts?{l3:{query:async(owner:{principal_id:string},_id:unknown,_status:unknown,options?:{scope?:{purpose?:string}})=>{
       assert.equal(owner.principal_id,OWNER);return {assertions:options?.scope?.purpose==='core_profile'?coreRows:facts,next_cursor:null};}} as never}:{}),devices:[
@@ -279,7 +279,7 @@ test('bounded: long memory and history are cut to budget, keeping the newest lin
   const l3 = {query: async () => ({assertions: [assertion('fact', '不可截断的范围', '不能显示',
     {scope: {principal_id: OWNER, purpose: '陪伴', situation: '很长的范围'.repeat(100), role: '本人', evaluation_frame: '自述'}}),
     ...Array.from({length: 40}, (_, i) => assertion('preference', `偏好${i}`, '值'.repeat(100)))]})};
-  const block = await buildCallContext(base({profile_home: profile, native: reader, l3}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
+  const block = await buildCallContext(base({profile_home: profile, native: reader, l3,time_zone:'Asia/Shanghai'}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
   assert.ok(Array.from(block).length <= CALL_CONTEXT_MAX_CHARS, `${Array.from(block).length} chars`);
   assert.ok(block.includes('第39句') && !block.includes('第0句'), 'newest history kept');
   assert.ok(block.includes('【此刻】') && block.includes('上海市陆家嘴（公开地标）'), 'time and place survive the cut');
@@ -295,16 +295,16 @@ test('refreshed per call: a memory written between calls shows in the next block
   assert.ok(second.includes('示例用户') && !second.includes('还没有主人的名字'));
 });
 
-test('a failing or hanging source leaves the rest of the block; the time zone follows the fix, else the main agent\'s', async () => {
-  const profile = await home({user: ['主人叫示例用户'], timezone: 'America/New_York'});
+test('a failing or hanging source leaves the rest of the block; the deployment time zone is independent of native config and location', async () => {
+  const profile = await home({user: ['主人叫示例用户'], timezone: 'UTC'});
   const hanging: NativeHistoryReader = {sessions: () => new Promise(() => {}), messages: async () => []};
   const failing = {query: async () => {throw new Error('db down');}};
   const started = Date.now();
-  const block = await buildCallContext(base({profile_home: profile, native: hanging, l3: failing, timeout_ms: 100}), {principal_id: OWNER, session: 'current', location: TOKYO});
+  const block = await buildCallContext(base({profile_home: profile, native: hanging, l3: failing, timeout_ms: 100,time_zone:'America/New_York'}), {principal_id: OWNER, session: 'current', location: TOKYO});
   assert.ok(Date.now() - started < 1000);
   assert.ok(block.includes('示例用户') && block.includes('America/New_York') && block.includes('10:51'), block);
-  const here = await buildCallContext(base({profile_home: profile}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
-  assert.ok(here.includes('Asia/Shanghai') && here.includes('22:51'), here);
+  const here = await buildCallContext(base({profile_home: profile,time_zone:'America/New_York'}), {principal_id: OWNER, session: 'current', location: LUJIAZUI});
+  assert.ok(here.includes('America/New_York') && here.includes('10:51'), here);
 });
 
 test('the native client reads recent sessions and latest messages from the main agent\'s own API (read-only GETs)', async () => {
@@ -324,10 +324,28 @@ test('the native client reads recent sessions and latest messages from the main 
   } finally {server.close();}
 });
 
-test('a generated memory volume keeps the native configured timezone without reading legacy memory', async t => {
+test('a generated memory volume uses the deployment timezone without reading legacy memory', async t => {
   const view=await home({user:['平台生成的称呼']}), configuration=await home({user:['旧原生称呼'],timezone:'America/New_York'});
   t.after(()=>Promise.all([view,configuration].map(path=>fs.rm(path,{recursive:true,force:true}))));
-  const block=await buildCallContext(base({profile_home:view,configuration_home:configuration}),{principal_id:OWNER,session:'current'});
-  assert.ok(block.includes('平台生成的称呼')&&block.includes('America/New_York'),block);
+  const block=await buildCallContext(base({profile_home:view,time_zone:'UTC'}),{principal_id:OWNER,session:'current'});
+  assert.ok(block.includes('平台生成的称呼')&&block.includes('UTC'),block);
   assert.ok(!block.includes('旧原生称呼'));
+});
+
+for(const [zone,day,clock,offset,locationToday] of [
+  ['America/Los_Angeles','2026-10-09','17:30','-07:00',true],
+  ['UTC','2026-10-10','00:30','+00:00',false],
+] as const)test(`deployment ${zone} owns health/location announcement dates, offsets and call context`,async t=>{
+  const now=Date.parse('2026-10-10T00:30:00Z');t.mock.method(Date,'now',()=>now);
+  const f=await lookup(t,{},undefined,undefined,zone);
+  const health=await f.runtime.frontLookup(f.source,stepsRequest);
+  assert.equal(health.items.length,1);assert.ok(health.items[0]!.text.startsWith(day),JSON.stringify(health));
+  assert.match(health.items[0]!.text,/4321步/);assert.ok(health.items[0]!.updated_at.endsWith(offset));
+  assert.ok(!health.items[0]!.text.includes('台湾时间'));
+  await f.runtime.locate(f.source,{...LUJIAZUI,observed_at:new Date(now-2*3600000).toISOString()});
+  const location=await f.runtime.frontLookup(f.source,{...stepsRequest,query:'今天的位置定位',types:['location']});
+  assert.equal(location.items.length,locationToday?1:0,JSON.stringify(location));
+  if(locationToday)assert.match(location.items[0]!.text,/2026-10-09T15:30:00.000-07:00/);
+  const context=await f.runtime.callContext(f.source,'current',LUJIAZUI);
+  assert.ok(context.includes(zone)&&context.includes(clock),context);
 });

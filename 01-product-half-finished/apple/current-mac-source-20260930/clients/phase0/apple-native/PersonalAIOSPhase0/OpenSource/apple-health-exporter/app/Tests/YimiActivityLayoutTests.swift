@@ -4,15 +4,15 @@ import XCTest
 @testable import HealthKitExporter
 
 final class YimiActivityLayoutTests: XCTestCase {
-    private func activity(_ id: String, state: CentralActivityCard.State = .succeeded) -> ActivityPresentation {
-        let at = "2026-10-24T00:00:00.000Z"
+    private func activity(_ id: String, state: CentralActivityCard.State = .succeeded,
+                          at: String = "2026-10-24T00:00:00.000Z", arrivedAt: Date = Date()) -> ActivityPresentation {
         let card = CentralActivityCard(id: id, revision: 1, state: state, summary: "合成任务",
             step_summary: nil, summary_source: .generic, started_at: at, observed_at: at, last_progress_at: at,
             elapsed_ms: 1000, completed_at: state == .running ? nil : at,
             counts: .init(total: 1, running: state == .running ? 1 : 0, succeeded: state == .succeeded ? 1 : 0,
                 failed: 0, cancelled: 0, partial: nil), items: [], omitted_items: 0, failure_reason: nil)
         return ActivityPresentation(update: .init(operation: "activity_update", session_id: "test",
-            processed_event_id: id, card: card), arrivedAt: Date())
+            processed_event_id: id, card: card), arrivedAt: arrivedAt)
     }
 
     func testAnchorsUseWholeHistoryAndKeepRequestAndReplySemantics() {
@@ -35,6 +35,62 @@ final class YimiActivityLayoutTests: XCTestCase {
         XCTAssertEqual(waiting.under["me-second"]?.map(\.id), ["done"])
         XCTAssertEqual(waiting.anchor(for: cards[0]), "me-first")
         XCTAssertTrue(waiting.unanchored.isEmpty)
+    }
+
+    func testMissingRequestUsesOwnReplyWithoutCollapsingRunningCard() {
+        let items = [YimiItem(id: "her-running", kind: .her, text: "reply", date: .distantPast)]
+        let card = activity("running", state: .running)
+        let layout = YimiActivityLayout(items: items, activities: [card], consumer: nil)
+        XCTAssertEqual(layout.under["her-running"]?.map(\.id), ["running"])
+        XCTAssertEqual(layout.anchor(for: card), "her-running")
+        XCTAssertFalse(card.collapsed(replyProcessedIDs: layout.replyProcessedIDs))
+        XCTAssertTrue(layout.unanchored.isEmpty)
+        let done = activity("running")
+        XCTAssertTrue(done.collapsed(replyProcessedIDs: layout.replyProcessedIDs))
+    }
+
+    func testLongHistoryKeepsExactAnchorsOutsideVisibleTail() {
+        let start = ISO8601.utc.date(from: "2026-10-24T00:00:00.000Z")!
+        let items = [YimiItem(id: "request", kind: .me, text: "old request", date: .distantPast,
+                              submissionProcessedID: "running")]
+            + (0..<500).map { YimiItem(id: "her-\($0)", kind: .her, text: "history", date: start.addingTimeInterval(Double($0))) }
+        let card = activity("running", state: .running)
+        let orphan = activity("orphan")
+        let layout = YimiActivityLayout(items: items, activities: [card, orphan], consumer: nil)
+        XCTAssertEqual(layout.under["request"]?.map(\.id), ["running"])
+        XCTAssertEqual(layout.under["her-0"]?.map(\.id), ["orphan"])
+        XCTAssertEqual(layout.anchor(for: card), "request")
+        XCTAssertTrue(layout.leading.isEmpty)
+        XCTAssertEqual(layout.unanchored.map(\.id), ["orphan"])
+        XCTAssertTrue(items.suffix(80).allSatisfy { layout.under[$0.id] == nil })
+    }
+
+    func testReplayUsesStartedAtAndPreservesCardOrderWithinChronologicalSlots() {
+        let start = ISO8601.utc.date(from: "2026-10-24T00:00:00.000Z")!
+        let items = [
+            YimiItem(id: "first", kind: .her, text: "first", date: start),
+            YimiItem(id: "last", kind: .her, text: "last", date: start.addingTimeInterval(120))
+        ]
+        func replay(at arrival: Date) -> YimiActivityLayout {
+            YimiActivityLayout(items: items, activities: [
+                activity("before", at: "2026-10-23T23:59:00.000Z", arrivedAt: arrival),
+                activity("between-a", at: "2026-10-24T00:01:00.000Z", arrivedAt: arrival),
+                activity("between-b", at: "2026-10-24T00:00:30Z", arrivedAt: arrival),
+                activity("new", state: .running, at: "2026-10-24T00:03:00.000Z", arrivedAt: arrival)
+            ], consumer: nil)
+        }
+        for arrival in [start, start.addingTimeInterval(86_400)] {
+            let layout = replay(at: arrival)
+            XCTAssertEqual(layout.leading.map(\.id), ["before"])
+            XCTAssertEqual(layout.under["first"]?.map(\.id), ["between-a", "between-b"])
+            XCTAssertEqual(layout.under["last"]?.map(\.id), ["new"])
+        }
+    }
+
+    func testEmptyHistoryPlacesOrphanBeforeAnyRows() {
+        let layout = YimiActivityLayout(items: [], activities: [activity("missing")], consumer: nil)
+        XCTAssertEqual(layout.leading.map(\.id), ["missing"])
+        XCTAssertTrue(layout.under.isEmpty)
     }
 
     @MainActor func testOwnerScaleActivityProjection() {

@@ -463,16 +463,24 @@ for (const constraint of ['attempts','deadline','retention'] as const) test(`kno
 });
 
 test('generic uncertainty stays blocked; lost acceptance recovers under configured same-key budget', async t => {
+  let now=Date.now();t.mock.method(Date,'now',()=>now);
   for (const mode of ['generic','lost']) {
     const f=await fixture(t,{native_retry:retry});const a=f.admission();const d=await f.d(mode);const next=await f.d(`${mode}-next`);
-    const retryWake=fence(),pause=(a as unknown as {pause(ms:number):Promise<void>}).pause.bind(a);let first=true;
-    (a as unknown as {pause(ms:number):Promise<void>}).pause=async ms=>{if(first){first=false;await retryWake.block();}await pause(ms);};
+    const retryWake=fence(),settled=Promise.withResolvers<void>();let first=true;
+    // Storage latency must not consume the retry/deadline budget; only the owner's requested backoff advances time.
+    (a as unknown as {pause(ms:number|Promise<void>):Promise<void>}).pause=async ms=>{
+      if(first){first=false;await retryWake.block();}if(typeof ms==='number')now+=ms;else await ms;
+    };
+    a.setStateOwner(async entry=>{
+      if(entry.d.processed_event_id===d.processed_event_id&&(mode==='lost'?entry.record.state==='running':
+        entry.record.state==='reconcile_required'&&entry.record.attempt_count===retry.max_attempts))settled.resolve();
+    });
     if(mode==='lost')f.native.lost=true;else f.native.create=async()=>{f.native.creates++;throw new ContractError('HERMES_HTTP_503',503);};
     try{
       await a.admit(d,'session','skill');await retryWake.entered;
       assert.equal(a.get('owner','session',d.processed_event_id)?.state,'reconcile_required');
       await a.admit(next,'session','skill');retryWake.release();
-      await until(()=>mode==='lost'?a.get('owner','session',d.processed_event_id)?.state==='running':f.native.creates===retry.max_attempts);
+      await settled.promise;
       assert.equal(f.native.creates,mode==='lost'?2:retry.max_attempts);assert.equal(f.native.logicalRuns,mode==='lost'?1:0);
       assert.equal(a.get('owner','session',next.processed_event_id)?.state,'pending');
     }finally{retryWake.release();await a.close();}

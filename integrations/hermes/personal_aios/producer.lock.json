@@ -7,9 +7,9 @@
   },
   "patch": {
     "path": "native-context.patch",
-    "sha256": "de75a336b391159dbcc63c194f998283a8483ce8b32d3ec5330688a8d1145e12"
+    "sha256": "cfbd217b1cdd822e972d06da331eeac28957922baa8d5cddb0864603d9493e2e"
   },
-  "result_tree": "fa701b7b615dccc181cb948b763f3a146713d21b",
+  "result_tree": "e667679067df25d7bc9620b96793141d092fb4df",
   "shape_sha256": "b725baece0ba60cdcf1789b5964224e94a08768c3cd252ed30a12a517ebda210",
   "producer": {
     "publisher": "gateway/platforms/api_server_runs.py",
@@ -19,7 +19,7 @@
     "pin": "01-product-half-finished/backend/services/personal-aios-integration/src/hermes-client.ts",
     "shape_schema": "01-product-half-finished/backend/services/personal-aios-integration/src/native-run.shape.schema.json"
   },
-  "exported_from_commit": "76fffc4c3a7cd320796072170175d9ef6273357e",
+  "exported_from_commit": "1ff14641288f579529a2004d4d1f7430b0fc0a96",
   "residual_patch_status": "TEMPORARY",
   "build_products": {
     "dockerfile_sha256": "96f5e732fbf60c96bc8416a33f838470ddf126df0d2a4d0c7a393967198f2eda",

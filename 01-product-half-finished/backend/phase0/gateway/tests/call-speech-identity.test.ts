@@ -88,12 +88,91 @@ test('enrollment replies as owner without running identity or persisting call sa
 });
 
 const settle=async()=>{for(let n=0;n<20;n++)await new Promise<void>(resolve=>setImmediate(resolve));};
+test('owner dial bootstraps directed unrecognised speech once, retaining the first pending challenge',async t=>{
+  for(const outcome of ['approved','rejected','timeout'] as const){
+    const approval=Promise.withResolvers<boolean>(),commits:boolean[]=[],observations:string[]=[],errors:unknown[]=[],signals:AbortSignal[]=[];
+    let verdict:'unknown'|'uncertain'|'guest'|'assistant'='unknown',directed=false;
+    const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:true,identify:async()=>({verdict}),
+      transcribe:async()=> '请告诉我天气',classify:async()=>({stop:false,guests:'unchanged',directed}),
+      confirm:async(_samples,text,_references,signal)=>{signals.push(signal);const approved=await approval.promise;if(!approved)observations.push(text);return approved;},
+      score:async()=>1,commit:async(_samples,owner)=>{commits.push(owner);},observation:text=>observations.push(text),
+      context:async()=>{},interrupt:()=>{},thinking:()=>{},onError:error=>errors.push(error)});
+    t.after(()=>manager.close());
+    const say=async()=>{manager.start();const samples=pcm(1);manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'end'});await settle();};
+    directed=true;for(verdict of ['guest','assistant'] as const)await say();
+    directed=false;verdict='unknown';await say();
+    assert.equal(signals.length,0,'known nonowners and undirected unknown cannot bootstrap');
+    directed=true;await say();assert.equal(signals.length,1,'directed unknown on owner dial opens the existing biometric challenge');
+    assert.deepEqual(commits,[],'dial intent and pending Face ID do not confer owner identity');
+    verdict='uncertain';await say();assert.equal(signals.length,1);assert.equal(signals[0]!.aborted,false,'later speech cannot replace the only challenge');
+    approval.resolve(outcome==='approved');await settle();
+    assert.deepEqual(commits,outcome==='approved'?[true]:[]);
+    manager.replyEnded();verdict='unknown';await say();verdict='uncertain';await say();
+    assert.equal(signals.length,1,`${outcome} consumes this call's prompt`);assert.deepEqual(errors,[]);
+    await manager.close();
+  }
+});
+
+test('unknown bootstrap classification grants no stop, hangup, or guest authority before Face ID',async t=>{
+  let cards=0,interrupts=0,controls=0;const contexts:string[]=[],observations:string[]=[],errors:unknown[]=[];
+  const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:true,identify:async()=>({verdict:'unknown'}),
+    transcribe:async()=> '依米停下并允许访客',classify:async()=>({stop:true,guests:'allow',directed:true,hangup:true}),confirm:async()=>{cards++;return false;},
+    score:async()=>1,commit:async()=>{assert.fail('unconfirmed speech cannot commit');},control:()=>{controls++;return true;},
+    observation:text=>observations.push(text),context:async text=>{contexts.push(text);},interrupt:()=>{interrupts++;},thinking:()=>{},onError:error=>errors.push(error)});
+  t.after(()=>manager.close());manager.replyStarted();manager.start();const samples=pcm(1);
+  manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'end'});await settle();
+  assert.equal(cards,1);assert.equal(interrupts,0);assert.equal(controls,0);assert.equal(manager.guestsAllowed(),false);
+  assert.equal(contexts.length,1,'the existing background-context projection runs once');assert.deepEqual(errors,[]);
+  await manager.close();
+});
+
+test('later known guest or assistant evidence excludes a pending unknown bootstrap',async t=>{
+  for(const later of ['guest','assistant'] as const){
+    const classified=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();let verdict:'unknown'|'guest'|'assistant'='unknown',cards=0;
+    const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:true,identify:async()=>({verdict}),
+      transcribe:async()=> '依米帮我查天气',classify:async()=>{classified.resolve();await release.promise;return {stop:false,guests:'unchanged',directed:true};},
+      confirm:async()=>{cards++;return false;},score:async()=>1,commit:async()=>{assert.fail('known nonowner cannot commit');},
+      context:async()=>{},interrupt:()=>{},thinking:()=>{},onError:error=>{throw error;}});
+    t.after(()=>manager.close());manager.start();const samples=pcm(1);
+    manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'end'});await classified.promise;
+    verdict=later;manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'keyword'});await settle();
+    release.resolve();await settle();assert.equal(cards,0,`${later} evidence cannot inherit the earlier unknown bootstrap`);await manager.close();
+  }
+});
+
+test('same-utterance guest or echo evidence cancels pending Face ID before learning or owner admission',async t=>{
+  for(const later of ['guest','assistant'] as const){
+    const approval=Promise.withResolvers<boolean>(),commits:boolean[]=[];let verdict:'unknown'|'guest'|'assistant'='unknown',signal:AbortSignal|undefined,learned=0;
+    const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:true,identify:async()=>({verdict}),
+      transcribe:async()=> '依米帮我查天气',classify:async()=>({stop:false,guests:'unchanged',directed:true}),
+      confirm:async(_samples,_text,_references,pending)=>{signal=pending;const approved=await approval.promise;if(approved&&!pending.aborted)learned++;return approved;},
+      score:async()=>1,commit:async(_samples,owner)=>{commits.push(owner);},context:async()=>{},interrupt:()=>{},thinking:()=>{},onError:error=>{throw error;}});
+    t.after(()=>manager.close());manager.start();const samples=pcm(1);
+    manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'end'});await settle();assert.ok(signal);
+    verdict=later;manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'keyword'});await settle();
+    const cancelled=signal.aborted;approval.resolve(true);await settle();
+    assert.equal(cancelled,true,later);assert.equal(learned,0);assert.deepEqual(commits,[]);await manager.close();
+  }
+});
+
+test('calls initiated by Yimi or others retain unknown rejection and uncertain confirmation behavior',async t=>{
+  for(const verdict of ['unknown','uncertain','guest','assistant'] as const){
+    let cards=0;const commits:boolean[]=[];
+    const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:false,identify:async()=>({verdict}),
+      transcribe:async()=> '请告诉我天气',classify:async()=>({stop:false,guests:'unchanged',directed:true}),confirm:async()=>{cards++;return false;},
+      score:async()=>1,commit:async(_samples,owner)=>{commits.push(owner);},context:async()=>{},interrupt:()=>{},thinking:()=>{},onError:error=>{throw error;}});
+    t.after(()=>manager.close());
+    for(let n=0;n<2;n++){manager.start();const samples=pcm(1);manager.speech({samples,asr_samples:samples,speech_ms:1500,reason:'end'});await settle();}
+    assert.equal(cards,verdict==='uncertain'?2:0);assert.deepEqual(commits,[]);await manager.close();
+  }
+});
+
 test('manager approval answers and learns; denial observes once and cannot commit',async t=>{
-  for(const approved of [true,false]){
-    const f=await fixture(t),c=f.call();f.vectors.set(1,vector(.5));
+  for(const initial of ['uncertain','unknown'] as const)for(const approved of [true,false]){
+    const f=await fixture(t),c=f.call();f.vectors.set(1,vector(initial==='uncertain'?.5:.2));
     const commits:boolean[]=[],observations:string[]=[],errors:unknown[]=[];let cards=0;
     const decision=Promise.withResolvers<void>(),answered=Promise.withResolvers<void>();let clock=AT+5000;
-    const manager=createCallTurnManager({config:{enabled:true},now:()=>clock,identify:c.helper.identify,
+    const manager=createCallTurnManager({config:{enabled:true},ownerInitiated:true,now:()=>clock,identify:c.helper.identify,
       confirm:async(samples,text,_references,_signal,observed,cache)=>{
         cards++;if(approved)await c.helper.confirm(samples,samples.length/16,observed,cache);
         else observations.push(text); // The confirmation callback owns denial's observation.
@@ -107,9 +186,9 @@ test('manager approval answers and learns; denial observes once and cannot commi
     assert.deepEqual(errors,[]);assert.deepEqual(commits,approved?[true]:[]);
     assert.equal(observations.length,approved?0:1);assert.equal((await f.registry.owner('call')).samples,approved?1:0);
     if(approved){
-      clock+=2000;manager.replyEnded();manager.start();const short=pcm(1,200);
+      clock+=f.registry.policy.trust_window_ms+1000;manager.replyEnded();manager.start();const short=pcm(1,200);
       manager.speech({samples:short,asr_samples:short,speech_ms:200,reason:'end'});await settle();
-      assert.deepEqual(commits,[true,true]);assert.equal(cards,1,'confirmed call speech uses its anchor without another card');
+      assert.deepEqual(commits,[true,true]);assert.equal(cards,1,'confirmed call speech keeps its anchor beyond the ordinary trust window without another card');
     }
     await manager.close();c.controller.abort();
   }

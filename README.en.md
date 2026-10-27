@@ -1,6 +1,6 @@
 [中文](README.md) · **English**
 
-# Yimi · Personal AI OS (Personal Agent) 0.0.2
+# Yimi · Personal AI OS (Personal Agent) 0.1.5
 
 Everyone should have their own Yimi (依米).
 
@@ -8,13 +8,22 @@ Yimi is a personal assistant — your own Jarvis. She lives on your phone, glass
 
 She runs on a server you deploy, uses the models you choose, and uses connected data and devices within your authorization. Models can be changed through configuration; the memory you build up with her is not cleared when the model changes.
 
-Looking further ahead: once everyone has their own assistant, assistants could talk to each other directly — within what each user allows — to set up a dinner, find a time, or split a bill. People would then need far fewer apps and platforms to get everyday things done. That is the direction we are heading. Version 0.0.2 does not do this.
+Looking further ahead: once everyone has their own assistant, assistants could talk to each other directly, within what each user allows, to set up a dinner, find a time or split a bill. People would then need far fewer apps and platforms to get everyday things done. That is where we are heading; version 0.1.5 does not yet have complete A2A integration.
 
 The project started in October 2026 and is licensed under Apache-2.0.
 
-## What's new in 0.0.2
+## What is new in 0.1.5
 
-This release organizes what Yimi can do into uniform capability packages. Every capability now follows the same rules for how it is connected, how it reports its result, and how it is rolled back on its own when something goes wrong. That makes new skills easier for her to pick up, and her actions easier for you to check.
+- **Local models.** Once a local catalog is configured, settings can switch speech recognition, voice activity detection, voiceprint, wake-word and embedding models after a device-signed approval, and show the selected and effective versions, the previous version, progress and errors. The deployer must configure `local_catalog_file` and supply model files, absolute paths and trusted digests; this entry point does not download models. Changing a speech model requires a service restart; changing the voiceprint model also requires re-enrollment and calibration for each capture channel in use. Embedding models need their own runtime environment and take effect only after derived indexes are rebuilt. Face models are listed, but switching them goes through the face-enrollment flow.
+- **Voiceprints.** Voiceprint verification thresholds are persisted per capture channel, never decrease and have a floor of 0.65. Automatic gradual increases require enough confirmed samples from the same channel; restarting or lowering the configured value does not lower a saved threshold.
+- **Speaking preferences.** Yimi can choose preset tone, expression and habit preferences in the platform preference area, up to 1,500 characters, and restore the previous version. The platform stores the versions and projects them into a read-only `memories/PERSONALITY.md`; preferences cannot change her identity, locked personality or protected rules.
+- **Optional meeting assistant (end-to-end work in progress).** This version provides optional meeting-assistant server orchestration and a presentation protocol, covering slide reads, locating text from the discussion, edit previews, first-edit consent and reconciliation of unknown results. Actual Keynote reads and writes require a Mac executor that implements this protocol and returns edit-readback evidence. The included Mac source does not yet implement these tools, so enabling the package alone does not make the assistant usable. Connecting such an executor also requires a configured platform port and internal service credentials, an authorized local file, and the specified Mac and one pair of glasses online. The protocol limits edits to replacing text and appending paragraphs; the default deployment does not enable the package.
+
+## Foundations introduced in 0.0.2
+
+These capabilities were introduced in 0.0.2 and remain in the current version.
+
+Version 0.0.2 organized what Yimi can do into uniform capability packages. Every capability follows the same rules for how it is connected, how it reports its result, and how it is rolled back on its own when something goes wrong. That makes new skills easier for her to pick up, and her actions easier for you to check.
 
 - **Capability packages.** Mi Home, phone tasks, messaging, WeChat, desktop, Mac and built-in tools all connect as capability packages. Each package can be enabled and rolled back individually (single-host peripherals also need their corresponding switches enabled); actions that need consent share one consent contract, and results come back under one receipt contract. Capability packages are this project's layer on top of Hermes, not a change to upstream Hermes.
 - **Workshop.** The workshop handles discovery, building and self-tests. The platform capability registry owns registration checks, publication, monitoring and per-package rollback.
@@ -43,7 +52,7 @@ For a food order, step 4 goes to the phone executor instead. It opens the app on
 - **Workshop.** When no tool fits, she finds, writes and tests a new skill in an isolated workshop container and publishes it only after the test passes; published skills can be reverted. The workshop runs in its own container and network and builds with a separate Hermes profile. It does not mount the everyday conversation and memory data volumes; workshop snapshots, configuration and desktop inputs remain available. New tools are built as capability packages; see [Adding capabilities](docs/skills-and-connectors.md).
 - **Fixing herself.** Tell her something isn't working. Things she can change herself — phrasing, habits, skills — she changes on the spot. For product code, she can hand the problem to a separate build service. The fixed version runs the regression suite on staging, then ships at an idle moment; say "undo that" and the previous version comes back. This path requires a separately configured builder, isolated staging, a candidate repository, a release runner, credentials, snapshots and rollback. Automatic self-repair release is off in the first-run single-host entry point; see the [first-run guide](docs/first-run.md).
 
-## What 0.0.2 contains
+## What 0.1.5 contains
 
 | Part | Delivered as | Notes |
 | --- | --- | --- |
@@ -162,7 +171,7 @@ This command builds images from public source, generates missing internal creden
 
 Model configuration in `.env` is imported only on the first start: brain, vision and workshop settings, together with their provider keys, go into the model-settings authority. Later starts keep the stored settings and credentials, and editing `.env` does not overwrite them; change models or keys on the client's model and key settings page.
 
-Once running, `release.py` takes a new release through build, tests, staging, switch and rollback. Each host uses `current` and `previous` pointers for the current and previous releases. If a release that `release-watchdog` has taken over stays unhealthy or keeps restarting, the watchdog switches back to the previous one automatically. A rollback restores images and release files. So that the older release can still read your memory, the release rollback flow first projects the current core memory profile to it, and a later upgrade imports only the entries added during the rollback. A rollback does not undo database changes, client updates or external actions that already happened. Back up your data before deploying (back up and restore the model-settings authority together with its master key) and rehearse a restore in an isolated environment.
+Once running, `release.py` takes a new release through build, tests, staging, switch and rollback. Each host uses `current` and `previous` pointers for the current and previous releases. If a release that `release-watchdog` has taken over stays unhealthy or keeps restarting, the watchdog switches back to the previous one automatically. A rollback restores images and release files. So that the older release can still read your memory, the release rollback flow first projects the current core memory profile to it, and a later upgrade imports only the entries added during the rollback. Ordinary release rollback does not undo database migrations, client updates or external actions that already happened; if that release performed history isolation, rollback first restores its bound, completed and unexpired history cut, or resumes its bound unfinished recovery, while retaining current settings and other keep data. Back up your data before deploying (back up and restore the model-settings authority together with its master key) and rehearse a restore in an isolated environment.
 
 ## Where the code is
 
@@ -197,7 +206,7 @@ Except where individual files or [NOTICE](NOTICE) say otherwise, the code is lic
 
 To go deeper, read these three documents in order. They describe the same system: the technical plan covers the structure, the end-to-end flows walk through each process step by step, and the technical report explains why it is built this way and how well it works. The full texts are included below; expand a section to read it. The standalone files are [docs/en/technical-plan.md](docs/en/technical-plan.md), [docs/en/flows.md](docs/en/flows.md) and [docs/en/tech-report.md](docs/en/tech-report.md) (Chinese originals in `docs/`).
 
-Capabilities marked "in progress" are not live yet; other mechanisms are checked against the public 0.0.2 code, with historical measurements labelled separately.
+Capabilities marked "in progress" are not live yet; everything else reflects the public 0.1.5 code, and historical measurements are labelled as such.
 
 <details><summary><b>Technical plan</b></summary>
 
@@ -227,7 +236,7 @@ To get there, the assistant first has to be a complete, independent system that 
 | Safety through isolation, rollback and first-time confirmation, not refusal | Reads only check scope; external effects are confirmed the first time; every payment is confirmed | Gates and rollback (sections 5, 10, 12) |
 | Runs unchanged in the cloud | No mechanism specific to one personal computer on the product path | Container deployment (section 11) |
 
-What follows is based on the public 0.0.2 code. End-to-end capabilities marked "in progress" have not finished going live: code that is wired up is not the same as accepted in production.
+What follows is based on the public 0.1.5 code. End-to-end capabilities marked "in progress" have not finished going live: code that is wired up is not the same as accepted in production.
 
 ### 2 Overall structure
 
@@ -247,7 +256,7 @@ Hermes is pinned to upstream v0.22.5, commit `bf0203a` (`integrations/hermes/per
 
 | Attachment | What it does | Location |
 |---|---|---|
-| Thin plugin `yimi-gateway` | Registers three hooks, `pre_tool_call`, `transform_tool_result` and `post_tool_call`; hands decisions to the platform and turns results into receipts; 125 lines | `integrations/hermes/yimi_gateway/` |
+| Thin plugin `yimi-gateway` | Registers three tool hooks, `pre_tool_call`, `transform_tool_result` and `post_tool_call`, plus nine lifecycle hooks; hands decisions to the platform and turns results into receipts; 133 lines | `integrations/hermes/yimi_gateway/` |
 | Memory provider `personal_aios` | An upstream `MemoryProvider`; brings the platform-generated core profile into context every turn; native memory writes are off | `integrations/hermes/personal_aios/__init__.py` |
 | Package loading | At deploy time, validates each package's `plugin.json` and, from configuration and switches, generates Hermes's MCP server configuration and skill directories | `capability/packages/load.py`, `deploy/cloud/hermes-init.py` |
 
@@ -382,7 +391,7 @@ All devices share one timeline: the reply goes to the device where the sentence 
 - **Read-aloud**: Qwen TTS (default `qwen-audio-3.0-tts-plus`). Yimi's voice comes from Qwen's voice models, called through Alibaba Cloud DashScope.
 - **Local models on the server**: voice activity detection, recognition, voiceprint, wake word and face recognition use local ONNX models.
 
-Voiceprints are enrolled per capture channel, with thresholds of 0.65 / 0.45. Face ID or Touch ID opens a 60-second trust window that vouches for one call; an anchor within the call recognises short utterances. Per-device thresholds that only rise and never fall below 0.65 are still in progress.
+Voiceprints are enrolled per capture channel, with default initial thresholds of 0.65 / 0.45. Face ID or Touch ID opens a 60-second trust window that vouches for one call; an anchor within the call recognises short utterances. Voiceprint verification thresholds are persisted per capture channel, never decrease and have a floor of 0.65. Automatic gradual increases require enough confirmed samples from the same channel; restarting or lowering the configured value does not lower a saved threshold.
 
 ### 9 Memory L1–L5
 
@@ -421,7 +430,7 @@ L5 processing and storage run on budgets: small archive batches, disk admission 
 - The single-host entry starts 7 services by default: gateway, hermes, front, postgres, livekit, workshop, workshop-link.
 - Each host marks the current and previous versions with two pointers, `current` and `previous`, and the cleanup command keeps only those two. When `release-watchdog` finds a new version persistently unhealthy or restarting repeatedly, it switches back to the previous version.
 
-**Model roles.** Main conversation, background subagents, vision, the voice front end, read-aloud, and the fast and slow tiers of the phone executor are each configured separately. In the example configuration, the brain and subagents use DeepSeek, vision uses GLM hosted on SiliconFlow, and the phone executor uses DeepSeek plus GLM. The user can change the provider and model of the everyday roles in iPhone or Mac settings. A change is saved as a draft first; after biometric confirmation on the device it takes effect when the current task ends (Face ID on iPhone, Touch ID on an authorized Mac). Yimi can only read and draft, not change it directly. Local-model roles are read-only; switching local models in settings is still in progress.
+**Model roles.** Main conversation, background subagents, vision, the voice front end, read-aloud, and the fast and slow tiers of the phone executor are each configured separately. In the example configuration, the brain and subagents use DeepSeek, vision uses GLM hosted on SiliconFlow, and the phone executor uses DeepSeek plus GLM. The user can change the provider and model of the everyday roles in iPhone or Mac settings. A change is saved as a draft first; after biometric confirmation on the device it takes effect when the current task ends (Face ID on iPhone, Touch ID on an authorized Mac). Yimi can only read and draft, not change it directly. Once a local catalog is configured, settings can switch speech recognition, voice activity detection, voiceprint, wake-word and embedding models after a device-signed approval, and show the selected and effective versions, the previous version, progress and errors. The deployer must configure `local_catalog_file` and supply model files, absolute paths and trusted digests; this entry point does not download models. Changing a speech model requires a service restart; changing the voiceprint model also requires re-enrollment and calibration for each capture channel in use. Embedding models need their own runtime environment and take effect only after derived indexes are rebuilt. Face models are listed, but switching them goes through the face-enrollment flow.
 
 ### 12 Cloud phone executor
 
@@ -433,16 +442,17 @@ The executor phone is an Alibaba Cloud Wuying AgentBay cloud phone by default. T
 - **Repairing herself**: reproduce in the build workshop, find the root cause, minimal fix, add a regression test → ask the user once if a protected baseline is touched → immutable image, 7 offline test suites → re-check on the production host → switch when idle → watchdog. When Yimi changes the kernel, she first checks and syncs staging with production, then runs the regression in staging (in progress).
 - **Learning from experience**: Hermes's native background review writes experience into skills; workshop tools cannot be changed directly and must go through the build and registration process.
 
+**Speaking preferences.** Yimi can choose preset tone, expression and habit preferences in the platform preference area, up to 1,500 characters, and restore the previous version. The platform stores the versions and projects them into a read-only `memories/PERSONALITY.md`; preferences cannot change her identity, locked personality or protected rules.
+
+**Optional meeting assistant (end-to-end work in progress).** This version provides optional meeting-assistant server orchestration and a presentation protocol, covering slide reads, locating text from the discussion, edit previews, first-edit consent and reconciliation of unknown results. Actual Keynote reads and writes require a Mac executor that implements this protocol and returns edit-readback evidence. The included Mac source does not yet implement these tools, so enabling the package alone does not make the assistant usable. Connecting such an executor also requires a configured platform port and internal service credentials, an authorized local file, and the specified Mac and one pair of glasses online. The protocol limits edits to replacing text and appending paragraphs; the default deployment does not enable the package.
+
 ### 14 In progress
 
 | Capability | Status |
 |---|---|
 | Removing the residual kernel patch | In progress: still contains product logic such as run scopes and the main-agent division of labour |
-| Per-device voiceprint threshold that only rises (minimum 0.65) | In progress |
 | When Yimi changes the kernel, align with production first, then go through staging | In progress |
-| A personality-preferences area Yimi can edit herself | In progress |
-| Meeting assistant: edits the slides directly based on what the meeting decides | In progress |
-| Switching local models in settings | In progress |
+| Meeting assistant: read and edit local Keynote from the discussion | In progress: server orchestration and protocol exist; the included Mac source lacks the executor implementation |
 | Assistants negotiating directly with each other (A2A) | In progress: the current public version has no complete A2A integration; treating outside agents as guests and confirming outbound sends first is a design boundary |
 
 </details>
@@ -479,7 +489,7 @@ For structure and terms see the [Technical plan](docs/en/technical-plan.md); for
 |---|---|---|---|
 | 1 Wake and upload | Device | Glasses, iPhone and Mac listen locally for "Yimi" (依米) with a Sherpa keyword model, then upload the speech; or the user sends text directly | Outside the wake or follow-up window it is only an ambient observation and does not enter the request path |
 | 2 Transcribe and connect | Gateway | Validates the paired device's identity; for non-call input the Qwen realtime front end only transcribes, without answering or acting | Device identity mismatch: connection refused |
-| 3 Admission and identity | Integration (admission) | Voiceprint decision sets the run scope; the original goes into L5; the sentence is written to the timeline | Identity unconfirmed or a guest: only tools for that scope are open; no private information is read and no errands are run |
+| 3 Admission and identity | Integration (admission) | Voiceprint decision uses saved per-capture-channel verification thresholds and sets the run scope; the original goes into L5; the sentence is written to the timeline | Identity unconfirmed or a guest: only tools for that scope are open; no private information is read and no errands are run |
 | 4 Start the run | Integration → Hermes | `POST /v1/runs`; the run is bound to the admission record | Missing run binding: every later tool call is refused |
 | 5 First answer and delegation | Main agent | First says what it will do next, then delegates asynchronously to a subagent; the turn ends | Async pool full or the session does not support async callbacks: delegate synchronously instead |
 | 6 Act | Background subagent | Capability-package tool calls follow F2; native tools keep their own attachments | See F2 |
@@ -626,7 +636,7 @@ Yimi is a first step in that direction. She is a personal AI living in an iPhone
 
 The report has four parts. Part one is the skeleton: aiming not to modify the upstream kernel (in progress), capabilities in one format, "capability packages", and a structured receipt left by every call. Part two is always-on operation: recognising who is speaking, acting while talking, correctable memory, truthful reporting, and bounded data. Part three is self-growth: building her own tools, repairing herself, and learning from experience. The last part is what comes next. Each section starts with a scene, then goes into mechanisms, formulas and measured numbers.
 
-What follows is based on the public 0.0.2 code. Historical numbers are all labelled as early measurements; code that is wired up is not the same as accepted in production.
+What follows is based on the public 0.1.5 code. Historical numbers are all labelled as early measurements; code that is wired up is not the same as accepted in production.
 
 ### 1. A day with Yimi
 
@@ -660,11 +670,11 @@ We split the structure into three layers (Figure 1).
 
 **The kernel is the kernel.** Hermes is based on the pinned upstream v0.22.5 commit `bf0203a` and still carries a temporary residual patch. Capability packages and memory connect to the platform mainly through three attachments:
 
-1. The thin plugin `yimi-gateway`, 125 lines, which registers only three documented hooks: `pre_tool_call`, `transform_tool_result` and `post_tool_call`;
+1. The thin plugin `yimi-gateway` (133 lines), which registers three documented tool hooks (`pre_tool_call`, `transform_tool_result` and `post_tool_call`) plus nine lifecycle hooks;
 2. The memory provider `personal_aios`, an upstream `MemoryProvider`, with platform memory as the single authority;
 3. Package loading: at deploy time, each package's manifest is turned into Hermes MCP server configuration.
 
-The residual patch for the transition is marked temporary, and the goal is to remove it entirely (in progress); it still contains product logic such as run scopes and the main-agent division of labour. The patch is now 12,030 lines (actual changes +6,445/−1,007 lines, touching 151 files), 1,811 lines fewer than the 13,841 in the early record. The `personal_aios` attachment also still keeps some tool and middleware registrations that have not yet all moved into the thin plugin.
+The transitional residual patch is marked temporary, and the goal is to remove it entirely (in progress); it still contains product logic such as run scopes and the main-agent division of labour. The patch is now 11,972 lines (actual changes +6,437/−964 lines across 151 files), 1,869 lines fewer than the 13,841 in the early record. The `personal_aios` attachment also still holds some tool and middleware registrations that have not all moved into the thin plugin yet.
 
 **The platform services are the single authority.** Identity and admission, consent and payment, timeline and memory, delivery, voice and activity cards all live in the platform services. The new "capability gateway" lives there too, handling call decisions, the receipt ledger, fact sentences and report checking.
 
@@ -765,7 +775,7 @@ Figure 5 shows the trunk of the user decision, omitting branches such as matchin
 
 *Figure 5 | Speaker decision for one sentence. The dashed line is the anchor re-check valid only within the call.*
 
-**Results.** We deliberately avoid the closed-set rule "whoever scores highest is the speaker": there are always guests, the TV and echo around, and admitting "I don't recognise this" is safer than forcing a voice onto someone. Per-device verified thresholds that only rise and never fall below 0.65 (in progress) will further reduce misrecognition as samples accumulate.
+**Results.** We deliberately avoid the closed-set rule "whoever scores highest is the speaker": there are always guests, the TV and echo around, and admitting "I don't recognise this" is safer than forcing a voice onto someone. Voiceprint verification thresholds are persisted per capture channel, never decrease and have a floor of 0.65. Automatic gradual increases require enough confirmed samples from the same channel; restarting or lowering the configured value does not lower a saved threshold. This describes the threshold-update rule, not accepted misrecognition or recall performance.
 
 #### 3.2 Talking while getting things done
 
@@ -977,7 +987,13 @@ Engineering rules are also written as a skill, `engineering-handbook`: build and
 
 Always-on operation and self-growth come down to the same thing: every day she spends with the user leaves something that makes the next day better. A confirmed voice becomes a channel sample, a detour becomes a step in a skill, a complaint becomes a fix that goes live, and a missing capability becomes a new capability package.
 
-Several things are in progress: removing the residual kernel patch; per-device voiceprint thresholds that only rise; aligning with production before going through staging when Yimi changes the kernel; a personality-preferences area Yimi can edit herself; a meeting assistant that edits the slides directly based on what the meeting decides; and switching local models in settings.
+Version 0.1.5 provides local-model switching, per-capture-channel voiceprint verification thresholds that never decrease, and a speaking-preferences area, and adds optional meeting-assistant server orchestration and a protocol. Once a local catalog is configured, settings can switch speech recognition, voice activity detection, voiceprint, wake-word and embedding models after a device-signed approval, and show the selected and effective versions, the previous version, progress and errors. The deployer must configure `local_catalog_file` and supply model files, absolute paths and trusted digests; this entry point does not download models. Changing a speech model requires a service restart; changing the voiceprint model also requires re-enrollment and calibration for each capture channel in use. Embedding models need their own runtime environment and take effect only after derived indexes are rebuilt. Face models are listed, but switching them goes through the face-enrollment flow.
+
+**Speaking preferences.** Yimi can choose preset tone, expression and habit preferences in the platform preference area, up to 1,500 characters, and restore the previous version. The platform stores the versions and projects them into a read-only `memories/PERSONALITY.md`; preferences cannot change her identity, locked personality or protected rules.
+
+**Optional meeting assistant (end-to-end work in progress).** This version provides optional meeting-assistant server orchestration and a presentation protocol, covering slide reads, locating text from the discussion, edit previews, first-edit consent and reconciliation of unknown results. Actual Keynote reads and writes require a Mac executor that implements this protocol and returns edit-readback evidence. The included Mac source does not yet implement these tools, so enabling the package alone does not make the assistant usable. Connecting such an executor also requires a configured platform port and internal service credentials, an authorized local file, and the specified Mac and one pair of glasses online. The protocol limits edits to replacing text and appending paragraphs; the default deployment does not enable the package.
+
+Still in progress: removing the residual kernel patch; when Yimi changes her own kernel, aligning staging with production first and then completing a full-system staging regression; and implementing the meeting assistant's Mac executor to complete Keynote reads and writes.
 
 Further out: A2A integration between assistants is still in progress, and the current public version has no complete integration. Capability packages backed by another agent are also a later direction. When that day comes, Yimi can negotiate something directly with someone else's Yimi (another person's agent that comes to her is always treated as a guest first; her going to another person's agent counts as an external send and goes through first-time confirmation), and the two people only need to nod at the end.
 

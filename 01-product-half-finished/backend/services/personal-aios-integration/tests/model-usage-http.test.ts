@@ -127,6 +127,22 @@ test('service HTTP separates MCP token, binds submitting admission and exact rev
   assert.equal((await post('usage',{...start,attempt_id:'call-intent',request_id:'call-request',role:'call.intent',session_id:audio.raw_ref,source_context:callSource})).status,200);
   assert.equal(latest().owner_chat,true);
   assert.ok((await post('usage',{...start,attempt_id:'forged-call',role:'call.intent',session_id:audio.raw_ref,source_context:{...callSource,call_id:'other-call'}})).status>=400);
+  // A live call's microphone is one PCM stream whose head advances on every append. The classifier cites the exact
+  // revision of the utterance's first chunk, which later chunks (the rest of the utterance, the trailing silence) supersede.
+  const pcm={schema_version:EVENT_SCHEMA,event_id:'call-microphone-lane',device_id:'phone',device_type:'phone' as const,captured_at:new Date().toISOString(),
+    source:{channel:'fixture'},media_type:'audio' as const,mime:'audio/pcm',representation:'received_decoded_sample' as const,payload:Buffer.alloc(320)};
+  const pcmChunk=(seq:number)=>({track_id:'microphone',stream_epoch:'call-lane',seq,modality:'audio' as const,format:'pcm_s16le:16000:1',
+    source_range:{kind:'interval' as const,timebase_id:'received-pcm:call-lane',stream_epoch:'call-lane',start_ms:seq*10,end_ms:(seq+1)*10}});
+  const laneRef=`l5:${digest({event_id:pcm.event_id,principal_id:'real-owner',device_id:'phone'})}`;
+  await archive.bindCallTrack(laneRef,{call_id:'live-call',principal_id:'real-owner',track:'microphone'});
+  const uttered=(await (await archive.admitStream(pcm,trusted,pcmChunk(0))).commit).event;
+  await (await archive.admitStream(pcm,trusted,pcmChunk(1))).commit;
+  const liveSource={kind:'call',raw_ref:uttered.raw_ref,archive_revision:uttered.archive_revision,principal_id:'real-owner',device_id:'phone',call_id:'live-call',continuity:'call-continuity'};
+  const liveStart={...start,attempt_id:'live-call-intent',request_id:'live-call-request',role:'call.intent',session_id:laneRef,source_context:liveSource};
+  const live=await post('usage',liveStart);assert.equal(live.status,200,await live.text());
+  assert.equal((await post('usage',{...liveStart,phase:'terminal',status:'completed',input_tokens:5,output_tokens:1,original_usage:{prompt_tokens:5,completion_tokens:1}})).status,200);
+  assert.ok((await post('usage',{...liveStart,attempt_id:'unknown-revision',source_context:{...liveSource,archive_revision:'b'.repeat(64)}})).status>=400);
+  assert.ok((await post('usage',{...liveStart,attempt_id:'other-device',source_context:{...liveSource,device_id:'watch'}})).status>=400);
   release.resolve();let bound=false,lastRecord:unknown;
   for(let index=0;index<100;index++){
     const record=await admission.readOnly('real-owner','canonical-session',d.processed_event_id);

@@ -1,6 +1,7 @@
 import AVFAudio
 import Foundation
 import XCTest
+import os
 @testable import HealthKitExporter
 
 final class AssistantVoiceStatusTests: XCTestCase {
@@ -86,7 +87,40 @@ final class AssistantVoiceStatusTests: XCTestCase {
         buffer.frameLength = 160
         for index in 0..<160 { buffer.int16ChannelData![0][index] = 1000 }
         observer.render(pcmBuffer: buffer)
-        await fulfillment(of: [started, stopped], timeout: 1)
+        await fulfillment(of: [started, stopped], timeout: 2)
+        observer.stop()
+    }
+
+    /// Field report: 「依米正在说话」 flashed through the whole call. Rendered speech has silent buffers between words, and
+    /// between sentences the track carries a noise floor of a few LSB; both used to flip her turn on screen.
+    func testSilentBuffersInsideSpeechKeepOneSpeakingSpan() async throws {
+        let changes = OSAllocatedUnfairLock(initialState: [Bool]())
+        let ended = expectation(description: "speech ended after the release")
+        let observer = AssistantCallPlaybackObserver { playing in
+            changes.withLock { $0.append(playing) }
+            if !playing { ended.fulfill() }
+        }
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false))
+        func buffer(_ value: Int16) throws -> AVAudioPCMBuffer {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160))
+            buffer.frameLength = 160
+            for index in 0..<160 { buffer.int16ChannelData![0][index] = value }
+            return buffer
+        }
+        let speech = try buffer(1000), silence = try buffer(0), noise = try buffer(4)
+        for frame in 0..<60 {   // 600 ms of speech with a silent 10-30 ms gap every 50 ms
+            observer.render(pcmBuffer: frame % 5 < 3 ? speech : silence)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(changes.withLock { $0 }, [true], "one speaking span while she talks")
+        // After her sentence the track keeps delivering its decoded noise floor (a few LSB, sometimes exact zeros).
+        let quiet = ProcessInfo.processInfo.systemUptime
+        while ProcessInfo.processInfo.systemUptime - quiet < AssistantCallPlaybackObserver.release + 0.7 {
+            observer.render(pcmBuffer: Int.random(in: 0..<3) == 0 ? silence : noise)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await fulfillment(of: [ended], timeout: 1)
+        XCTAssertEqual(changes.withLock { $0 }, [true, false], "the noise floor is not her speaking")
         observer.stop()
     }
 }

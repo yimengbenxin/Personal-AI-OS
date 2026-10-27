@@ -30,6 +30,24 @@ struct CentralTimelineItem: Codable, Equatable, Sendable {
 
 /// Server sequence and content commit together; a partial item never advances the durable cursor.
 struct CentralTerminalState {
+    private(set) var historyEpoch: String?
+    private(set) var historyResetID: UUID?
+    private(set) var historyGeneration: UInt64 = 0
+    private(set) var historyEpochConfirmed = false
+
+    /// Called only from the authenticated ready packet. A persisted epoch makes reconnects idempotent.
+    @discardableResult mutating func applyHistoryEpoch(_ epoch: String?) -> Bool {
+        historyEpochConfirmed = epoch != nil
+        guard let epoch else { return false }
+        let changed = epoch != historyEpoch
+        if changed || historyGeneration == 0 { historyGeneration = AssistantHistoryFiles.nextGeneration() }
+        guard changed else { return false }
+        historyEpoch = epoch; historyResetID = UUID()
+        timeline = YimiConversationTimeline(); lastSeq = 0; syncHeadSeq = 0
+        completedSeqs = []; fragments = [:]; removed = []; removedBefore = 0
+        confirmations = []; requestID = nil; hasOlderHistory = true; initialSeed = false
+        return true
+    }
     private(set) var ownerIdentity: String?
 
     /// Only a source-authenticated session can bind new server timeline entries to an owner.
@@ -225,11 +243,27 @@ struct CentralTerminalState {
         return (true, nil)
     }
 
-    struct Cache: Codable { var ownerIdentity: String? = nil; let items: [YimiItem]; let lastSeq: Int; let removed: Set<Int>?; let removedBefore: Int?; var terminals: [CentralTerminal]? = nil; var hasOlderHistory: Bool? = nil }
-    func encodedCache() throws -> Data { try JSONEncoder().encode(Cache(ownerIdentity: ownerIdentity, items: timeline.items, lastSeq: lastSeq, removed: removed, removedBefore: removedBefore, terminals: terminals, hasOlderHistory: hasOlderHistory)) }
+    /// Identity of persisted facts; timeline revision avoids comparing retained history.
+    struct CacheProjection: Equatable {
+        let ownerIdentity: String?
+        let timelineRevision: UUID
+        let lastSeq: Int
+        let removed: Set<Int>
+        let removedBefore: Int
+        let terminals: [CentralTerminal]
+        let hasOlderHistory: Bool
+    }
+    var cacheProjection: CacheProjection {
+        CacheProjection(ownerIdentity: ownerIdentity, timelineRevision: timeline.revision, lastSeq: lastSeq,
+            removed: removed, removedBefore: removedBefore, terminals: terminals, hasOlderHistory: hasOlderHistory)
+    }
+
+    struct Cache: Codable { var ownerIdentity: String? = nil; let items: [YimiItem]; let lastSeq: Int; let removed: Set<Int>?; let removedBefore: Int?; var terminals: [CentralTerminal]? = nil; var hasOlderHistory: Bool? = nil; var historyEpoch: String? = nil }
+    func encodedCache() throws -> Data { try JSONEncoder().encode(Cache(ownerIdentity: ownerIdentity, items: timeline.items, lastSeq: lastSeq, removed: removed, removedBefore: removedBefore, terminals: terminals, hasOlderHistory: hasOlderHistory, historyEpoch: historyEpoch)) }
     mutating func restore(_ data: Data) throws {
         let cache = try JSONDecoder().decode(Cache.self, from: data)
         ownerIdentity = cache.ownerIdentity
+        historyEpoch = cache.historyEpoch
         terminals = cache.terminals ?? []
         hasOlderHistory = cache.hasOlderHistory ?? true
         timeline = YimiConversationTimeline(items: cache.items); lastSeq = cache.lastSeq
@@ -246,21 +280,92 @@ extension YimiConversationTimeline {
     }
 }
 
+/// One process gate covers both history writers. A pending marker resumes an interrupted multi-account purge.
+enum AssistantHistoryFiles {
+    private static let gate = NSRecursiveLock()
+    private static var counter: UInt64 = 0
+    private static var generations: [String: (epoch: String, generation: UInt64)] = [:]
+    static func nextGeneration() -> UInt64 {
+        locked { counter &+= 1; return counter }
+    }
+    static func locked<T>(_ body: () throws -> T) rethrows -> T {
+        gate.lock(); defer { gate.unlock() }; return try body()
+    }
+    private static func marker(_ folder: URL, pending: Bool = false) -> URL {
+        folder.appendingPathComponent(pending ? "yimi-history-epoch.pending" : "yimi-history-epoch")
+    }
+    static func permits(_ epoch: String?, in folder: URL) -> Bool {
+        if let latest = generations[folder.standardizedFileURL.path], latest.epoch != epoch { return false }
+        guard !FileManager.default.fileExists(atPath: marker(folder, pending: true).path) else { return false }
+        let saved = try? String(contentsOf: marker(folder), encoding: .utf8)
+        return saved == nil || saved == epoch
+    }
+    @discardableResult static func retire(_ epoch: String, generation: UInt64 = 0, in folder: URL, desktop: Bool = false) throws -> Bool {
+        try locked {
+            let key = folder.standardizedFileURL.path
+            if let latest = generations[key], latest.epoch != epoch, generation <= latest.generation {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            if generations[key] == nil || generation >= generations[key]!.generation {
+                generations[key] = (epoch, generation)
+            }
+            let pending = marker(folder, pending: true)
+            if permits(epoch, in: folder),
+               (try? String(contentsOf: marker(folder), encoding: .utf8)) == epoch { return false }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(epoch.utf8).write(to: pending, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            for path in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                let name = path.lastPathComponent
+                if name.hasPrefix("yimi-conversation") || name.hasPrefix("yimi-terminal-") || desktop && name.hasPrefix("conversation.") {
+                    try FileManager.default.removeItem(at: path)
+                }
+            }
+            let temporary = FileManager.default.temporaryDirectory
+            for path in try FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)
+                where path.lastPathComponent.hasPrefix("paios-formal-voice-") {
+                try FileManager.default.removeItem(at: path)
+            }
+            try Data(epoch.utf8).write(to: marker(folder), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try FileManager.default.removeItem(at: pending)
+            return true
+        }
+    }
+}
+
 /// Encoding and atomic replacement run outside the UI actor; delayed older tasks cannot replace newer caches.
 actor CentralTerminalCacheWriter {
     private var written: UInt64 = 0
+    private var projection: CentralTerminalState.CacheProjection?
+    private var destination: URL?
 
     func write(_ state: CentralTerminalState, version: UInt64, to url: URL) throws {
         guard version > written else { return }
+        try AssistantHistoryFiles.locked {
+        let folder = url.deletingLastPathComponent()
+        var retired = false
+        if state.historyEpochConfirmed, let epoch = state.historyEpoch {
+            retired = try AssistantHistoryFiles.retire(epoch, generation: state.historyGeneration, in: folder, desktop: url.lastPathComponent == "conversation.json")
+        }
+        guard AssistantHistoryFiles.permits(state.historyEpoch, in: folder) else { throw CocoaError(.fileWriteNoPermission) }
+        let incoming = state.cacheProjection
+        if !retired, destination == url, projection == incoming {
+            written = version
+            return
+        }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         try state.encodedCache().write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         written = version
+        projection = incoming
+        destination = url
+        }
     }
 
     func remove(version: UInt64, at url: URL) throws {
         guard version > written else { return }
         written = version
+        projection = nil
+        destination = nil
         if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
     }
 }

@@ -20,6 +20,25 @@ import staging_snapshot_transfer as transport
 from staging_snapshot_stack import Stack
 
 
+@pytest.fixture(autouse=True)
+def deployment_clock(tmp_path, monkeypatch):
+    config = tmp_path / 'production.json'
+    config.write_text(json.dumps({'time_zone': 'Asia/Taipei'}))
+    monkeypatch.setattr(transport, 'PRODUCT_CONFIG', config)
+
+
+@pytest.mark.parametrize('zone,hour', [('America/Los_Angeles', 3), ('UTC', 10), ('Asia/Taipei', 18)])
+def test_snapshot_clock_uses_rendered_deployment_zone(zone, hour):
+    transport.PRODUCT_CONFIG.write_text(json.dumps({'time_zone': zone}))
+    instant = datetime(2026, 10, 18, 10, tzinfo=timezone.utc)
+    assert transport.local_time(instant).hour == hour
+    if hour == 3:
+        assert transport.night(instant).hour == 3
+    else:
+        with pytest.raises(ValueError, match='deployment-local'):
+            transport.night(instant)
+
+
 @pytest.fixture
 def envelope(tmp_path):
     if not shutil.which('age') or not shutil.which('age-keygen'):
@@ -257,9 +276,9 @@ def test_daytime_capture_is_explicit_and_keeps_its_stop_budget(tmp_path, monkeyp
             return SimpleNamespace(stdout='gateway\nhermes\n' if '--services' in args else 'id')
         def counts(self):
             raise ValueError('fixture PG unavailable')
-    daytime = lambda: datetime(2026, 10, 18, 7, tzinfo=timezone.utc).astimezone(transport.taiwan().tzinfo)
+    daytime = lambda: datetime(2026, 10, 18, 7, tzinfo=timezone.utc).astimezone(transport.local_time().tzinfo)
     monkeypatch.setattr(snapshot, 'Stack', Failed)
-    monkeypatch.setattr(snapshot, 'taiwan', daytime)
+    monkeypatch.setattr(snapshot, 'local_time', daytime)
     monkeypatch.setattr(snapshot, 'night', lambda: transport.night(datetime(2026, 10, 18, 7, tzinfo=timezone.utc)))
     monkeypatch.setattr(snapshot.shutil, 'which', lambda tool: '/fixture/' + tool)
     monkeypatch.setattr(snapshot.signal, 'alarm', lambda seconds: alarms.append(seconds))
@@ -309,7 +328,7 @@ def test_structural_cut_omits_raw_l5_day_or_night_and_declares_window_zero(tmp_p
     def encrypt(work, output, recipient):
         sealed.append(json.loads((work / 'manifest.json').read_text())); Path(output).write_bytes(b'age')
     monkeypatch.setattr(snapshot, 'Stack', Fixture)
-    monkeypatch.setattr(snapshot, 'taiwan', lambda: datetime(2026, 10, 18, 8, tzinfo=timezone.utc).astimezone(transport.taiwan().tzinfo))
+    monkeypatch.setattr(snapshot, 'local_time', lambda: datetime(2026, 10, 18, 8, tzinfo=timezone.utc).astimezone(transport.local_time().tzinfo))
     monkeypatch.setattr(snapshot.shutil, 'which', lambda tool: '/fixture/' + tool)
     monkeypatch.setattr(snapshot.signal, 'alarm', lambda seconds: None)
     monkeypatch.setattr(snapshot.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout='{"Status":"exited","ExitCode":0}'))

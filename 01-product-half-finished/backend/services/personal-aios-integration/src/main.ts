@@ -1,9 +1,13 @@
 import type {ThinkingModeConfiguration} from './voice/contracts.ts';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {RuntimeEventStore,installRuntimeEventStore,emitRuntimeEvent} from './self-events.ts';
+import {openModelSettingsEmbedding} from './model-settings-embedding-runtime.ts';
+import {localSpeechRuntime} from './model-settings-local-runtime.ts';
+import {localSpeakerIdentity,verifyLocalModel,type LocalModelSelection} from './model-settings-local-catalog.ts';
 import {PaymentAuthority} from './payment/authority.ts';
 import {openModelSettingsResources,type ModelSettingsConfiguration} from './model-settings-resources.ts';
 import {OwnerOverride} from './owner-override.ts';
+import {deploymentTimeZone} from './deployment-time.ts';
 import {parsePaymentConfig} from './payment/config.ts';
 import {PAYMENT_MAX_ENROLMENT_CHARS} from './payment/wire-budget.ts';
 import {loadRegistryCipher} from './voiceprint/cipher.ts';
@@ -24,7 +28,7 @@ import { ActionAuthority, initializeActionSchema } from './actions/authority.ts'
 import { configureMediaReplay, parseMediaReplayConfiguration } from './media/setup.ts';
 import { createQwenVoiceResources, DASHSCOPE_DIALECTS, type DashScopeDialect } from './voice/qwen-resources.mjs';
 import { createFormalVoiceAuthority } from './voice/formal-authority.ts';
-import { configuredScoring, speakerModelIdentity, VoiceprintRegistry, type VoiceprintScoringConfig, type VoiceprintThresholds } from './voiceprint/registry.ts';
+import { configuredScoring, speakerModelIdentity, VoiceprintRegistry, DEFAULT_VOICEPRINT_POLICY, type VoiceprintScoringConfig, type VoiceprintThresholds, type AdaptiveVerifiedPolicy } from './voiceprint/registry.ts';
 import { AmbientJournal, parseAmbientPolicy, type AmbientPolicy } from './ambient/journal.ts';
 import { HealthStore } from './health/store.ts';
 import { ContactsStore } from './contacts/store.ts';
@@ -49,13 +53,14 @@ function validThinkingMode(value:unknown):value is ThinkingModeConfiguration {
 }
 
 export interface CentralProvisionConfiguration {
+  time_zone?:string;
   model_settings?:ModelSettingsConfiguration;
   identity?:{owner_override_ttl_s?:number};
   payment?:unknown;
   storage_root: string; lock_file: string; port: number;
   shutdown_drain_ms?:number;
   session_folding?:boolean;
-  archive_tiering?:{cold:import('./cold-storage.ts').ColdConfig;hot_days?:number;min_free_bytes?:number;min_free_inodes?:number;max_upload_kbps?:number};
+  archive_tiering?:{cold:import('./cold-storage.ts').ColdConfig;hot_days?:number;min_free_bytes?:number;min_free_inodes?:number;max_upload_kbps?:number;paused?:boolean};
   tts?: {provider: 'dashscope'; model: string; voice: string; sample_rate: number; endpoint?: string; instruction?: string; key_file?: string};
   /** Voice reply transport only; the target device is the paired device the execution owner was built for. */
   formal_voice?: {transport: 'wav_byte_stream_v1'};
@@ -75,7 +80,7 @@ export interface CentralProvisionConfiguration {
   max_event_bytes: number; max_read_bytes: number; admission: AdmissionPolicy;
   core_profile?: {enabled:true; profile_home:string; native_profile_home?:string};
   /** Host voiceprint registry (owner + other-person profiles, `<storage_root>/voiceprints`). */
-  voiceprint?: {speaker_model: {file: string; dim: number}; thresholds?: Partial<VoiceprintThresholds>; max_clusters?: number;
+  voiceprint?: {speaker_model: {file: string; dim: number}; thresholds?: Partial<VoiceprintThresholds>; adaptive_verified?: Partial<AdaptiveVerifiedPolicy>; max_clusters?: number;
     scoring?: VoiceprintScoringConfig; trust_window_ms?: number;
     confirmation_ttl_ms?: number; encryption_key_file?:string; enrolment_sentences?:string[]};
   /** Ambient lane policy (conversation gap, wake follow window, context window); the journal is `<storage_root>/ambient-journal`. */
@@ -84,12 +89,12 @@ export interface CentralProvisionConfiguration {
 }
 // True means required. Exhaustive typing keeps accepted fields and optionality tied to the provisioner's contract.
 export const CENTRAL_PROVISION_CONFIGURATION_FIELDS = Object.freeze({
-  storage_root:true, lock_file:true, port:true, hermes_base_url:true, hermes_key_file:true, internal_key_file:true, skill_file:true,
+  time_zone:false, storage_root:true, lock_file:true, port:true, hermes_base_url:true, hermes_key_file:true, internal_key_file:true, skill_file:true,
   native_request_timeout_ms:true, http_request_timeout_ms:true, max_request_bytes:true, max_event_bytes:true, max_read_bytes:true,
   admission:true, model_route:false, tts:false, formal_voice:false, voice_frontend:false, core_profile:false,
   voiceprint:false, ambient:false, visual:false, archive_tiering:false, shutdown_drain_ms:false, session_folding:false, payment:false, identity:false,model_settings:false,
 } satisfies {[K in keyof CentralProvisionConfiguration]-?: {} extends Pick<CentralProvisionConfiguration,K> ? false : true});
-export type CentralProvisionResources = Omit<PersonalAIOSAssemblyResources, 'devices' | 'sourceAuthority' | 'media' | 'output'> & {self_events?:RuntimeEventStore;tts?: DashScopeTts; formal_voice?: CentralProvisionConfiguration['formal_voice']};
+export type CentralProvisionResources = Omit<PersonalAIOSAssemblyResources, 'devices' | 'sourceAuthority' | 'media' | 'output'> & {self_events?:RuntimeEventStore;tts?: DashScopeTts; formal_voice?: CentralProvisionConfiguration['formal_voice'];local_models?:ReturnType<typeof localSpeechRuntime>};
 interface Configuration extends CentralProvisionConfiguration {
   mode: 'isolated_fixture' | 'isolated_provider'; devices: FixtureRegisteredDevice[];
   fixture_database?: {url: string; schema: string; migration_file: string};
@@ -154,6 +159,7 @@ const validSessionOptions = (options: unknown) => options !== null && typeof opt
     key === 'temperature' ? typeof value === 'number' && value >= 0 && value < 2 :
     key === 'presence_penalty' ? typeof value === 'number' && value >= -2 && value <= 2 : false);
 export async function provisionCentralResources(config: CentralProvisionConfiguration) {
+  const time_zone=deploymentTimeZone(config.time_zone);
   check(config.identity===undefined||config.identity!==null&&typeof config.identity==='object'&&!Array.isArray(config.identity)&&
     Object.keys(config.identity).every(key=>key==='owner_override_ttl_s')&&
     (config.identity.owner_override_ttl_s===undefined||Number.isSafeInteger(config.identity.owner_override_ttl_s)&&config.identity.owner_override_ttl_s>=0),
@@ -161,15 +167,15 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
   check(config.shutdown_drain_ms===undefined||Number.isSafeInteger(config.shutdown_drain_ms)&&config.shutdown_drain_ms>15000&&config.shutdown_drain_ms<=DEFAULT_SHUTDOWN_DRAIN_MS,'SHUTDOWN_DRAIN_INVALID');
   check(config.session_folding===undefined||typeof config.session_folding==='boolean','INVALID_SESSION_FOLDING');
   const settings=config.archive_tiering;
-  check(settings===undefined||settings!==null&&typeof settings==='object'&&Object.keys(settings).every(k=>['cold','hot_days','min_free_bytes','min_free_inodes','max_upload_kbps'].includes(k))&&
+  check(settings===undefined||settings!==null&&typeof settings==='object'&&Object.keys(settings).every(k=>['cold','hot_days','min_free_bytes','min_free_inodes','max_upload_kbps','paused'].includes(k))&&
     settings.cold!==null&&typeof settings.cold==='object'&&Object.keys(settings.cold).sort().join(',')==='password_file,url,username'&&
     typeof settings.cold.url==='string'&&typeof settings.cold.username==='string'&&settings.cold.username.length>0&&
     typeof settings.cold.password_file==='string'&&isAbsolute(settings.cold.password_file)&&
     Number.isSafeInteger(settings.hot_days??2)&&(settings.hot_days??2)>=1&&Number.isSafeInteger(settings.min_free_bytes??1073741824)&&
     (settings.min_free_bytes??1073741824)>0&&Number.isSafeInteger(settings.min_free_inodes??10000)&&
     (settings.min_free_inodes??10000)>0&&(settings.max_upload_kbps===undefined||Number.isSafeInteger(settings.max_upload_kbps)&&
-    settings.max_upload_kbps>0),'INVALID_ARCHIVE_TIERING');
-  const tier=settings?{cold:settings.cold,hot_days:settings.hot_days??2,min_free_bytes:settings.min_free_bytes??1073741824,min_free_inodes:settings.min_free_inodes??10000,max_upload_kbps:settings.max_upload_kbps??2000}:undefined;
+    settings.max_upload_kbps>0)&&(settings.paused===undefined||typeof settings.paused==='boolean'),'INVALID_ARCHIVE_TIERING');
+  const tier=settings?{cold:settings.cold,hot_days:settings.hot_days??2,min_free_bytes:settings.min_free_bytes??1073741824,min_free_inodes:settings.min_free_inodes??10000,max_upload_kbps:settings.max_upload_kbps??2000,paused:settings.paused??false}:undefined;
   check(Number.isSafeInteger(config.port) && config.port > 1024 && config.port < 65536, 'INVALID_SERVICE_PORT');
   check(config.formal_voice === undefined || config.formal_voice !== null && typeof config.formal_voice === 'object' &&
     !Array.isArray(config.formal_voice) && config.tts && config.formal_voice.transport === 'wav_byte_stream_v1' &&
@@ -216,13 +222,15 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
     'CORE_PROFILE_CONFIG_INVALID');
   if (memory) check(await fs.realpath(memory.profile_home).then(real => real === memory.profile_home, () => false) &&
     (await fs.stat(memory.profile_home)).isDirectory(), 'CORE_PROFILE_HOME_UNRESOLVED');
-  const print = config.voiceprint;
+  let print = config.voiceprint;
   check(print === undefined || print !== null && typeof print === 'object' && !Array.isArray(print) &&
-    Object.keys(print).every(key => ['speaker_model', 'thresholds', 'max_clusters', 'confirmation_ttl_ms','encryption_key_file','enrolment_sentences','scoring','trust_window_ms'].includes(key)) &&
+    Object.keys(print).every(key => ['speaker_model', 'thresholds', 'adaptive_verified', 'max_clusters', 'confirmation_ttl_ms','encryption_key_file','enrolment_sentences','scoring','trust_window_ms'].includes(key)) &&
     print.speaker_model && Object.keys(print.speaker_model).sort().join(',') === 'dim,file' && typeof print.speaker_model.file === 'string' &&
     isAbsolute(print.speaker_model.file) && Number.isSafeInteger(print.speaker_model.dim) &&
     (print.thresholds === undefined || print.thresholds !== null && typeof print.thresholds === 'object' &&
-      Object.keys(print.thresholds).every(key => ['owner_verified', 'owner_uncertain', 'cluster', 'enroll_consistency', 'assistant'].includes(key))),
+      Object.keys(print.thresholds).every(key => ['owner_verified', 'owner_uncertain', 'cluster', 'enroll_consistency', 'assistant','call_anchor','trusted_centroid','enroll_match'].includes(key))) &&
+    (print.adaptive_verified === undefined || print.adaptive_verified !== null && typeof print.adaptive_verified === 'object' &&
+      !Array.isArray(print.adaptive_verified)),
     'VOICEPRINT_CONFIGURATION_INVALID');
   check(print?.trust_window_ms===undefined||Number.isSafeInteger(print.trust_window_ms)&&print.trust_window_ms>0,'VOICEPRINT_CONFIGURATION_INVALID');
   check(print?.encryption_key_file===undefined||typeof print.encryption_key_file==='string'&&isAbsolute(print.encryption_key_file),'VOICEPRINT_CONFIGURATION_INVALID');
@@ -232,24 +240,25 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
   const paymentKey=paymentConfig.executor_key_file?await key(paymentConfig.executor_key_file):undefined;
   check(paymentKey===undefined||paymentKey.length>=32,'PAYMENT_EXECUTOR_KEY_INVALID');
   const ambientPolicy = parseAmbientPolicy(config.ambient ?? {});
-  const [nativeKey, internalKey, skill, voiceKey, speakerModel, ttsKey] = await Promise.all([key(config.hermes_key_file), key(config.internal_key_file),
+  const [nativeKey, internalKey, skill, voiceKey, ttsKey] = await Promise.all([key(config.hermes_key_file), key(config.internal_key_file),
     fs.readFile(config.skill_file, 'utf-8'), voice ? key(voice.key_file) : undefined,
-    print ? speakerModelIdentity(print.speaker_model.file, print.speaker_model.dim) : undefined,
     config.tts?.key_file ? key(config.tts.key_file) : undefined]);
   check(skill.trim().length > 0, 'FIXED_SKILL_EMPTY', 500);
+  let speakerModel:Awaited<ReturnType<typeof speakerModelIdentity>>|undefined;let speakerSelection:LocalModelSelection|undefined;
   const lock = await acquireProcessLock(config.lock_file);
   let tts: DashScopeTts | undefined, voiceprint: VoiceprintRegistry | undefined, journal: AmbientJournal | undefined, health: HealthStore | undefined, contacts: ContactsStore | undefined,
     care: CareAuthority | undefined,payment:PaymentAuthority|undefined,visual:VisualMemory|undefined,locations:DeviceLocations|undefined,ownerOverride:OwnerOverride|undefined;
   let turnModel:Awaited<ReturnType<typeof openTurnModel>>|undefined;
   let disk:PosixStorage|undefined,selfEvents:RuntimeEventStore|undefined,detachSelf:(()=>void)|undefined;
   let modelSettings:ReturnType<typeof openModelSettingsResources>|undefined;
+  let embeddingRuntime:Awaited<ReturnType<typeof openModelSettingsEmbedding>>|undefined;
   // The provisioning owner's release flushes write-behind voiceprint state and closes the journal before the lock goes.
   const release = async () => {
-    const settled = await Promise.allSettled([Promise.resolve().then(()=>visual?.close()),Promise.resolve().then(()=>turnModel?.close())]);
+    const settled = await Promise.allSettled([Promise.resolve().then(async()=>{await embeddingRuntime?.close();await visual?.close();}),Promise.resolve().then(()=>turnModel?.close())]);
     settled.push(...await Promise.allSettled([tts, voiceprint, journal, health, contacts, care,locations,payment,ownerOverride].map(owner => Promise.resolve().then(() => owner?.close()))));
     try{await disk?.close();}catch(reason){settled.push({status:'rejected',reason});}
     detachSelf?.();
-    modelSettings?.close();
+    await modelSettings?.close();
     try {await selfEvents?.close();} catch(reason) {settled.push({status:'rejected',reason});}
     try {await lock();} catch (reason) {settled.push({status: 'rejected', reason});}
     const errors = settled.filter(result => result.status === 'rejected').map(result => result.reason);
@@ -266,17 +275,40 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
     journal = AmbientJournal.open(join(storage.root, 'ambient-journal'), ambientPolicy);
     health = HealthStore.open(join(storage.root, 'health'));
     contacts = ContactsStore.open(join(storage.root, 'contacts'));
-    care = CareAuthority.open(join(storage.root, 'care'));
+    care = CareAuthority.open(join(storage.root, 'care'),Date.now,time_zone);
     locations=DeviceLocations.open(join(storage.root,'location'));
-    payment=PaymentAuthority.open(join(storage.root,'payment'),{config:paymentConfig,owner_override_active:()=>ownerOverride!.active()});
+    payment=PaymentAuthority.open(join(storage.root,'payment'),{config:paymentConfig,time_zone,owner_override_active:()=>ownerOverride!.active()});
     const modelServiceKey=config.model_settings?await key(config.model_settings.service_key_file):undefined;
     check(modelServiceKey===undefined||modelServiceKey!==internalKey&&modelServiceKey!==nativeKey,'MODEL_SETTINGS_SERVICE_KEY_NOT_SEPARATE');
     if(config.model_settings&&modelServiceKey)modelSettings=openModelSettingsResources(storage.root,config.model_settings,config.hermes_base_url,modelServiceKey);
+    if(print&&(!modelSettings||!modelSettings.authority.localState('voiceprint')))
+      speakerModel=await speakerModelIdentity(print.speaker_model.file,print.speaker_model.dim);
+    if(print&&modelSettings){
+      if(speakerModel)modelSettings.authority.registerLocalBaseline({id:'startup-voiceprint',display_name:'启动配置声纹',kind:'voiceprint',
+        config:{model:{path:print.speaker_model.file,sha256:speakerModel.sha256},dim:speakerModel.dim,
+          ...(print.thresholds?{thresholds:print.thresholds}:{}),...(print.scoring?{scoring:print.scoring}:{})}});
+      speakerSelection=modelSettings.authority.localSelection('voiceprint');
+      if(speakerSelection){check(speakerSelection.entry.kind==='voiceprint','LOCAL_SPEAKER_KIND_MISMATCH');
+        const selected=speakerSelection.entry;await verifyLocalModel(selected);speakerModel=localSpeakerIdentity(selected);
+        const {thresholds:_oldThresholds,scoring:_oldScoring,...speakerConfiguration}=print;
+        print={...speakerConfiguration,speaker_model:{file:selected.config.model.path,dim:selected.config.dim},
+          ...(selected.config.thresholds?{thresholds:selected.config.thresholds}:{}),
+          ...(selected.config.scoring?{scoring:selected.config.scoring}:{})};}
+    }
     if(print&&speakerModel){
-      const registryOptions={policy:{...(print.trust_window_ms!==undefined?{trust_window_ms:print.trust_window_ms}:{}),...(print.thresholds?{thresholds:print.thresholds}:{}),...(print.max_clusters!==undefined?{max_clusters:print.max_clusters}:{})}};
+      const registryOptions={policy:{...(print.trust_window_ms!==undefined?{trust_window_ms:print.trust_window_ms}:{}),...(print.thresholds?{thresholds:print.thresholds}:{}),...(print.adaptive_verified?{adaptive_verified:print.adaptive_verified}:{}),...(print.max_clusters!==undefined?{max_clusters:print.max_clusters}:{})}};
+      const priorVoiceprint=modelSettings?.authority.localState('voiceprint');
+      const priorModelThresholds=[priorVoiceprint?.effective,priorVoiceprint?.previous].flatMap(selection=>
+        selection?.entry.kind==='voiceprint'?[{speaker_model:localSpeakerIdentity(selection.entry),
+          owner_verified:selection.entry.config.thresholds?.owner_verified??DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified}]:[]);
       voiceprint=new VoiceprintRegistry(storage,speakerModel,{...registryOptions,scoring:configuredScoring(print.scoring,speakerModel),
+        prior_model_thresholds:priorModelThresholds,
+        ...(speakerSelection&&speakerSelection.generation>0?{enrollment_generation:speakerSelection.generation,
+          verification:{speaker_model:speakerModel,channels:speakerSelection.entry.kind==='voiceprint'?speakerSelection.entry.config.verified_channels??{}:{}}}:{}),
         owner_override_active:()=>ownerOverride!.active(),
         ...(print.encryption_key_file?{cipher:await loadRegistryCipher(print.encryption_key_file)}:{})});
+      // Persist legacy threshold provenance before settings can retire effective/previous pins.
+      if(modelSettings)await voiceprint.owner();
     }
     tts = config.tts && voice && voiceKey ? new DashScopeTts({usable: true, ...voice, apiKey: ttsKey ?? voiceKey}, {model: config.tts.model, voice: config.tts.voice,
       sample_rate: config.tts.sample_rate, ...(config.tts.endpoint ? {endpoint: config.tts.endpoint} : {}),
@@ -295,15 +327,19 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
       check(!Object.hasOwn(config.visual,'archive'),'VISUAL_ARCHIVE_REPLACED_BY_ARCHIVE_TIERING');
       check(voice&&voiceKey,'VISUAL_DASHSCOPE_REQUIRED');
       check(!config.visual.faces||voiceprint,'VISUAL_PERSON_REGISTRY_REQUIRED');
-      const {faces,embedding:embeddingConfig,...retention}=config.visual,embedding=new DashScopeEmbedding({
-        ...parseEmbeddingConfiguration(embeddingConfig,{endpoint:voice.endpoint}),region:voice.region,apiKey:voiceKey});
-      visual=await VisualMemory.open(join(storage.root,'visual-memory'),{embedImage:(bytes,signal)=>embedding.embedImage(bytes,signal),
+      const {faces,embedding:embeddingConfig,...retention}=config.visual;
+      const embeddingConfiguration={...parseEmbeddingConfiguration(embeddingConfig,{endpoint:voice.endpoint}),region:voice.region,apiKey:voiceKey};
+      const visualDirectory=join(storage.root,'visual-memory');
+      embeddingRuntime=modelSettings?await openModelSettingsEmbedding(modelSettings.authority,visualDirectory,embeddingConfiguration):undefined;
+      const embedding=embeddingRuntime?.provider??new DashScopeEmbedding(embeddingConfiguration);
+      visual=await VisualMemory.open(visualDirectory,{...(embeddingRuntime?embeddingRuntime.provider:{}),embedImage:(bytes,signal)=>embedding.embedImage(bytes,signal),
         embedQuery:text=>embedding.embedQuery(text),describe:(bytes,signal,context)=>describeVision((bytes,prompt,signal)=>nativeClient().analyzeVision(bytes,prompt,signal,context),bytes,signal)},
         retention,voiceprint,faces?new CpuFaceEngine(faces):undefined,storage.cold);
+      embeddingRuntime?.attach(visual);
     }
     const resources: CentralProvisionResources = {
-      storage,self_events:selfEvents,owner_override:ownerOverride,session_folding:config.session_folding??true, get native() {return nativeClient();},
-      ...(tier?{archive_tiering:{hot_days:tier.hot_days,max_upload_kbps:tier.max_upload_kbps}}:{}),
+      time_zone,storage,self_events:selfEvents,owner_override:ownerOverride,session_folding:config.session_folding??true, get native() {return nativeClient();},
+      ...(tier?{archive_tiering:{hot_days:tier.hot_days,max_upload_kbps:tier.max_upload_kbps,paused:tier.paused}}:{}),
       ...(visual?{visual_memory:visual}:{}),
       // The native identity stays bound to Hermes; the generated view is writable only by the platform.
       ...(memory ? {core_profile: Object.freeze({enabled: true as const, profile_home: memory.profile_home,
@@ -312,6 +348,8 @@ export async function provisionCentralResources(config: CentralProvisionConfigur
         '依米，明天早上八点提醒我开会。','今天中午我想吃一碗牛肉面，不要香菜。','帮我看看周末的天气，适不适合去爬山。',
         '我刚才和老王聊的那个项目，下周一要交方案。','给我妈发个消息，说我晚上七点到家。','最近睡眠不太好，晚上总是醒好几次。',
         '这家咖啡店的拿铁比上次那家好喝多了。','依米，把刚才那段对话总结一下。']},
+      ...(modelSettings?{local_models:localSpeechRuntime(modelSettings.authority,speakerSelection),
+        voice_model_current:()=>speakerSelection!==undefined&&modelSettings!.authority.localModelCurrent('voiceprint',speakerSelection.generation)}:{}),
       ...(voiceprint ? {voiceprint} : {}), ambient_journal: journal, health, contacts, care,locations,
       ...(print?.confirmation_ttl_ms !== undefined ? {voice_confirmation: {ttl_ms: print.confirmation_ttl_ms}} : {}),
       ...(tts ? {tts} : {}),
@@ -362,7 +400,7 @@ export async function main(dependencies = startupDependencies): Promise<void> {
   let stop: (() => Promise<void>) | undefined;
   try {
     const {storage, skill} = provision.resources;
-    media = mediaConfig ? await dependencies.configureMediaReplay(storage, mediaConfig, config.max_event_bytes) : undefined;
+    media = mediaConfig ? await dependencies.configureMediaReplay(storage, mediaConfig, config.max_event_bytes,fetch,undefined,undefined,provision.resources.local_models) : undefined;
     const native = provision.resources.native;
     database = config.fixture_database ? await dependencies.openFixtureDatabase(config.fixture_database) : undefined;
     check(!config.local_note_actions || database, 'ACTION_DATABASE_REQUIRED');

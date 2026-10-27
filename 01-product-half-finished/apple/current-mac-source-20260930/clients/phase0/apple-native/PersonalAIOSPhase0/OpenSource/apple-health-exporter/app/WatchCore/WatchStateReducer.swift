@@ -50,6 +50,9 @@ struct WatchStateReducer {
         }
         guard incoming.scope == scope,
               state.map({ incoming.rev > $0.rev }) ?? fromContext else { return false }
+        if let epoch = incoming.history_epoch, epoch != state?.history_epoch {
+            pending.removeAll(); receipts.removeAll(); fingerprints.removeAll()
+        }
         state = incoming
         return true
     }

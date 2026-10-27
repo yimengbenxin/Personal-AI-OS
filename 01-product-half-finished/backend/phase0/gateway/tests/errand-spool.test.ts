@@ -417,8 +417,8 @@ test('a progress snapshot that failed to reach the app is sent again on the next
   await writeFile(join(dir, 'job-0000000000a1.running.json'), JSON.stringify({principal_id:'owner',...running('job-0000000000a1')}));
   let attempts = 0;
   spool.attach(async () => true, async () => { attempts++; if (attempts === 1) throw new Error('publish failed'); return true; });
-  await spool.sweep();
-  await spool.sweep();
+  await assert.rejects(spool.refresh(),/ERRAND_PROGRESS_PUBLICATION_PENDING/);
+  await spool.refresh();
   assert.equal(attempts, 2, 'same snapshot, but the first delivery failed');
   await spool.sweep();
   assert.equal(attempts, 3, 'the runtime owns change suppression');

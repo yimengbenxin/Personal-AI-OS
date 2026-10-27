@@ -14,6 +14,7 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 import {enabledToolSchemas} from '../src/tool-contracts.ts';
 import {createTSMcpHost} from '../src/capability/ts/host.ts';
 import {failure, type ResultAdapter} from '../../../../../capability/packages/ts-host/result.ts';
+import {resultFacts} from '../../../../../capability/sdk/ts/result-values.ts';
 import {admitReceipt} from '../src/capability/receipt.ts';
 import {PersonalAIOSRuntime, RunAdmission, type NativeRun} from './native-source-fixture.ts';
 import {PosixStorage} from '../src/storage.ts';
@@ -36,7 +37,7 @@ const receiptValid = validator('receipt.v1.schema.json');
 
 test('one manifest entry per TS tool, excluding payment, with one shared HTTP host and no new effect parameter', () => {
   const names = [...catalog.values()].map(tool => tool.name);
-  assert.equal(names.length, 30); assert.equal(new Set(names).size, 30);
+  assert.equal(names.length, 31); assert.equal(new Set(names).size, 31);
   assert.deepEqual([...names].sort(), allSchemas().map(tool => tool.name).filter(name => !['paios_payment', 'paios_glasses_pay'].includes(name)).sort());
   assert.ok([...catalog.values()].every(tool => tool.server === 'platform_ts'));
   for (const schema of allSchemas()) assert.equal('effect' in schema.parameters.properties, false);
@@ -81,7 +82,7 @@ for (const name of packageNames) {
     assert.equal(receiptValid(actual.structuredContent), true, ajv.errorsText(receiptValid.errors));
   });
   test(`${name}: fake runs over actual stdio MCP and shares the real adapter`, async () => {
-    const transport = new StdioClientTransport({command: process.execPath, args: [fileURLToPath(new URL(`${name}/fake/server.ts`, packagesRoot))],
+    const transport = new StdioClientTransport({command: process.execPath, args: [fileURLToPath(new URL('./ts-fake-server.ts',import.meta.url)),fileURLToPath(new URL(`${name}/`,packagesRoot))],
       env: Object.fromEntries(Object.entries(process.env).filter((pair): pair is [string, string] => pair[1] !== undefined)), stderr: 'pipe'});
     let stderr = ''; transport.stderr?.on('data', bytes => {stderr += String(bytes);});
     const client = new Client({name: 'ts-contract-test', version: '1'});
@@ -122,7 +123,9 @@ test('units, provenance and observation time preserve exact sensor and computed 
   const hr = await host.callTool('paios_senses', {...context, sense: 'heart_rate'});
   assert.deepEqual(hr.structuredContent.values.find(value => value.key === 'value'), {key: 'value', value: 72, unit: 'count/min', provenance: 'observed', source: 'HealthKit', as_of: now});
   const query = await host.callTool('paios_health_query', {...context, metric: 'heart_rate', aggregation: 'sample'});
-  const sample = query.structuredContent.values.find(value => value.key === 'samples[0].value')!;
+  const details=JSON.parse(query.structuredContent.content[0]!.text);
+  assert.equal(query.structuredContent.values.find(value=>value.key==='samples')!.value,details.samples.length);
+  const sample = resultFacts(details,now,'fixture',false).values.find(value => value.key === 'samples[0].value')!;
   assert.equal(sample.unit, 'count/min'); assert.equal(sample.source, 'HealthKit');
   assert.equal(sample.as_of, new Date(1792843200000).toISOString());
   const overview = createTSMcpHost({toolSchemas: allSchemas, tool: async () => cases('ts-health').find(row => row.id === 'overview-computed-trend')!.raw}, () => catalog, 262144);
@@ -153,10 +156,12 @@ test('model usage keeps currency, token units, estimate provenance and unknown c
     cost: {kind: 'estimated', currency: 'CNY', amount: 0.012345}}, {attempt_id: 'unknown', cost: {kind: 'unknown', currency: 'CNY', amount: null}}]})}, () => catalog, 262144);
   const {structuredContent: body} = await host.callTool('paios_model_settings_read', gatewayContextStub({run_id: 'run', session_id: 'session', tool_call_id: 'call'}, {}));
   assert.equal(body.values.find(row => row.key === 'usage.known_cny')!.unit, 'CNY');
-  const cost = body.values.find(row => row.key === 'attempts[0].cost.amount')!;
+  assert.equal(body.values.find(row=>row.key==='attempts')!.value,2);
+  const details=resultFacts(JSON.parse(body.content[0]!.text),now,'fixture',false).values;
+  const cost = details.find(row => row.key === 'attempts[0].cost.amount')!;
   assert.equal(cost.unit, 'CNY'); assert.equal(cost.value, 0.012345); assert.equal(cost.provenance, 'computed'); assert.equal(cost.as_of, now);
-  assert.equal(body.values.find(row => row.key === 'attempts[0].input_tokens')!.unit, 'token');
-  assert.deepEqual(body.unknowns.map(row => row.about), ['套餐余量', '费用:unknown']);
+  assert.equal(details.find(row => row.key === 'attempts[0].input_tokens')!.unit, 'token');
+  assert.deepEqual(body.unknowns.map(row => row.about), ['attempts','套餐余量', '费用:unknown']);
 });
 
 async function runtimeFixture(t: test.TestContext, scope = 'owner') {
@@ -187,7 +192,7 @@ async function runtimeFixture(t: test.TestContext, scope = 'owner') {
   return {runtime, admission};
 }
 
-for (const scope of ['owner', 'guest', 'owner_uncertain', 'care', 'background', 'cron']) test(`all 30 tools: actual runtime admission equivalence in ${scope}`, async t => {
+for (const scope of ['owner', 'guest', 'owner_uncertain', 'care', 'background', 'cron']) test(`all 31 tools: actual runtime admission equivalence in ${scope}`, async t => {
   const {runtime} = await runtimeFixture(t, scope);
   const host = createTSMcpHost({toolSchemas: allSchemas, tool: runtime.tool.bind(runtime)}, () => catalog, 262144);
   let count = 0;
@@ -205,7 +210,7 @@ for (const scope of ['owner', 'guest', 'owner_uncertain', 'care', 'background', 
       reason: receipt.status.reason_code ?? null});
     assert.equal(receiptValid(receipt), true, `${tool.name}: ${ajv.errorsText(receiptValid.errors)}`);
   }
-  assert.equal(count, 30);
+  assert.equal(count, 31);
   if (['guest', 'owner_uncertain', 'care'].includes(scope)) assert.ok(decisions.some(row =>
     (row as {legacy: string}).legacy === 'RUN_SCOPE_TOOL_DENIED'), 'the intended admission scope must reach its real gate');
   t.diagnostic(JSON.stringify({scope, decisions}));

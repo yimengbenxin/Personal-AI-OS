@@ -678,6 +678,43 @@
                     "minimum": 0
                   }
                 }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "action",
+                  "expected_revision",
+                  "local_kind",
+                  "local_target"
+                ],
+                "properties": {
+                  "action": {
+                    "const": "switch_local"
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "local_kind": {
+                    "enum": [
+                      "asr",
+                      "vad",
+                      "voiceprint",
+                      "wakeword",
+                      "face",
+                      "embedding"
+                    ]
+                  },
+                  "local_target": {
+                    "$ref": "#/$defs/ms_id"
+                  },
+                  "change_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                }
               }
             ]
           }
@@ -1138,6 +1175,76 @@
         }
       },
       "error": "MODEL_SETTINGS_INPUT_INVALID"
+    },
+    "model_settings_switch_local": {
+      "definition": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "control_id",
+          "request",
+          "statement_b64",
+          "signature_b64"
+        ],
+        "properties": {
+          "operation": {
+            "const": "model_settings_switch_local"
+          },
+          "control_id": {
+            "$ref": "#/$defs/ms_id"
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "draft_id"
+            ],
+            "properties": {
+              "draft_id": {
+                "$ref": "#/$defs/ms_id"
+              }
+            }
+          },
+          "statement_b64": {
+            "$ref": "#/$defs/ms_b64"
+          },
+          "signature_b64": {
+            "$ref": "#/$defs/ms_b64"
+          }
+        }
+      },
+      "error": "MODEL_SETTINGS_INPUT_INVALID"
+    },
+    "model_settings_local_catalog": {
+      "definition": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "control_id"
+        ],
+        "properties": {
+          "operation": {
+            "const": "model_settings_local_catalog"
+          },
+          "control_id": {
+            "$ref": "#/$defs/ms_id"
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "error": "MODEL_SETTINGS_INPUT_INVALID"
     }
   },
   "outputs": {
@@ -1329,6 +1436,16 @@
           "expected_revision": 1,
           "pause_on_limit": false,
           "owner_reserve_cny": 1
+        }
+      },
+      {
+        "operation": "model_settings_draft",
+        "control_id": "local-draft",
+        "request": {
+          "action": "switch_local",
+          "expected_revision": 1,
+          "local_kind": "embedding",
+          "local_target": "installed-multimodal-pin"
         }
       }
     ],
@@ -1661,6 +1778,26 @@
         "request": {
           "draft_id": "draft:1",
           "provider_ref": "provider:1",
+          "offset": 0
+        }
+      }
+    ],
+    "model_settings_switch_local": [
+      {
+        "operation": "model_settings_switch_local",
+        "control_id": "local-approve",
+        "request": {
+          "draft_id": "draft:1"
+        },
+        "statement_b64": "e30=",
+        "signature_b64": "e30="
+      }
+    ],
+    "model_settings_local_catalog": [
+      {
+        "operation": "model_settings_local_catalog",
+        "control_id": "local-catalog",
+        "request": {
           "offset": 0
         }
       }

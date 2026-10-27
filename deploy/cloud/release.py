@@ -41,6 +41,7 @@ import release_source
 import release_transfer
 import release_migrations
 import release_compose
+import release_data_reset
 from release_compose import stop_writers
 from release_watchdog import compose_files, release_files
 from watchdog_platform import atomic_json, install_front, point, restore_front, retire_newer_transport
@@ -163,13 +164,17 @@ def render(host, release):
 
 # ---------------------------------------------------------------- service lifecycle (shared by switch/rollback)
 
-def start(host, release, run, receipt):
+def start(host, release, run, receipt, before_services=None):
+    release_data_reset.guard_start(host)
     s, up = host.suffix, ['up', '-d', '--no-deps', '--no-build', '--pull', 'never']
     run(up + ['--wait', 'postgres' + s], capture_output=True)
     # The candidate's ledgered migrator is the schema authority; its result is recorded, not re-derived here.
     release_migrations.recorded(run, ['run', '--rm', '--no-deps', '--pull', 'never', 'gateway' + s, 'node',
          '01-product-half-finished/backend/phase0/gateway/tools/mac-product-provision.ts',
          'migrate', '--config', '/etc/paios/cloud.json', '--root', '/var/lib/paios'], receipt, 'migration')
+    if before_services:
+        before_services()
+    release_data_reset.guard_start(host)
     services = host.definition(release)['services']
     # The release's own Compose graph orders Gateway and Hermes: a Hermes that depends on Gateway (its model
     # settings authority) starts only after Gateway is healthy; an older Hermes-first release keeps its order.
@@ -319,7 +324,9 @@ def cmd_stage(host, args):
     print(json.dumps(accepted))
 
 
-def switch(host, release, lock, front_sha=None, copy_secrets=False):
+def switch(host, release, lock, front_sha=None, copy_secrets=False, data_reset_id=None, data_reset_preview=None):
+    if data_reset_id is not None and data_reset_id != 'RQ-102-N15':
+        raise ValueError('RESET_ID_REQUIRED')
     accepted = json.loads((release / '.release/accepted.json').read_text())
     for role in host.config.get('image_roles', ('gateway', 'hermes', 'workshop', 'watchdog')):
         if release_build.image_id(accepted['images'][role]) != accepted['images'][role]:
@@ -335,6 +342,7 @@ def switch(host, release, lock, front_sha=None, copy_secrets=False):
     candidate_env(host, release, accepted['images'], copy_secrets)
     render(host, release)
     stopped = flipped = False
+    reset_stopped = None
     try:
         receipt['front'] = front(host, release, front_sha)
         release_build.write(release / '.release/front.json', receipt['front'])
@@ -342,18 +350,28 @@ def switch(host, release, lock, front_sha=None, copy_secrets=False):
         # Everything a rollback needs exists before any release container changes: the previous release dir, its env,
         # its rendered config and its still-loaded images. The dump is for human recovery; an image switch never
         # undoes a migration.
-        pg = host.definition(current)['services']['postgres' + host.suffix]
-        with (release / '.release/postgres-before.dump').open('wb') as dump:
-            old_run(['exec', '-T', 'postgres' + host.suffix, 'pg_dump', '-p', pg['command'][pg['command'].index('-p') + 1],
-                     '-U', pg['environment']['POSTGRES_USER'], '-d', pg['environment']['POSTGRES_DB'], '-Fc', '--no-owner', '--no-acl'],
-                    stdout=dump)
+        if data_reset_id:
+            receipt['postgres_before'] = 'quarantined_RQ102_clear_tables_after_migrations'
+        else:
+            pg = host.definition(current)['services']['postgres' + host.suffix]
+            with (release / '.release/postgres-before.dump').open('wb') as dump:
+                old_run(['exec', '-T', 'postgres' + host.suffix, 'pg_dump', '-p', pg['command'][pg['command'].index('-p') + 1],
+                         '-U', pg['environment']['POSTGRES_USER'], '-d', pg['environment']['POSTGRES_DB'], '-Fc', '--no-owner', '--no-acl'],
+                        stdout=dump)
         stopped = True
-        stop_writers(host, old_run)
+        if data_reset_id:
+            reset_stopped = stop_writers(host, old_run, stop_watchdog=True)
+        else:
+            stop_writers(host, old_run)
         host.flip(release)
         flipped = True
         host.event('switch_started', release_id=release_id, candidate=str(release), previous=str(current))
         run = host.runner(release)
-        start(host, release, run, receipt)
+        if data_reset_id:
+            start(host, release, run, receipt, before_services=lambda: release_data_reset.hook(
+                host, release, run, receipt, preview=data_reset_preview))
+        else:
+            start(host, release, run, receipt)
         receipt['postcheck'] = release_checks.postcheck(run, host.suffix, expected=expected_images(accepted, host.suffix),
                                                         edge_forward='edge-forward' in host.config['profiles'])
         if not receipt['postcheck']['passed']:
@@ -365,16 +383,24 @@ def switch(host, release, lock, front_sha=None, copy_secrets=False):
         receipt['failure'] = type(error).__name__ + ': ' + str(error)[:500]
         host.event('switch_failed', release_id=release_id, reason=type(error).__name__)
         try:
+            if receipt.get('data_reset', {}).get('state') == 'quarantined':
+                stop_writers(host, host.runner(release))
+                release_data_reset.restore_switch(host, release, host.runner(release), receipt)
             if flipped:
                 rollback(host, release_id, receipt.setdefault('immediate_rollback', {}))
             else:
                 receipt['front_restored'] = restore_front(release)
                 if stopped:
                     start(host, current, old_run, receipt.setdefault('restart', {}))
+            if reset_stopped:
+                resumed = host.release('current')
+                release_data_reset.resume_watchdog(host, resumed, host.runner(resumed), reset_stopped)
         finally:
             release_build.write(release / f'.release/switch-{release_id}.json', receipt)
         raise
     receipt['finished_at'] = now().isoformat()
+    if data_reset_id and not host.config.get('timing'):
+        release_data_reset.resume_watchdog(host, release, run, reset_stopped)
     release_build.write(release / f'.release/switch-{release_id}.json', receipt)
     host.event('switch_passed', release_id=release_id, commit=accepted['commit'], candidate=str(release))
     return receipt
@@ -391,7 +417,11 @@ def rollback(host, reason, receipt=None):
     failed, target = host.release('current'), host.release('previous')
     receipt = {} if receipt is None else receipt
     receipt.update({'from': str(failed), 'to': str(target)})
-    stop_writers(host, host.runner(failed))
+    reset_cut = release_data_reset.rollback_cut(host,failed)
+    reset_stopped = stop_writers(host,host.runner(failed),stop_watchdog=True) if reset_cut else stop_writers(host,host.runner(failed))
+    if reset_cut:
+        release_data_reset.hook(host,failed,host.runner(failed),receipt,'rollback',reset_cut)
+    release_data_reset.guard_start(host)
     # The newer image understands its L3 facts. Project before moving pointers or starting any older writer.
     try:
         release_migrations.project_rollback(host, failed, target, receipt)
@@ -405,17 +435,21 @@ def rollback(host, reason, receipt=None):
     receipt['front_restored'] = restored_front
     receipt['transport_retired'] = retire_newer_transport(host.runner(target), target, failed, ['hermes' + host.suffix])
     start(host, target, host.runner(target), receipt)
+    if reset_cut:
+        release_data_reset.resume_watchdog(host,target,host.runner(target),reset_stopped)
     host.event('rollback_passed', reason=reason, **{k: receipt[k] for k in ('from', 'to')})
     release_build.write(failed / '.release/rollback.json', receipt)
     return receipt
 
 
 def cmd_switch(host, args):
+    if getattr(args,'data_reset',None) and not getattr(args,'operator_apply_rq102',False):
+        raise ValueError('RESET_OPERATOR_FLAG_REQUIRED')
     with host.locked() as lock:
         release = host.release(args.release)
         if args.accepted:
             shutil.copyfile(args.accepted, release / '.release/accepted.json')
-        receipt = switch(host, release, lock, args.front_sha, args.copy_secrets)
+        receipt = switch(host, release, lock, args.front_sha, args.copy_secrets, getattr(args, 'data_reset', None))
     print(json.dumps({k: receipt[k] for k in ('release_id', 'commit', 'watchdog')}))
 
 
@@ -850,6 +884,7 @@ def cmd_ship(host, args):
     """Production timer/path unit: 「改回去」 requests and notices first (they never wait on the build host), then
     publish production's state, pull new packages and switch at most one verified candidate at an idle moment."""
     with host.locked():
+        release_data_reset.expire(host)
         rollback_requests(host)
         deliver_notices(host)
         before = host.commit(host.release('current'))
@@ -956,6 +991,12 @@ def main():
     p = commands.add_parser('stage'); p.add_argument('release'); p.add_argument('--snapshot')
     p = commands.add_parser('switch'); p.add_argument('release'); p.add_argument('--accepted'); p.add_argument('--front-sha')
     p.add_argument('--copy-secrets', action='store_true')
+    p.add_argument('--data-reset', choices=['RQ-102-N15'])
+    p.add_argument('--operator-apply-rq102', action='store_true')
+    p = commands.add_parser('data-reset')
+    p.add_argument('action', choices=['plan', 'quarantine', 'verify', 'rollback', 'expire'])
+    p.add_argument('--receipt')
+    p.add_argument('--operator-apply-rq102', action='store_true')
     commands.add_parser('rollback')
     p = commands.add_parser('candidate'); p.add_argument('request')
     commands.add_parser('requests')
@@ -973,7 +1014,7 @@ def main():
     handler = {'adopt': cmd_adopt, 'source': cmd_source, 'build': cmd_build, 'suites': cmd_suites, 'stage': cmd_stage,
                'switch': cmd_switch, 'rollback': cmd_rollback, 'candidate': lambda h, a: candidate(h, a.request) and 0,
                'requests': cmd_requests, 'ship': cmd_ship, 'identity': cmd_identity, 'parity': cmd_parity,
-               'sync': cmd_parity, 'prune': cmd_prune}[args.command]
+               'sync': cmd_parity, 'prune': cmd_prune, 'data-reset': release_data_reset.command}[args.command]
     return handler(host, args) or 0
 
 

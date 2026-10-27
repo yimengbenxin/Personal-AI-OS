@@ -49,6 +49,7 @@ import {
   createRayneoPersistentPublicControl,
   type RayneoPersistentPublicControlOwnerHandoff,
 } from '../src/rayneo-persistent-production-entrypoint.ts';
+import {fileURLToPath} from 'node:url';
 
 const ENTRYPOINT = new URL('../src/rayneo-persistent-production-entrypoint.ts', import.meta.url);
 const NOW = Date.parse('2030-01-01T00:00:00.000Z');
@@ -60,7 +61,7 @@ const PUBLIC_PATHS = Object.freeze([
 const errorAsync = async (): Promise<never> => { throw new Error('OWNER_PORT_NOT_CALLED'); };
 
 test('production handoff keeps the designated Watch authority for pair read, register, replace and revoke',async t=>{
-  const scratch=new URL('../../../../../.scratch/',import.meta.url).pathname;
+  const scratch=fileURLToPath(new URL('../../../../../.scratch/',import.meta.url));
   mkdirSync(scratch,{recursive:true});const root=mkdtempSync(join(scratch,'d5-watch-'));
   const resources=makeMacProductResourceFixture(root);t.after(()=>resources.cleanup());
   const identity=createProductionRealtimeIdentityPort({clock:{now:()=>new Date().toISOString() as never}});
@@ -160,6 +161,41 @@ test('production handoff keeps the designated Watch authority for pair read, reg
       pair_state:{pair_version:String(index+1),status:receipt.status,requires_rebind:action==='revoke'},binding:action==='revoke'?null:receipt}});
   }
   assert.deepEqual(primaryCalls,Array(9).fill(deviceId));
+});
+
+test('owner Mac relay configuration fails before paired-device listener allocation', async t => {
+  const fixture = makeMacProductResourceFixture();
+  t.after(fixture.cleanup);
+  const previousRoot = process.env.PAIOS_OWNER_MAC_ROOT;
+  const previousRelay = process.env.PAIOS_OWNER_MAC_RELAY_FILE;
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.PAIOS_OWNER_MAC_ROOT; else process.env.PAIOS_OWNER_MAC_ROOT = previousRoot;
+    if (previousRelay === undefined) delete process.env.PAIOS_OWNER_MAC_RELAY_FILE; else process.env.PAIOS_OWNER_MAC_RELAY_FILE = previousRelay;
+  });
+  process.env.PAIOS_OWNER_MAC_ROOT = join(fixture.root, 'owner-mac');
+  const malformed = join(fixture.root, 'malformed-relay.json');
+  writeFileSync(malformed, '{invalid json');
+  for (const relay of [join(fixture.root, 'missing-relay.json'), malformed]) {
+    process.env.PAIOS_OWNER_MAC_RELAY_FILE = relay;
+    const queries: string[] = [];
+    let borrowed = 0, ended = 0;
+    const query = async (sql: string) => { queries.push(sql); return {rows: [], rowCount: 0}; };
+    const pool = {query, connect: async () => {
+      borrowed++;
+      return Object.assign(new EventEmitter(), {query, release() { borrowed--; }});
+    }, end: async () => { ended++; }};
+    await assert.rejects(createRayneoPersistentProductionHandoff({
+      executionOwner: 'hermes_text', product_resources: fixture.config, central: {} as never,
+      inputReadiness: {owner: 'fixture', isReady: () => true},
+    }, {createPool: () => pool as never, inspectPostgres: async () => true}), error => {
+      if (relay === malformed) assert.ok(error instanceof SyntaxError);
+      else assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT');
+      return true;
+    });
+    assert.deepEqual(queries, [], 'configuration failure must precede paired-device authority reads and LISTEN');
+    assert.equal(borrowed, 0);
+    assert.equal(ended, 1, 'the outer handoff must release its pool after configuration failure');
+  }
 });
 
 test('staging startup rejects missing sink, Bark and avatar before provisioning', async () => {

@@ -47,7 +47,7 @@ export class VoiceprintEnrollment {
     await this.registry.requireLearning();
     check(pcm.byteLength > 0 && pcm.byteLength % 2 === 0 && pcm.byteLength <= ENROLLMENT_MAX_PCM_BYTES, 'VOICEPRINT_SAMPLE_INVALID');
     const engine = await this.engine(), model = this.registry.model;
-    check(engine.speaker_model.sha256 === model.sha256 && engine.speaker_model.dim === model.dim, 'VOICEPRINT_SPEAKER_MODEL_MISMATCH', 503);
+    check(engine.speaker_model.id === model.id && engine.speaker_model.sha256 === model.sha256 && engine.speaker_model.dim === model.dim, 'VOICEPRINT_SPEAKER_MODEL_MISMATCH', 503);
     const {segments, terminal} = await speechSpans(this.detector, pcm, signal);
     const view = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
     const speech = new Float32Array(segments.reduce((n, s) => n + s.end_sample_exclusive - s.start_sample, 0));
@@ -76,12 +76,15 @@ export class VoiceprintEnrollment {
   /** Appends these samples to the device channel's bounded owner set, in this order. A refused set reports each sample's
    *  consistency (the registry's own leave-one-out numbers) so the phone can ask for the bad ones again. */
   async enroll(owner: Owner, sampleIds: readonly string[]): Promise<EnrollmentOutcome> {
+    this.registry.requireModelActive();
     const held = this.samples(owner), channel = deviceChannel(owner.device_type);
     check(Array.isArray(sampleIds) && sampleIds.length > 0 && sampleIds.length <= this.registry.policy.max_owner_samples &&
       new Set(sampleIds).size === sampleIds.length, 'VOICEPRINT_ENROLLMENT_INVALID');
     const chosen = sampleIds.map(id => {const sample = held.get(id); check(sample, 'VOICEPRINT_SAMPLE_NOT_FOUND', 404); return sample;});
     try {
-      const {absorbed_clusters: _absorbed, ...status} = await this.registry.enrollOwner({speaker_model: this.registry.model, channel, mode: 'add',
+      const current = await this.registry.owner(channel);
+      const {absorbed_clusters: _absorbed, ...status} = await this.registry.enrollOwner({speaker_model: this.registry.model, channel,
+        mode: current.reenrollment_required ? 'replace' : 'add',
         samples: chosen.map(sample => ({embedding: sample.embedding, speech_ms: sample.speech_ms, quality: sample.quality}))});
       held.clear();
       return {status: 'enrolled', owner: status};
@@ -95,6 +98,7 @@ export class VoiceprintEnrollment {
   }
   /** Internal held evidence. Conversation uses a separate instance, so its sample IDs never enter fixed enrollment. */
   evidence(owner: Owner, ids: readonly string[]): Held[] {
+    this.registry.requireModelActive();
     const held = this.samples(owner);
     return ids.map(id => {const sample = held.get(id); check(sample, 'VOICEPRINT_SAMPLE_NOT_FOUND', 404); return sample;});
   }
@@ -205,8 +209,9 @@ export class ConversationVoiceprintEnrollment {
     session.phase = 'paused'; session.issue = null;
     try {
       check(session.speech >= this.targetSpeechMs, 'VOICE_ENROLLMENT_MORE_SPEECH_REQUIRED', 422);
+      const current = await this.registry.owner(deviceChannel(owner.device_type), true);
       await this.registry.enrollOwner({speaker_model: this.registry.model, channel: deviceChannel(owner.device_type),
-        mode: 'add', purpose: 'conversation', source_device: {device_id: owner.device_id, device_type: owner.device_type},
+        mode: current.reenrollment_required ? 'replace' : 'add', purpose: 'conversation', source_device: {device_id: owner.device_id, device_type: owner.device_type},
         check_only: !commit, samples: session.samples});
       session.phase = commit ? 'committed' : 'checked';
       if (commit) session.samples = [];

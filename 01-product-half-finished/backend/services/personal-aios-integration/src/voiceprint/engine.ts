@@ -12,7 +12,7 @@ export interface LocalSpeechConfig {
   num_threads:number;timeout_ms:number;
   vad:{model:ModelFile};asr:{model:ModelFile;tokens:ModelFile};speaker:{model:ModelFile};
   tagging?:{model:ModelFile;labels:ModelFile};
-  kws?:{encoder:ModelFile;decoder:ModelFile;joiner:ModelFile;tokens:ModelFile;keywords:KeywordSpec[];score:number;threshold:number};
+  kws?:{encoder:ModelFile;decoder:ModelFile;joiner:ModelFile;tokens:ModelFile;keywords:KeywordSpec[];call_keywords?:KeywordSpec[];score:number;threshold:number};
 }
 /** Detector policy owned by the engine and recorded in every VAD model descriptor. */
 export const VAD_POLICY=Object.freeze({threshold:0.5,min_speech_ms:250,min_silence_ms:352,max_speech_ms:20000});
@@ -33,7 +33,7 @@ export interface ThreadConfig {
   kws?:{encoder:string;decoder:string;joiner:string;tokens:string;keywords:string;score:number;threshold:number};
   tagging?:{model:string;labels:string};
 }
-export type SpeechCall={op:'transcribe'|'embed';samples:Float32Array}|{op:'tag';samples:Float32Array}|{op:'vad_open'|'kws_open'}|{op:'vad_write';stream:number;samples:Float32Array}|
+export type SpeechCall={op:'transcribe'|'embed';samples:Float32Array;words_only?:true}|{op:'tag';samples:Float32Array}|{op:'vad_open'|'kws_open'}|{op:'vad_write';stream:number;samples:Float32Array}|
   {op:'kws_write';stream:number;samples:Float32Array;final:boolean}|{op:'vad_close'|'kws_close';stream:number};
 export type ThreadRequest=SpeechCall&{id:number};
 export type ThreadReply={id:number;ok:true;value:unknown}|{id:number;ok:false;code:string;status:number};
@@ -52,6 +52,15 @@ function file(value:unknown):ModelFile {
     'SPEECH_CONFIG_INVALID');
   return {path:f.path,sha256:f.sha256};
 }
+export function parseKeywordSpecs(value:unknown,error='SPEECH_CONFIG_INVALID'):KeywordSpec[] {
+  check(Array.isArray(value)&&value.length>0&&value.length<=32,error);
+  return value.map(entry=>{
+    check(entry!==null&&typeof entry==='object'&&!Array.isArray(entry)&&Object.keys(entry).sort().join(',')==='label,tokens',error);
+    check(typeof entry.label==='string'&&/^[^\s@:#]{1,32}$/u.test(entry.label)&&typeof entry.tokens==='string'&&
+      /^[^\s@:#](?:[^\n@:#]{0,254}[^\s@:#])?$/u.test(entry.tokens),error);
+    return {label:entry.label,tokens:entry.tokens};
+  });
+}
 export function parseLocalSpeechConfig(value:unknown):LocalSpeechConfig {
   const c=record(value,['num_threads','timeout_ms','vad','asr','speaker','kws','tagging'],['num_threads','timeout_ms','vad','asr','speaker']);
   const threads=c.num_threads,timeout=c.timeout_ms;
@@ -62,17 +71,13 @@ export function parseLocalSpeechConfig(value:unknown):LocalSpeechConfig {
     asr:{model:file(asr.model),tokens:file(asr.tokens)},speaker:{model:file(speaker.model)}};
   if(c.tagging!==undefined){const tagging=record(c.tagging,['model','labels']);parsed.tagging={model:file(tagging.model),labels:file(tagging.labels)};}
   if(c.kws===undefined)return parsed;
-  const k=record(c.kws,['encoder','decoder','joiner','tokens','keywords','score','threshold'],['encoder','decoder','joiner','tokens']);
+  const k=record(c.kws,['encoder','decoder','joiner','tokens','keywords','call_keywords','score','threshold'],['encoder','decoder','joiner','tokens']);
   // Keyword score and threshold default to the calibrated pair; both remain configurable.
   const keywords=k.keywords??DEFAULT_KEYWORDS,score=k.score??2.0,threshold=k.threshold??0.15;
-  check(Array.isArray(keywords)&&keywords.length>0&&keywords.length<=32&&typeof score==='number'&&Number.isFinite(score)&&score>0&&
+  check(typeof score==='number'&&Number.isFinite(score)&&score>0&&
     score<=10&&typeof threshold==='number'&&threshold>0&&threshold<1,'SPEECH_CONFIG_INVALID');
   parsed.kws={encoder:file(k.encoder),decoder:file(k.decoder),joiner:file(k.joiner),tokens:file(k.tokens),score,threshold,
-    keywords:keywords.map(entry=>{const w=record(entry,['label','tokens']);
-      // One keyword per sherpa keywords line: "<tokens> @<label>"; the tokens are the model's own units (tonal pinyin).
-      check(typeof w.label==='string'&&/^[^\s@:#]{1,32}$/u.test(w.label)&&typeof w.tokens==='string'&&
-        /^[^\s@:#](?:[^\n@:#]{0,254}[^\s@:#])?$/u.test(w.tokens),'SPEECH_CONFIG_INVALID');
-      return {label:w.label,tokens:w.tokens};})};
+    keywords:parseKeywordSpecs(keywords),...(k.call_keywords===undefined?{}:{call_keywords:parseKeywordSpecs(k.call_keywords)})};
   return parsed;
 }
 export async function verifyModelFile(model:ModelFile):Promise<void> {
@@ -125,7 +130,7 @@ export class LocalSpeechEngine implements SpeechEngine {
     this.speakerWorker=speaker;engines.add(this);
     this.callWorker=recoveringEngine(async()=>{
       const loaded=await SpeechWorker.open(thread,{...workerData,call_only:true,num_threads:1,max_streams:4,
-        ...(workerData.kws?{kws:{...workerData.kws,keywords:CALL_INTERRUPT_KEYWORDS.map(w=>`${w.tokens} @${w.label}\n`).join('')}}:{}),
+        ...(workerData.kws?{kws:{...workerData.kws,keywords:(config.kws?.call_keywords??CALL_INTERRUPT_KEYWORDS).map(w=>`${w.tokens} @${w.label}\n`).join('')}}:{}),
         vad:{model:workerData.vad.model,...CALL_VAD_POLICY}},config.timeout_ms,4);
       return this.callLane=loaded.worker;
     });
@@ -144,6 +149,7 @@ export class LocalSpeechEngine implements SpeechEngine {
   idle():boolean {return !this.closing&&this.worker.idle()&&this.speakerWorker.idle();}
   resourceSnapshot() {return {ambient:this.worker.snapshot(),speaker:this.speakerWorker.snapshot(),call:this.callLane?.snapshot()??null};}
   transcribe(samples:Float32Array,signal?:AbortSignal):Promise<SpeechTranscript> {return this.worker.call({op:'transcribe',samples},signal);}
+  async transcribeWords(samples:Float32Array,signal?:AbortSignal):Promise<string> {return (await this.worker.call({op:'transcribe',samples,words_only:true},signal) as {text:string}).text;}
   tag(samples:Float32Array,signal?:AbortSignal):Promise<SoundEvent|undefined> {return this.worker.call({op:'tag',samples},signal);}
   async embed(samples:Float32Array,signal?:AbortSignal):Promise<Float32Array> {
     this.worker.ensureOpen();

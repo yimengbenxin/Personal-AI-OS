@@ -1,9 +1,66 @@
 import Foundation
 import GRDB
+import CryptoKit
 import XCTest
 @testable import HealthKitExporter
 
 final class AssistantLocalOperationDatabaseTests: XCTestCase {
+    func testN14DatabaseRollsBackToN13AndReopensWithoutReapplyingMigrations() throws {
+        let (root, url) = try makeDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let nonce: String
+        do {
+            let n14 = try AssistantLocalOperationDatabase(url: url)
+            _ = try n14.enqueue(operationID: "from-n14", kind: "start",
+                fingerprint: String(repeating: "a", count: 64), createdAt: now)
+            nonce = try XCTUnwrap(n14.preserveQwenHandoff(identity: "owner", sourceID: "source", now: now)).nonce
+            let retired = try XCTUnwrap(n14.preserveQwenHandoff(identity: "retired-owner", sourceID: "retired", now: now))
+            _ = try n14.markCompleted(operationID: retired.nonce, at: now)
+        }
+        let migrations: [String], schemaVersion: Int
+        do {
+            let inspection = try DatabaseQueue(path: url.path)
+            (migrations, schemaVersion) = try inspection.read {
+                (try String.fetchAll($0, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid"),
+                 try Int.fetchOne($0, sql: "PRAGMA schema_version")!)
+            }
+        }
+        XCTAssertEqual(migrations, ["v1_local_operation_cache", "v2_stop_replay_payload", "v3_place_outbox",
+            "v4_move_outbox", "v5_outstanding_qwen_index"])
+        do {
+            let n13 = try N13LocalOperationDatabaseFixture(url: url)
+            let original = try XCTUnwrap(n13.operation("from-n14"))
+            XCTAssertEqual(original["fingerprint"] as String, String(repeating: "a", count: 64))
+            XCTAssertEqual(original["created_at"] as Double, now.timeIntervalSince1970)
+            try n13.enqueue("from-n13", kind: "start", fingerprint: String(repeating: "b", count: 64), now: now)
+            XCTAssertEqual(try n13.operation("from-n13")?["state"] as String?, "pending")
+            let records = try n13.qwenHandoffs()
+            XCTAssertEqual(records.map(\.state), [.pending, .completed])
+            let pending = try XCTUnwrap(records.first)
+            XCTAssertEqual(pending.handoff.pending.nonce, nonce)
+            XCTAssertEqual(pending.state, .pending)
+            XCTAssertNil(pending.handoff.reply)
+            try n13.reply(nonce: nonce, text: "reply written by N13", now: now)
+            XCTAssertEqual(try n13.qwenHandoffs().first?.handoff.reply?.text, "reply written by N13")
+        }
+        do {
+            let n14 = try AssistantLocalOperationDatabase(url: url)
+            XCTAssertEqual(try n14.operation(operationID: "from-n14")?.state, .pending)
+            XCTAssertEqual(try n14.operation(operationID: "from-n13")?.fingerprint, String(repeating: "b", count: 64))
+            XCTAssertEqual(try n14.pendingQwenReply(identity: "owner")?.eventID, nonce)
+            XCTAssertEqual(try n14.pendingQwenReply(identity: "owner")?.text, "reply written by N13")
+        }
+        let inspection = try DatabaseQueue(path: url.path)
+        try inspection.read { db in
+            XCTAssertEqual(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid"), migrations)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "PRAGMA schema_version"), schemaVersion)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'local_operations_outstanding_qwen'"), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT count(*) FROM local_operations"), 4)
+        }
+        print("N15_ROLLBACK N14(v1-v5)->N13(v1-v4)->N14 migrations=5 schema_unchanged=true operations=4 qwen_read_write=ok")
+    }
+
     func testPlaceOutboxSurvivesReopenAndConsentCleanup() throws {
         let (root, url) = try makeDatabaseURL()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -383,6 +440,33 @@ final class AssistantLocalOperationDatabaseTests: XCTestCase {
     }
 
     /// A saved 千问 reply resent after a session change settles once the gateway says an earlier session admitted it.
+    func testOutstandingQwenQueriesDoNotDecodeCompletedReplayHistory() throws {
+        let (root, url) = try makeDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try AssistantLocalOperationDatabase(url: url)
+        let old = try XCTUnwrap(database.preserveQwenHandoff(identity: "owner", sourceID: "old"))
+        _ = try database.markCompleted(operationID: old.nonce)
+        let pending = try XCTUnwrap(database.preserveQwenHandoff(identity: "owner", sourceID: "current"))
+        let inspection = try DatabaseQueue(path: url.path)
+        try inspection.write { db in
+            try db.execute(sql: "UPDATE local_operations SET replay_payload = ? WHERE operation_id = ?",
+                arguments: [Data("invalid retired payload".utf8), old.nonce])
+            try db.execute(sql: """
+                WITH RECURSIVE retired(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM retired WHERE n < 5000)
+                INSERT INTO local_operations (operation_id, kind, fingerprint, state, created_at, updated_at, attempt_count, replay_payload)
+                SELECT 'retired-' || n, 'qwen_handoff', 'retired', 'completed', 0, 0, 0, X'00' FROM retired
+                """)
+        }
+        XCTAssertNil(try database.pendingQwenReply(identity: "owner"))
+        let reply = try database.consumeQwenReply(XCTUnwrap(URL(string: "paios://qwen-result/\(pending.nonce)?result=ok")), identity: "owner")
+        XCTAssertEqual(try database.pendingQwenReply(identity: "owner"), reply)
+        var consumer = AssistantCentralTextConsumer()
+        try consumer.reset(binding: CentralTextTestFixture().binding, generation: 1, ownerPairingIdentity: "owner")
+        XCTAssertNoThrow(try database.acknowledgeQwenReply(consumer))
+        XCTAssertThrowsError(try database.preserveQwenHandoff(identity: "owner", sourceID: "old"),
+            "The source-deduplication path still validates completed history")
+    }
+
     func testQwenReplyAdmittedByAnEarlierSessionCompletesOnTheSessionConflict() throws {
         let (root, url) = try makeDatabaseURL()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -494,5 +578,114 @@ final class AssistantLocalOperationDatabaseTests: XCTestCase {
             withIntermediateDirectories: true
         )
         return (root, root.appendingPathComponent("operations.sqlite"))
+    }
+}
+
+// Frozen migration registrations and SQL from N13 bdc24da15157ae2cb683e57c668d957878dfc2e7,
+// Core/AssistantLocalOperationDatabase.swift. Exercise the old schema contract, not a reduced migrator.
+private struct N13LocalOperationDatabaseFixture {
+    private let queue: DatabaseQueue
+    init(url: URL) throws {
+        queue = try DatabaseQueue(path: url.path)
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v1_local_operation_cache") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS local_operations (
+                    operation_id TEXT NOT NULL PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS local_receipt_cache (
+                    operation_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    recorded_at REAL NOT NULL,
+                    local_cleanup_complete INTEGER NOT NULL,
+                    remote_confirmation_present INTEGER NOT NULL,
+                    status_code TEXT NOT NULL,
+                    PRIMARY KEY (operation_id, kind)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS local_operations_replay_index
+                ON local_operations (state, updated_at, created_at)
+                """)
+        }
+        migrator.registerMigration("v2_stop_replay_payload") { db in
+            try db.execute(sql: "ALTER TABLE local_operations ADD COLUMN replay_payload BLOB")
+        }
+        migrator.registerMigration("v3_place_outbox") { db in
+            try db.execute(sql: "CREATE TABLE place_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload BLOB NOT NULL)")
+            try db.execute(sql: "CREATE TABLE place_outbox (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL)")
+        }
+        migrator.registerMigration("v4_move_outbox") { db in
+            try db.execute(sql: "CREATE TABLE move_outbox (id TEXT PRIMARY KEY NOT NULL, identity TEXT NOT NULL, payload BLOB NOT NULL)")
+            try db.execute(sql: "CREATE TABLE move_checkpoint (identity TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL)")
+        }
+        try migrator.migrate(queue)
+    }
+
+    func operation(_ operationID: String) throws -> Row? {
+        try queue.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT operation_id, kind, fingerprint, state, created_at,
+                       updated_at, attempt_count, last_error
+                FROM local_operations
+                WHERE operation_id = ?
+                """, arguments: [operationID])
+        }
+    }
+
+    func enqueue(_ operationID: String, kind: String, fingerprint: String, now: Date) throws {
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO local_operations
+                    (operation_id, kind, fingerprint, state, created_at,
+                     updated_at, attempt_count, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+                """, arguments: [operationID, kind, fingerprint, AssistantLocalOperationState.pending.rawValue,
+                    now.timeIntervalSince1970, now.timeIntervalSince1970])
+        }
+    }
+
+    struct AssistantLocalQwenHandoff: Codable {
+        let identity: String
+        let sourceID: String
+        let pending: QwenHandoff.Pending
+        var reply: AssistantRetainedPrompt?
+    }
+
+    private static func stopReplayFingerprint(_ payload: Data) -> String {
+        SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func qwenHandoffs() throws -> [(handoff: AssistantLocalQwenHandoff, state: AssistantLocalOperationState)] {
+        try queue.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM local_operations WHERE kind = 'qwen_handoff' AND (state != 'completed' OR replay_payload IS NOT NULL) ORDER BY rowid").map { row in
+                guard let payload: Data = row["replay_payload"], Self.stopReplayFingerprint(payload) == (row["fingerprint"] as String) else { throw AssistantLocalOperationDatabaseError.corruptRow }
+                let handoff = try JSONDecoder().decode(AssistantLocalQwenHandoff.self, from: payload)
+                guard handoff.pending.nonce == (row["operation_id"] as String), let state = AssistantLocalOperationState(rawValue: row["state"]) else { throw AssistantLocalOperationDatabaseError.corruptRow }
+                return (handoff, state)
+            }
+        }
+    }
+
+    func reply(nonce: String, text: String, now: Date) throws {
+        var handoff = try XCTUnwrap(qwenHandoffs().first { $0.handoff.pending.nonce == nonce }).handoff
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let reply = AssistantRetainedPrompt(identity: handoff.identity, eventID: handoff.pending.nonce,
+            capturedAt: formatter.string(from: now), text: text, location: nil)
+        handoff.reply = reply
+        let payload = try JSONEncoder().encode(handoff)
+        try queue.write { db in
+            try db.execute(sql: "UPDATE local_operations SET replay_payload = ?, fingerprint = ?, updated_at = ? WHERE operation_id = ?", arguments: [payload, Self.stopReplayFingerprint(payload), now.timeIntervalSince1970, reply.eventID])
+        }
     }
 }

@@ -7,6 +7,7 @@ import {join,basename} from 'node:path';
 import {fakeSpeechConfig} from './speech-fixture.ts';
 import {main, createMainStop, provisionCentralResources, type CentralProvisionConfiguration} from '../src/main.ts';
 import {openFixtureDatabase} from '../src/memory/fixture-database.ts';
+import {fileURLToPath} from 'node:url';
 
 type Dependencies = NonNullable<Parameters<typeof main>[0]>;
 async function fixture(t: test.TestContext) {
@@ -169,7 +170,7 @@ test('cloud migration config preserves exact origin aliases and permits an empty
 });
 test('tracked Mac product snapshot passes the real central startup checks before deployment', async t => {
   const f=await fixture(t);
-  const snapshot=await loadHostConfiguration(new URL('../../../../../deploy/mac-product/mac-product.json',import.meta.url).pathname) as CentralProvisionConfiguration;
+  const snapshot=await loadHostConfiguration(fileURLToPath(new URL('../../../../../deploy/mac-product/mac-product.json',import.meta.url))) as CentralProvisionConfiguration;
   const {core_profile,voiceprint,...portable}=snapshot;
   const config={...portable,storage_root:f.config.storage_root,lock_file:f.config.lock_file,
     hermes_key_file:f.config.hermes_key_file,internal_key_file:f.config.internal_key_file,skill_file:f.config.skill_file,

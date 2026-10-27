@@ -1,6 +1,6 @@
 {
   "name": "@paios/personal-aios-integration",
-  "version": "0.0.2",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,6 +14,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.25.3",
     "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "onnxruntime-node": "1.24.3",
     "sherpa-onnx-node": "1.13.8",
     "sqlite-vec": "0.1.9"

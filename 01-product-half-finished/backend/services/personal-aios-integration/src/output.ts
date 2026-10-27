@@ -10,6 +10,8 @@ import {recordFacts} from './capability/renderer.ts';
 export interface OutputContext {
   /** Host delivery intent; does not change the immutable route or durable journal binding. */
   delivery?:'text_notification';
+  speech_role?:'call';
+  report_budget?:import('./capability/renderer.ts').ReportBudget;
   principal_id: string; run_id: string; session_id: string; tool_call_id: string; d: ProcessedEvent;
   target: {device_id: string; device_type: DeviceType; route_version: string; output_modes: string[]};
 }
@@ -238,10 +240,10 @@ export class OutputAuthority {
   async open(ctx: OutputContext, args: OpenReplyRequest): Promise<OpenReplyReceipt> {
     return (await this.declare(ctx,args))!;
   }
-  /** Admission owns delivery for authenticated prompts; model declarations may replace it. */
-  async openAdmittedPrompt(ctx:OutputContext):Promise<void> {
+  /** Admission owns delivery for authenticated prompts and required outcome reports; models may replace it. */
+  async openAdmittedPrompt(ctx:OutputContext,mode?:'text_and_voice'):Promise<void> {
     await this.declare({...ctx,tool_call_id:'admission-default'},
-      {reply_mode:ctx.target.output_modes.includes('text')?'text':'voice'},true);
+      {reply_mode:mode??(ctx.target.output_modes.includes('text')?'text':'voice')},true);
   }
   private async declare(ctx:OutputContext,args:OpenReplyRequest,admissionDefault=false):Promise<OpenReplyReceipt|undefined> {
     check(args && typeof args === 'object' && !Array.isArray(args) &&
@@ -646,8 +648,8 @@ export class OutputAuthority {
     const receipts=records.map(record=>record.receipt);
     const allFacts=recordFacts(records,ctx.run_id),facts=await this.capability.ledger.novel(ctx.principal_id,allFacts);
     await this.transact(ctx,`capability-check:${sealed.result.reply_epoch}`,digest(sealed.result.reply_text),async()=>{
-      const checked=checkReport(sealed.result!.reply_text,receipts,ctx.d.content.text??'',facts,'text',allFacts);
-      const voice=checkReport(sealed.result!.reply_text,receipts,ctx.d.content.text??'',facts,'voice',allFacts);
+      const checked=checkReport(sealed.result!.reply_text,receipts,ctx.d.content.text??'',facts,'text',allFacts,ctx.report_budget);
+      const voice=checkReport(sealed.result!.reply_text,receipts,ctx.d.content.text??'',facts,'voice',allFacts,ctx.report_budget);
       const chunks=this.allChunks(ctx,{...sealed.result!,reply_text:checked.text}).map(chunk=>({...chunk,
         message_ref:`capability-report:${ctx.run_id}:${sealed.result!.reply_epoch}`}));
       return {operation:'',fingerprint:'',binding:'',capabilityCheck:{...checked,
@@ -766,10 +768,11 @@ export class OutputAuthority {
       });
       if (this.config.tts!.stream) await this.voiceOwner?.(ctx);
     };
-    const source = audio ? (async function* () {yield audio!;})() : this.config.tts!.stream
-      ? this.config.tts!.stream(result.reply_text, audioKey, signal)
-      : (async function* (tts: TtsPort) {yield await tts.synthesize(result.reply_text, audioKey, signal);})(this.config.tts!);
-    const iterator = (this.config.tts!.stream && !audio ? coalesceTts(source) : source)[Symbol.asyncIterator]();
+    const tts=ctx.speech_role==='call'?this.config.tts?.forCall?.():this.config.tts;check(tts,'TTS_CALL_VOICE_UNAVAILABLE',503);
+    const source = audio ? (async function* () {yield audio!;})() : tts.stream
+      ? tts.stream!(result.reply_text, audioKey, signal)
+      : (async function* (tts: TtsPort) {yield await tts.synthesize(result.reply_text, audioKey, signal);})(tts);
+    const iterator = (tts.stream && !audio ? coalesceTts(source) : source)[Symbol.asyncIterator]();
     let seq = 0;
     const fail = (error: unknown) => this.transact(ctx, `voice-finish:${attempt}`, digest({attempt, status: 'failed'}), async current => {
       fence(current);

@@ -45,7 +45,7 @@ export interface PaymentConfig {
   max_recards_per_intent:number;request_freshness_s:number;challenge_ttl_s:number;cards:{recent_s:number};card:{max_amount_fen:number|null};
   voice:{max_order_fen:number;max_attempts_per_card:number;pay_phrases:string[];carrier_ms:number;require_same_terminal:boolean};
   auto:{max_order_fen:number;max_day_fen:number;undo_s:number;same_payee_window_s:number};anomaly:{max_per_day:number};
-  day_timezone:string;limits:{max_settable_fen:number};
+  limits:{max_settable_fen:number};
   locks:{require_glasses_lock:boolean;phone_relock_s:number;phone_relock_choices_s:number[];phone_lease_max_s:number;glasses_lease_max_s:number;glasses_unlock_request_ttl_s:number;glasses_wear_poll_ms:number};
   enrolment:{request_ttl_s:number;grant_ttl_s:number};executor_key_file?:string;notify:{push:boolean};
 }

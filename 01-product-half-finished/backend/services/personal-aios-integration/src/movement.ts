@@ -131,7 +131,7 @@ export class Movement {
   async glassesConnected(principal:string):Promise<void> {
     const state=this.current(principal),nav=state.nav;
     if(nav&&state.nav_request)await this.ports.send(principal,'glasses',this.routeBody(nav),()=>state.nav===nav&&!!state.nav_request);
-    if(state.ride_mode||nav&&state.nav_request)await this.showMovement(principal,state.fix);
+    await this.showMovement(principal,state.fix);
   }
   private routeBody(nav:NonNullable<Moving['nav']>,show=false) {
     const {nav_id,revision,mode,destination,total_m,total_s,steps}=nav;

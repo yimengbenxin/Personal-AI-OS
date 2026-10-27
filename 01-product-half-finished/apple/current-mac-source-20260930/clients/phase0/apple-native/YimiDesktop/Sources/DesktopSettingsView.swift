@@ -134,12 +134,12 @@ struct DesktopSettingsView: View {
                             .foregroundStyle(Yimi.ink2).accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("这台 Mac").font(.system(size: 13, weight: .medium))
-                            Text(model.pairing == nil ? "尚未配对" : model.connected ? "已连接依米" : model.connectionLabel)
+                            Text(model.pairing == nil ? model.unpairStatus ?? "尚未配对" : model.connected ? "已连接依米" : model.connectionLabel)
                                 .font(.system(size: 11)).foregroundStyle(Yimi.ink2).frame(minHeight: 18)
                         }
                         Spacer()
                         Button("解除配对…") { confirmUnpair = true }.buttonStyle(DesktopAndroidSettingsButtonStyle())
-                            .disabled(!model.connected || model.pairing == nil)
+                            .disabled(!model.canUnpair)
                     }.padding(.horizontal, 14).padding(.vertical, 13)
                     Rectangle().fill(Yimi.hair).frame(height: 1)
                     if rendering {

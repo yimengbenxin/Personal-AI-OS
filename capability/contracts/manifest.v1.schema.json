@@ -72,6 +72,59 @@
         },
         "long_running": {
           "type": "boolean"
+        },
+        "send_consent": {
+          "type": "object",
+          "properties": {
+            "recipient": {
+              "enum": [
+                "wechat",
+                "channel"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "message.text",
+                "message.file",
+                "message.reaction",
+                "message.reaction_remove"
+              ]
+            },
+            "kinds": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "enum": [
+                  "message.text",
+                  "message.file",
+                  "message.reaction",
+                  "message.reaction_remove"
+                ]
+              }
+            }
+          },
+          "required": [
+            "recipient"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {}
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "properties": {
+                "kinds": {}
+              },
+              "required": [
+                "kinds"
+              ]
+            }
+          ],
+          "additionalProperties": false
         }
       },
       "required": [],
@@ -168,7 +221,7 @@
           "name": {
             "type": "string",
             "minLength": 1,
-              "pattern": "\\S"
+            "pattern": "\\S"
           }
         },
         "required": [

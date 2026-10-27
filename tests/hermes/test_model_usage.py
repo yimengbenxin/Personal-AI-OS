@@ -38,6 +38,40 @@ def configure(tmp_path, monkeypatch):
     return facts
 
 
+RECORDED_USAGE = json.loads((ROOT / 'tests/hermes/fixtures/model-usage-responses.json').read_text())['cases']
+
+
+@pytest.mark.parametrize('case', RECORDED_USAGE, ids=lambda case: case['id'])
+@pytest.mark.parametrize('async_mode', [False, True])
+def test_raw_usage_protocol_priority(tmp_path, monkeypatch, case, async_mode):
+    facts = configure(tmp_path, monkeypatch)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=case['response']))
+    url = 'https://primary.invalid/v1/' + case['route']
+    if async_mode:
+        async def run():
+            async with usage.instrument(httpx.AsyncClient(transport=transport)) as client:
+                assert (await client.post(url, json={'model': 'fake-model'})).json() == case['response']
+        asyncio.run(run())
+    else:
+        with usage.instrument(httpx.Client(transport=transport)) as client:
+            assert client.post(url, json={'model': 'fake-model'}).json() == case['response']
+    assert len(facts) == 1 and facts[0]['status'] == 'completed'
+    assert facts[0]['original_usage'] == case['expected_usage']
+
+
+def test_messages_partial_usage_keeps_earlier_counters_without_summing(tmp_path, monkeypatch):
+    facts = configure(tmp_path, monkeypatch)
+    start = {'type': 'message_start', 'message': {'usage': {
+        'input_tokens': 100, 'output_tokens': 1, 'cache_read_input_tokens': 12, 'cache_creation_input_tokens': 5}}}
+    delta = {'type': 'message_delta', 'usage': {'output_tokens': 20}}
+    body = b''.join(b'data: ' + json.dumps(event).encode() + b'\n\n' for event in (start, start, delta, {'type': 'message_stop'}))
+    with usage.instrument(httpx.Client(transport=httpx.MockTransport(lambda request:
+            httpx.Response(200, content=body, headers={'content-type': 'text/event-stream'})))) as client:
+        client.post('https://primary.invalid/v1/messages', json={'model': 'fake-model'})
+    assert facts[0]['original_usage'] == {'input_tokens': 100, 'output_tokens': 20,
+        'cache_read_input_tokens': 12, 'cache_creation_input_tokens': 5}
+
+
 @pytest.fixture
 def provider():
     """Real HTTP content decoding and incremental SSE, without a paid provider."""
@@ -541,8 +575,9 @@ def test_auxiliary_without_native_run_keeps_existing_front_inference_supported(m
 
 def test_nonrun_source_started_is_durable_before_wire_and_completion_reuses_uuid(tmp_path, monkeypatch):
     import pytest
+    import io
     from contextlib import nullcontext
-    from urllib.error import URLError
+    from urllib.error import HTTPError, URLError
     from types import SimpleNamespace
     facts = configure(tmp_path, monkeypatch)
     origin = {'kind': 'capture', 'raw_ref': 'l5:exact-frame', 'archive_revision': 'exact-revision',
@@ -563,7 +598,7 @@ def test_nonrun_source_started_is_durable_before_wire_and_completion_reuses_uuid
     def receive(request, timeout):
         fact = json.loads(request.data)
         if reject:
-            raise URLError('fixture-start-unavailable')
+            raise reject if isinstance(reject, Exception) else URLError('fixture-start-unavailable')
         facts.append(fact)
         return nullcontext(SimpleNamespace(read=lambda limit: b'{}'))
     monkeypatch.setattr(real, 'urlopen', receive)
@@ -579,6 +614,10 @@ def test_nonrun_source_started_is_durable_before_wire_and_completion_reuses_uuid
         assert facts[0]['source_context'] == origin
         reject = True
         with pytest.raises(RuntimeError, match='MODEL_USAGE_START_UNAVAILABLE'):
+            client.post('https://primary.invalid/v1/chat/completions', json={'model': 'fake-model'})
+        reject = HTTPError('http://integration.invalid', 403, 'Forbidden', {},
+                           io.BytesIO(b'{"error":{"code":"MODEL_USAGE_SOURCE_MISMATCH"}}'))
+        with pytest.raises(RuntimeError, match='MODEL_USAGE_START_UNAVAILABLE 403 .*MODEL_USAGE_SOURCE_MISMATCH'):
             client.post('https://primary.invalid/v1/chat/completions', json={'model': 'fake-model'})
         from agent import model_usage as native_usage
         monkeypatch.setattr(usage, 'journal_context', native_usage.journal_context)

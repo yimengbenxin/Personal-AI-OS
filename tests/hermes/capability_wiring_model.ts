@@ -5,7 +5,7 @@ import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
-import {PersonalAIOSRuntime,RunAdmission,sourceClient,type NativeClient,type NativeRun} from '../../01-product-half-finished/backend/services/personal-aios-integration/tests/native-source-fixture.ts';
+import {PersonalAIOSRuntime,RunAdmission,sourceClient,nativeSubmission,type NativeClient,type NativeRun} from '../../01-product-half-finished/backend/services/personal-aios-integration/tests/native-source-fixture.ts';
 import {PosixStorage} from '../../01-product-half-finished/backend/services/personal-aios-integration/src/storage.ts';
 import {RawArchive} from '../../01-product-half-finished/backend/services/personal-aios-integration/src/archive.ts';
 import {OutputAuthority} from '../../01-product-half-finished/backend/services/personal-aios-integration/src/output.ts';
@@ -75,7 +75,7 @@ async function owner(prompt:string){
 }
 async function turn(name:string,bound:{run:string;session:string},prompt:string,tools:string[],system:string,scope='owner'){
   const next=Promise.withResolvers<any>();pending.set(name,next);
-  child.stdin.write(JSON.stringify({name,...bound,prompt,tools,system,scope})+'\n');
+  child.stdin.write(JSON.stringify({name,...bound,prompt,input:nativeSubmission(native,bound.run).input,tools,system,scope})+'\n');
   const result=await next.promise;pending.delete(name);evidence.push(result);
   await writeFile(join(out!,'model-turns.json'),JSON.stringify(evidence,null,2));
   console.log(name,JSON.stringify({calls:result.calls?.map((c:any)=>c.tool),final:result.final,error:result.error,sent:result.sent}));

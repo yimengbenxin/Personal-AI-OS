@@ -84,10 +84,11 @@ const handlers:{[K in ThreadRequest['op']]:(request:Extract<ThreadRequest,{op:K}
     // Multi-label AudioSet scores: below 0.5 the top label is a guess; speech and microphone breath can otherwise be tagged as sneezes.
     return best&&best.prob>=0.5?Object.entries(HEALTH_SOUNDS).find(([,v])=>v[0]===best.name)?.[0]:undefined;
   },
-  transcribe:({samples:input})=>{
+  transcribe:({samples:input,words_only})=>{
     need(samples(input).length>0,'SPEECH_INPUT_EMPTY');const model=asr();
     const s=model.createStream();s.acceptWaveform({sampleRate:rate,samples:input});model.decode(s);
-    return senseVoiceTranscript(model.getResult(s));
+    const result=model.getResult(s);
+    return words_only?{text:result.text.replace(/<\|[^|]*\|>/gu,'').trim()}:senseVoiceTranscript(result);
   },
   embed:({samples:input})=>{
     need(samples(input).length>0,'SPEECH_INPUT_EMPTY');const model=speaker();

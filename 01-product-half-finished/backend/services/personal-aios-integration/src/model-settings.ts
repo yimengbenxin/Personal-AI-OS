@@ -7,11 +7,20 @@ import {validateModelSnapshot,immutableReadOnly,modelRoleKey,type ModelSnapshot,
 import {probeModelConnection} from './model-settings-probe.ts';
 import {fetchModelCatalog} from './model-settings-catalog.ts';
 import {defaultCacheWriteBilling,type ModelUsage,type UsageAttempt} from './model-usage.ts';
+import {localModelKinds,localModelPin,localModelInstalled,validateLocalSwitch,type LocalModelKind,type LocalModelEntry,type LocalModelSelection,type LocalModelCatalog} from './model-settings-local-catalog.ts';
 
 interface Actor {principal_id:string;device_id:string}
 type Group='brain'|'build';
 interface GroupState {desired:number;effective:number;status:'pending'|'applying'|'effective'|'failed';error:string|null}
 interface Revision {revision:number;snapshot:ModelSnapshot;versions:Record<string,number>}
+export interface LocalModelState {
+  kind:LocalModelKind;desired:LocalModelSelection;effective:LocalModelSelection;previous?:LocalModelSelection;
+  installing?:LocalModelSelection;status:'effective'|'restart_required'|'pending'|'applying'|'failed';error:string|null;
+  progress?:{done:number;total:number};
+}
+export interface LocalActivationContext {
+  signal:AbortSignal;current:()=>boolean;progress:(value:{done:number;total:number})=>void;commit:(install:()=>void)=>void;
+}
 export interface ModelSettingsDraft extends Revision,Actor {
   draft_id:string;environment_id:string;action:SettingsAction;expected_revision:number;change_sha256:string;
   expires_at_ms:number;payload:Record<string,unknown>;preview:Record<string,unknown>;sealed_key?:SealedModelKey;
@@ -23,10 +32,13 @@ interface Options {
   onEffective?:(group:Group,revision:number,authority:ModelSettingsAuthority)=>void;
   probe?:typeof probeModelConnection;
   probeUsage?:()=>ModelUsage;
+  local_catalog?:()=>LocalModelCatalog;
 }
 const DDL=`CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS model_revisions(revision INTEGER PRIMARY KEY,previous INTEGER,body TEXT NOT NULL,actor TEXT NOT NULL,created_at TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS model_groups(name TEXT PRIMARY KEY,desired INTEGER NOT NULL,effective INTEGER NOT NULL,status TEXT NOT NULL,error TEXT) STRICT;
+CREATE TABLE IF NOT EXISTS model_activation_leases(name TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(name,revision)) STRICT;
+CREATE TABLE IF NOT EXISTS model_local_state(kind TEXT PRIMARY KEY,body TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS model_drafts(id TEXT PRIMARY KEY,body TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS model_receipts(principal TEXT NOT NULL,device TEXT NOT NULL,nonce TEXT NOT NULL,draft TEXT NOT NULL,fingerprint TEXT,body TEXT NOT NULL,PRIMARY KEY(principal,device,nonce)) STRICT;`;
 
@@ -40,6 +52,7 @@ export class ModelSettingsAuthority {
   private readonly handleKey:Buffer;
   private readonly listeners=new Set<()=>void>();
   private readonly activating=new Map<Group,Promise<GroupState>>();
+  private readonly localActivating=new Map<LocalModelKind,{controller:AbortController;work:Promise<LocalModelState>}>();
   private constructor(db:DatabaseSync,options:Options){
     this.db=db;this.options=options;this.environment_id=options.environment_id;this.now=options.now??Date.now;
     const environment=db.prepare("SELECT value FROM meta WHERE key='environment'").get() as {value:string}|undefined;
@@ -67,6 +80,62 @@ export class ModelSettingsAuthority {
     check(row,'MODEL_SETTINGS_REVISION_UNKNOWN',404);return JSON.parse(row.body) as Revision;
   }
   readRevision(revision:number):Revision {return this.revision(revision);}
+  localState(kind:LocalModelKind):LocalModelState|undefined {
+    const row=this.db.prepare('SELECT body FROM model_local_state WHERE kind=?').get(kind);return row?JSON.parse(String(row.body)):undefined;
+  }
+  localStates():LocalModelState[]{return this.db.prepare('SELECT body FROM model_local_state ORDER BY kind').all().map(row=>JSON.parse(String(row.body)));}
+  private saveLocal(state:LocalModelState){this.db.prepare('INSERT INTO model_local_state VALUES(?,?) ON CONFLICT(kind) DO UPDATE SET body=excluded.body').run(state.kind,canonical(state));}
+  /** Initial identities come from actual pre-existing producers, never from the newly selected candidate. */
+  registerLocalBaseline(entry:LocalModelEntry):void {
+    if(this.localState(entry.kind))return;const selected={generation:0,entry:structuredClone(entry)};
+    this.saveLocal({kind:entry.kind,desired:selected,effective:selected,status:'effective',error:null});
+  }
+  localSelection(kind:LocalModelKind){return this.localState(kind)?.desired;}
+  localCandidates(kind:LocalModelKind):LocalModelSelection[]{
+    const state=this.localState(kind);return state?[state.effective,state.installing,state.previous].filter((value):value is LocalModelSelection=>!!value):[];
+  }
+  localModelCurrent(kind:LocalModelKind,generation:number):boolean {return this.localState(kind)?.desired.generation===generation;}
+  localCatalog(request:{offset?:number}={}){
+    const catalog=this.options.local_catalog?.();
+    const models=catalog?.models??[],offset=request.offset??0;
+    check(Number.isSafeInteger(offset)&&offset>=0&&offset<=models.length,'MODEL_SETTINGS_PAGE_INVALID');
+    return {catalog_id:catalog?.catalog_id??null,items:models.slice(offset,offset+8).map(entry=>({id:entry.id,kind:entry.kind,display_name:entry.display_name,
+      installed:localModelInstalled(entry),switchable:entry.kind!=='face',requires:entry.kind==='voiceprint'?'reenrollment_and_calibration':entry.kind==='embedding'?'reindex':entry.kind==='face'?'face_enrollment':'service_restart'})),next_offset:offset+8<models.length?offset+8:null};
+  }
+  publicLocalStates(){
+    const selection=(value:LocalModelSelection)=>({generation:value.generation,id:value.entry.id,display_name:value.entry.display_name});
+    return this.localStates().map(state=>({kind:state.kind,desired:selection(state.desired),effective:selection(state.effective),
+      previous:state.previous?selection(state.previous):null,status:state.status,error:state.error,progress:state.progress??null,
+      payment_voice_model_pending:state.kind==='voiceprint'&&state.desired.generation!==state.effective.generation}));
+  }
+  /** The persisted installing generation survives a crash between a derived index switch and its ACK. */
+  async activateLocal(kind:LocalModelKind,install:(selection:LocalModelSelection,context:LocalActivationContext)=>Promise<void>):Promise<LocalModelState> {
+    const running=this.localActivating.get(kind);if(running)return running.work;
+    const state=this.localState(kind);check(state,'LOCAL_MODEL_NOT_CONFIGURED',409);
+    if(state.desired.generation===state.effective.generation&&!state.installing)return state;
+    const target=structuredClone(state.desired),controller=new AbortController();let committed=false;
+    const current=()=>!controller.signal.aborted&&this.localState(kind)?.desired.generation===target.generation;
+    const saveProgress=(value:{done:number;total:number})=>{if(!current())return;const next=this.localState(kind)!;
+      check(Number.isSafeInteger(value.done)&&Number.isSafeInteger(value.total)&&value.done>=0&&value.done<=value.total,'LOCAL_MODEL_PROGRESS_INVALID');
+      next.progress=value;this.saveLocal(next);this.changed();};
+    state.installing=target;state.status='applying';state.error=null;delete state.progress;this.saveLocal(state);this.changed();
+    const work=(async()=>{
+      try{
+        await Promise.resolve().then(()=>install(target,{signal:controller.signal,current,progress:saveProgress,commit:apply=>{
+          check(current(),'LOCAL_MODEL_ACTIVATION_SUPERSEDED',409);
+          inTransaction(this.db,()=>{const next=this.localState(kind)!;apply();
+            if(next.effective.generation!==target.generation)next.previous=next.effective;
+            next.effective=target;delete next.installing;delete next.progress;next.status='effective';next.error=null;this.saveLocal(next);});committed=true;
+        }}));
+        check(committed,'LOCAL_MODEL_ACK_REQUIRED',503);
+      }catch(error){
+        const next=this.localState(kind)!;
+        if(next.desired.generation===target.generation){next.status='failed';next.error=(error as {code?:string}).code?.match(/^(?:LOCAL_MODEL|LOCAL_EMBEDDING|VISUAL_EMBEDDING|SPEECH_MODEL)_[A-Z_]+$/u)?.[0]??'LOCAL_MODEL_ACTIVATION_FAILED';this.saveLocal(next);}
+      }finally{this.localActivating.delete(kind);this.changed();}
+      return this.localState(kind)!;
+    })();this.localActivating.set(kind,{controller,work});return work;
+  }
+  async stopLocalActivations():Promise<void>{for(const value of this.localActivating.values())value.controller.abort();await Promise.all([...this.localActivating.values()].map(value=>value.work));}
   private versions(snapshot:ModelSnapshot,preferred:Record<string,number>={}):Record<string,number> {
     return Object.fromEntries(snapshot.providers.filter(p=>p.credential_ref!==null).map(p=>[p.credential_ref!,preferred[p.credential_ref!]??this.vault.version(p.credential_ref!)??0]));
   }
@@ -93,19 +162,22 @@ export class ModelSettingsAuthority {
     const versions=Object.fromEntries(providers.filter(provider=>provider.credential_ref!==null).map(provider=>[provider.credential_ref!,value.versions[provider.credential_ref!]]));
     return {roles,inherited:[...inherited.values()],providers,versions};
   }
-  /** A pending new key coexists with the effective key only until every user of it acknowledges activation. */
+  /** Effective and possibly installed generations retain their keys until a replacement ACK. */
   private promoteKeys():boolean {
     const latest=this.revision(this.latest());let changed=false;
-    const effective=this.db.prepare('SELECT name,effective FROM model_groups').all() as {name:Group;effective:number}[];
+    const retained=this.db.prepare(`SELECT name,effective AS revision FROM model_groups
+      UNION SELECT name,revision FROM model_activation_leases`).all() as {name:Group;revision:number}[];
+    const uses=(ref:string,version:number)=>retained.some(group=>this.groupFacts(this.revision(group.revision),group.name).versions[ref]===version);
     for(const draft of this.keyDrafts()){
       const key=draft.sealed_key!,desired=latest.versions[key.ref]===key.version;
-      if(!desired&&effective.some(group=>this.groupFacts(this.revision(group.effective),group.name).versions[key.ref]===key.version))continue;
-      if(desired&&effective.some(group=>{const version=this.groupFacts(this.revision(group.effective),group.name).versions[key.ref];
+      if(!desired&&uses(key.ref,key.version))continue;
+      if(desired&&retained.some(group=>{const version=this.groupFacts(this.revision(group.revision),group.name).versions[key.ref];
         return version!==undefined&&version!==key.version;}))continue;
       if(desired&&this.vault.version(key.ref)!==key.version)this.vault.save(key);
       for(const row of this.db.prepare('SELECT id,body FROM model_drafts').all() as {id:string;body:string}[]){
         const candidate=JSON.parse(row.body) as ModelSettingsDraft;
-        if(candidate.sealed_key?.ref===key.ref&&candidate.sealed_key.version<=key.version){delete candidate.sealed_key;
+        if(candidate.sealed_key?.ref===key.ref&&candidate.sealed_key.version<=key.version&&
+          (!uses(key.ref,candidate.sealed_key.version)||this.vault.version(key.ref)===candidate.sealed_key.version)){delete candidate.sealed_key;
           this.db.prepare('UPDATE model_drafts SET body=? WHERE id=?').run(canonical(candidate),row.id);changed=true;}
       }
     }
@@ -137,7 +209,8 @@ export class ModelSettingsAuthority {
     const groups=Object.fromEntries(this.db.prepare('SELECT * FROM model_groups').all().map(row=>[row.name,{desired:row.desired,effective:row.effective,status:row.status,error:row.error??(cleanupPending?'MODEL_SETTINGS_VAULT_CLEANUP_FAILED':null)}])) as Record<Group,GroupState>;
     const refs=new Set([...(current?.snapshot.providers??[]).flatMap(provider=>provider.credential_ref?[provider.credential_ref]:[]),...Object.keys(current?.versions??{})]);
     const credentials=Object.fromEntries([...refs].map(ref=>[ref,this.vault.projection(ref,this.staged(ref,current!.versions[ref]??0,desired))]));
-    return {environment_id:this.environment_id,desired,groups,providers:current?.snapshot.providers??[],roles:current?.snapshot.roles??[],credentials};
+    const locals=this.publicLocalStates();
+    return {environment_id:this.environment_id,desired,groups,providers:current?.snapshot.providers??[],roles:current?.snapshot.roles??[],credentials,...(locals.length?{local_models:locals}:{})};
   }
   resolve(environment:string,profile:string,roleId:string,revision:number):ModelResolution {
     check(environment===this.environment_id,'MODEL_SETTINGS_ENVIRONMENT_MISMATCH',403);
@@ -166,7 +239,7 @@ export class ModelSettingsAuthority {
   draft(source:Actor,request:SettingsDraftRequest){
     check(Number.isSafeInteger(request.expected_revision)&&request.expected_revision===this.latest(),'MODEL_SETTINGS_REVISION_CONFLICT',409);
     const action=request.action??'commit',current=this.revision(request.expected_revision);
-    let snapshot=current.snapshot,versions=current.versions;
+    let snapshot=current.snapshot,versions=current.versions,payload:object=request;
     if(action==='commit'){
       check(request.providers||request.roles,'MODEL_SETTINGS_SNAPSHOT_REQUIRED');
       const providers=new Map(current.snapshot.providers.map(provider=>[provider.id,provider]));
@@ -178,12 +251,23 @@ export class ModelSettingsAuthority {
     }else if(action==='undo'){
       check(Number.isSafeInteger(request.revision),'MODEL_SETTINGS_REVISION_UNKNOWN');const target=this.revision(request.revision!);
       snapshot=target.snapshot;versions=target.versions;this.requireKeys(snapshot,versions,undefined,request.revision!);
+    }else if(action==='switch_local'){
+      check(localModelKinds.includes(request.local_kind!),'LOCAL_MODEL_KIND_INVALID');
+      const state=this.localState(request.local_kind!);check(state,'LOCAL_MODEL_NOT_CONFIGURED',409);
+      const catalog=this.options.local_catalog?.(),retained=request.local_target==='previous'||request.local_target==='effective';
+      const entry=request.local_target==='previous'?state.previous?.entry:request.local_target==='effective'?state.effective.entry:
+        catalog?.models.find(entry=>entry.id===request.local_target&&entry.kind===request.local_kind);
+      check(entry,'LOCAL_MODEL_NOT_IN_CATALOG',409);validateLocalSwitch(state.effective.entry,entry);
+      check(localModelPin(entry)!==localModelPin(state.desired.entry),'LOCAL_MODEL_ALREADY_SELECTED',409);
+      payload={action,expected_revision:request.expected_revision,local_kind:request.local_kind,local_target:request.local_target,
+        local_entry:entry,local_pin:localModelPin(entry),local_catalog_id:retained?null:catalog!.catalog_id,
+        change_summary:request.change_summary??`local ${request.local_kind}: ${state.effective.entry.display_name} → ${entry.display_name}`};
     }else if(action==='authorize_mac')check(typeof request.device_id==='string'&&typeof request.public_x963_b64==='string','MODEL_SETTINGS_MAC_KEY_REQUIRED');
     else if(action==='pause'){
       check(typeof request.pause_on_limit==='boolean','MODEL_SETTINGS_BUDGET_INVALID');
       check(request.owner_reserve_cny===undefined||Number.isFinite(request.owner_reserve_cny)&&request.owner_reserve_cny>=1&&Number.isSafeInteger(Math.round(request.owner_reserve_cny*1_000_000)),'MODEL_SETTINGS_RESERVE_INVALID');
     }else check(action==='resume','MODEL_SETTINGS_ACTION_INVALID');
-    return this.saveDraft(source,action,request,snapshot,versions);
+    return this.saveDraft(source,action,payload,snapshot,versions);
   }
   keyDraft(source:Actor,request:{expected_revision:number;credential_ref:string;key:string}){
     check(request.expected_revision===this.latest(),'MODEL_SETTINGS_REVISION_CONFLICT',409);const current=this.revision(request.expected_revision);
@@ -197,6 +281,9 @@ export class ModelSettingsAuthority {
       snapshot:structuredClone(snapshot),versions:{...versions},payload:structuredClone(payload) as Record<string,unknown>,expires_at_ms:this.now()+300_000,
       change_sha256:sha256(canonical({action,payload,snapshot,versions,...(sealed_key?{key:{ref:sealed_key.ref,version:sealed_key.version,ciphertext:sealed_key.ciphertext}}:{})})),
       preview:{change_summary:(payload as SettingsDraftRequest).change_summary??action,provider_count:snapshot.providers.length,role_count:snapshot.roles.length,
+        ...(action==='switch_local'?{local_kind:(payload as SettingsDraftRequest).local_kind,local_target:(payload as SettingsDraftRequest).local_target,
+          local_model:{id:(payload as {local_entry:LocalModelEntry}).local_entry.id,display_name:(payload as {local_entry:LocalModelEntry}).local_entry.display_name,pin:(payload as {local_pin:string}).local_pin},
+          requires:(payload as SettingsDraftRequest).local_kind==='embedding'?'reindex':(payload as SettingsDraftRequest).local_kind==='voiceprint'?'service_restart_then_reenrollment_and_calibration':'service_restart'}:{}),
         ...(sealed_key?{key:{credential_ref:sealed_key.ref,configured:true,last4:sealed_key.last4}}:{})},...(sealed_key?{sealed_key}:{})};
     this.db.prepare('INSERT INTO model_drafts VALUES(?,?)').run(draft.draft_id,canonical(draft));
     return this.publicDraft(draft);
@@ -218,14 +305,33 @@ export class ModelSettingsAuthority {
     const row=this.db.prepare('SELECT draft,fingerprint,body FROM model_receipts WHERE principal=? AND device=? AND nonce=?').get(source.principal_id,source.device_id,nonce) as {draft:string;fingerprint:string|null;body:string}|undefined;
     if(!row)return undefined;check(row.draft===id&&(row.fingerprint??undefined)===fingerprint,'MODEL_SETTINGS_NONCE_CONFLICT',409);return JSON.parse(row.body) as ReturnType<ModelSettingsAuthority['read']>;
   }
+  /** Committed approval generation is the cross-store replay authority, independent of registry commit timing. */
+  latestMacAuthorization(principal_id:string,device_id:string):{revision:number;public_x963_b64:string}|undefined {
+    const row=this.db.prepare(`SELECT r.revision,json_extract(d.body,'$.payload.public_x963_b64') AS public_x963_b64
+      FROM model_revisions r JOIN model_drafts d ON d.id=json_extract(r.actor,'$.draft_id')
+      WHERE json_extract(r.actor,'$.action')='authorize_mac' AND json_extract(r.actor,'$.principal_id')=?
+        AND json_extract(d.body,'$.payload.device_id')=? ORDER BY r.revision DESC LIMIT 1`).get(principal_id,device_id);
+    return row as {revision:number;public_x963_b64:string}|undefined;
+  }
   commitDraft(source:Actor,id:string,nonce:string,fingerprint?:string){
     const cached=this.cached(source,id,nonce,fingerprint);if(cached)return cached;
     const draft=this.getDraft(source,id);check(draft.expires_at_ms>this.now(),'MODEL_SETTINGS_DRAFT_EXPIRED',409);
     check(draft.expected_revision===this.latest(),'MODEL_SETTINGS_REVISION_CONFLICT',409);
     if(['commit','undo','set_key'].includes(draft.action))this.requireKeys(draft.snapshot,draft.versions,draft.sealed_key);
+    if(draft.action==='switch_local'){
+      const kind=draft.payload.local_kind as LocalModelKind,state=this.localState(kind)!;
+      const entry=draft.payload.local_target==='previous'?state.previous?.entry:draft.payload.local_target==='effective'?state.effective.entry:
+        this.options.local_catalog?.().models.find(entry=>entry.id===draft.payload.local_target&&entry.kind===kind);
+      check(entry&&localModelPin(entry)===draft.payload.local_pin,'LOCAL_MODEL_CATALOG_CHANGED',409);validateLocalSwitch(state.effective.entry,entry);
+    }
     let purged=false;const result=inTransaction(this.db,()=>{
       const next={revision:draft.revision,snapshot:draft.snapshot,versions:draft.versions};
       this.db.prepare('INSERT INTO model_revisions VALUES(?,?,?,?,?)').run(draft.revision,draft.expected_revision,canonical(next),canonical({...source,action:draft.action,draft_id:id,change_sha256:draft.change_sha256,nonce}),new Date(this.now()).toISOString());
+      if(draft.action==='switch_local'){
+        const kind=draft.payload.local_kind as LocalModelKind,state=this.localState(kind)!;
+        state.desired={generation:draft.revision,entry:draft.payload.local_entry as LocalModelEntry};
+        state.status=kind==='embedding'?'pending':'restart_required';state.error=null;delete state.progress;this.saveLocal(state);
+      }
       if(['commit','undo','set_key'].includes(draft.action)){
         const previous=this.revision(draft.expected_revision);
         for(const group of ['brain','build'] as const){
@@ -240,19 +346,28 @@ export class ModelSettingsAuthority {
       purged=this.promoteKeys();
       const receipt=this.read();this.db.prepare('INSERT INTO model_receipts VALUES(?,?,?,?,?,?)').run(source.principal_id,source.device_id,nonce,id,fingerprint??null,canonical(receipt));return receipt;
     });
+    if(draft.action==='switch_local')this.localActivating.get(draft.payload.local_kind as LocalModelKind)?.controller.abort();
     if(purged)this.checkpointPendingKeys();this.changed();return purged?this.read():result;
   }
   async activateIdle(group:Group,idle:boolean):Promise<GroupState>{
     const current=this.read().groups[group];check(current,'MODEL_SETTINGS_GROUP_UNKNOWN');
-    if(!idle||current.desired===current.effective)return current;
+    const recovering=!!this.db.prepare('SELECT 1 FROM model_activation_leases WHERE name=?').get(group);
+    if(!idle||current.desired===current.effective&&!recovering)return current;
     const existing=this.activating.get(group);if(existing)return existing;
-    const work=(async()=>{
-      this.db.prepare("UPDATE model_groups SET status='applying',error=NULL WHERE name=?").run(group);this.changed();
+    // Persist before Native can read a key or install a revision. A lost ACK is uncertain, including after restart.
+    inTransaction(this.db,()=>{
+      this.db.prepare('INSERT OR IGNORE INTO model_activation_leases VALUES(?,?)').run(group,current.desired);
+      this.db.prepare("UPDATE model_groups SET status='applying',error=NULL WHERE name=?").run(group);
+    });
+    const work=Promise.resolve().then(async()=>{
+      this.changed();
       try{
         check(this.options.activate,'MODEL_SETTINGS_ACTIVATOR_UNAVAILABLE',503);
         await this.options.activate(group,current.desired,this);
         const purged=inTransaction(this.db,()=>{
           this.db.prepare("UPDATE model_groups SET effective=?,status=CASE WHEN desired=? THEN 'effective' ELSE 'pending' END,error=NULL WHERE name=?").run(current.desired,current.desired,group);
+          // This ACK also resolves every uncertain prior install for this group, including crash recovery/rollback.
+          this.db.prepare('DELETE FROM model_activation_leases WHERE name=?').run(group);
           return this.promoteKeys();});
         if(purged)this.checkpointPendingKeys();
         try{this.options.onEffective?.(group,current.desired,this);}
@@ -262,7 +377,7 @@ export class ModelSettingsAuthority {
         this.db.prepare('UPDATE model_groups SET status=?,error=? WHERE name=?').run(pending?'pending':'failed',pending?null:'MODEL_SETTINGS_ACTIVATION_FAILED',group);
       }finally{this.activating.delete(group);this.changed();}
       return this.read().groups[group];
-    })();this.activating.set(group,work);return work;
+    });this.activating.set(group,work);return work;
   }
   async testConnection(source:Actor,request:{draft_id:string;profile:string;role:string}){
     const draft=this.getDraft(source,request.draft_id);check(draft.expires_at_ms>this.now(),'MODEL_SETTINGS_DRAFT_EXPIRED',409);

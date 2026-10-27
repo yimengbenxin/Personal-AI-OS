@@ -73,7 +73,7 @@ fixtures:
     state: succeeded
   - id: empty_status
     input: {jobs: []}
-    state: unknown
+    state: succeeded
   - id: stopped_step
     input: {state: stopping}
     state: running

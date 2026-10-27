@@ -28,7 +28,7 @@ For structure and terms see the [Technical plan](technical-plan.md); for mechani
 |---|---|---|---|
 | 1 Wake and upload | Device | Glasses, iPhone and Mac listen locally for "Yimi" (依米) with a Sherpa keyword model, then upload the speech; or the user sends text directly | Outside the wake or follow-up window it is only an ambient observation and does not enter the request path |
 | 2 Transcribe and connect | Gateway | Validates the paired device's identity; for non-call input the Qwen realtime front end only transcribes, without answering or acting | Device identity mismatch: connection refused |
-| 3 Admission and identity | Integration (admission) | Voiceprint decision sets the run scope; the original goes into L5; the sentence is written to the timeline | Identity unconfirmed or a guest: only tools for that scope are open; no private information is read and no errands are run |
+| 3 Admission and identity | Integration (admission) | Voiceprint decision uses saved per-capture-channel verification thresholds and sets the run scope; the original goes into L5; the sentence is written to the timeline | Identity unconfirmed or a guest: only tools for that scope are open; no private information is read and no errands are run |
 | 4 Start the run | Integration → Hermes | `POST /v1/runs`; the run is bound to the admission record | Missing run binding: every later tool call is refused |
 | 5 First answer and delegation | Main agent | First says what it will do next, then delegates asynchronously to a subagent; the turn ends | Async pool full or the session does not support async callbacks: delegate synchronously instead |
 | 6 Act | Background subagent | Capability-package tool calls follow F2; native tools keep their own attachments | See F2 |

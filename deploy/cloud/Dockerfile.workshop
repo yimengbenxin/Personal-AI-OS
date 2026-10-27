@@ -13,9 +13,9 @@ COPY --from=gateway_runtime /opt/paios/01-product-half-finished/backend/services
 COPY --from=gateway_runtime /opt/paios/01-product-half-finished/backend/phase0/gateway/package.json /tmp/paios-gateway-package.json
 RUN if [ "$PAIOS_BUILD_MAINLAND_MIRRORS" = "1" ]; then export npm_config_registry=https://registry.npmmirror.com; fi && npm install --prefix /opt/paios-repair-tools --ignore-scripts --no-audit --no-fund "typescript@$(node -p 'require("/tmp/paios-gateway-package.json").devDependencies.typescript')" && rm /tmp/paios-gateway-package.json
 RUN useradd --uid 10001 --create-home --home-dir /home/yimi --shell /bin/bash yimi && passwd -d yimi && passwd -d root && printf '%s\n' 'Port 2222' 'HostKey /var/lib/workshop-ssh/host_ed25519' 'AuthorizedKeysFile /run/workshop-access/authorized_keys' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin forced-commands-only' 'AllowUsers root' 'DisableForwarding yes' 'PermitUserEnvironment no' 'PermitUserRC no' 'UsePAM no' 'ClientAliveInterval 5' 'ClientAliveCountMax 3' 'PidFile /run/sshd.pid' 'Subsystem sftp internal-sftp' 'SetEnv PATH=/usr/local/bin:/usr/bin:/bin' > /etc/ssh/sshd_config
-COPY deploy/cloud/workshop-scope.py /usr/local/bin/workshop-scope
+COPY --chmod=0755 deploy/cloud/workshop-scope.py /usr/local/bin/workshop-scope
 COPY deploy/cloud/workshop_snapshot.py /usr/local/bin/workshop_snapshot.py
-COPY deploy/cloud/workshop-start.sh /usr/local/bin/workshop-start
+COPY --chmod=0755 deploy/cloud/workshop-start.sh /usr/local/bin/workshop-start
 RUN chmod 755 /usr/local/bin/workshop-start /usr/local/bin/workshop-scope && printf '%s\n' 'export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin PIP_USER=1 PIP_BREAK_SYSTEM_PACKAGES=1 NPM_CONFIG_PREFIX=$HOME/.local' > /etc/profile.d/workshop.sh && if [ "$PAIOS_BUILD_MAINLAND_MIRRORS" = "1" ]; then printf '%s\n' 'export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple NPM_CONFIG_REGISTRY=https://registry.npmmirror.com' >> /etc/profile.d/workshop.sh; fi
 RUN install -d -o 0 -g 0 -m 700 /srv/owner && install -d -o 0 -g 0 -m 755 /srv/owner/in /srv/owner/out /owner /owner/in /owner/out && touch /srv/owner/config.json
 ENTRYPOINT ["/usr/local/bin/workshop-start"]

@@ -1,5 +1,6 @@
 <resources>
     <item name="activity_status" type="id" />
+    <item name="companion_reply" type="id" />
     <item name="ambient_toggle" type="id" />
     <item name="ambient_retry" type="id" />
     <item name="ambient_status" type="id" />

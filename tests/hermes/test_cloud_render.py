@@ -105,11 +105,41 @@ class CloudRenderTests(unittest.TestCase):
 
     def copy_renderer(self, root):
         for relative in ("deploy/cloud/prepare-build.py", "deploy/cloud/staging_config.py", "deploy/cloud/cloud.json",
-                         "deploy/cloud/front.conf.in",
+                         "deploy/cloud/front.conf.in", "deploy/cloud/paios-staging-snapshot.timer",
                          "deploy/cloud/paios_roaming_guard.js.in"):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
+
+    def test_time_zone_default_override_private_config_and_staging(self):
+        for zone in ('America/Los_Angeles', 'UTC', 'Asia/Taipei'):
+            with self.subTest(zone=zone), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.copy_renderer(root)
+                script = root / 'deploy/cloud/prepare-build.py'
+                config = script.parent / 'cloud.json'
+                product = json.loads(config.read_text())
+                product.pop('time_zone')  # public deployment has no private instance override
+                config.write_text(json.dumps(product))
+                environment = dict(os.environ, PAIOS_PUBLIC_API_URL=CANONICAL,
+                                   PAIOS_LEGACY_PUBLIC_API_URLS='', TZ=zone, PAIOS_TIME_ZONE='')
+                def render():
+                    subprocess.run([sys.executable, str(script), '--config-only'], env=environment,
+                                   check=True, capture_output=True)
+                    return [json.loads((script.parent / '.build' / name).read_text())
+                            for name in ('production.json', 'staging.json')]
+                for output in render():
+                    self.assertEqual(output['time_zone'], zone)
+                    self.assertNotIn('day_timezone', output['payment'])
+                self.assertIn('05:00 ' + zone, (script.parent / '.build/paios-staging-snapshot.timer').read_text())
+                product['time_zone'] = 'Asia/Taipei'
+                config.write_text(json.dumps(product))
+                self.assertEqual(render()[0]['time_zone'], 'Asia/Taipei')
+                environment['PAIOS_TIME_ZONE'] = zone
+                self.assertEqual(render()[0]['time_zone'], zone)
+                environment['PAIOS_TIME_ZONE'] = 'Invalid/Zone'
+                self.assertNotEqual(subprocess.run([sys.executable, str(script), '--config-only'],
+                    env=environment, capture_output=True).returncode, 0)
 
     def test_watch_routes_render_metadata_and_only_the_contract_long_poll_query(self):
         with tempfile.TemporaryDirectory() as temporary:

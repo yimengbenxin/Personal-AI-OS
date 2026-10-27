@@ -16,6 +16,7 @@ import {RunAdmission} from './native-source-fixture.ts';
 import {OutputAuthority} from '../src/output.ts';
 import {PersonalAIOSRuntime} from './native-source-fixture.ts';
 import {createPersonalAIOSServer} from '../src/server.ts';
+import {fileURLToPath} from 'node:url';
 
 const require=createRequire(new URL('../../platform-data/package.json',import.meta.url));
 const {Pool}=require('pg') as {Pool:new(config:Record<string,unknown>)=>ConstructorParameters<typeof L3Service>[0]};
@@ -66,7 +67,7 @@ test('real MEM/PG authority errors survive authenticated HTTP and existing Pytho
     }
     async function provider(args:unknown, call:string, tool='paios_l3_commit') {
       const script=`import importlib.util,json,sys\np=sys.argv[1];spec=importlib.util.spec_from_file_location('isolated_contract_provider',p);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\na=m.PersonalAIOSProvider();a.base_url=sys.argv[2];a.key_file=sys.argv[3];a.initialize('fixture-session',agent_context='primary')\nprint(a.handle_tool_call(sys.argv[5],json.loads(sys.stdin.read()),session_id='fixture-session',run_id='fixture-run',tool_call_id=sys.argv[4]))`;
-      const providerPath=process.env.PAIOS_PROVIDER_TEST_SOURCE ?? new URL('../../../../../integrations/hermes/personal_aios/__init__.py',import.meta.url).pathname;
+      const providerPath=process.env.PAIOS_PROVIDER_TEST_SOURCE ?? fileURLToPath(new URL('../../../../../integrations/hermes/personal_aios/__init__.py',import.meta.url));
       return new Promise<Record<string,any>>((resolve,reject)=>{
         const child=spawn(nativePython,['-c',script,providerPath,url,keyPath,call,tool],{cwd:nativeRoot,
           env:{...process.env,HERMES_HOME:join(folder,'native-home'),PYTHONPATH:nativeRoot}});

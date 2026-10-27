@@ -53,7 +53,7 @@ export interface StoragePort {
   /** Compare verified metadata with the current original without a cold HTTP read. */
   matchesMetadata?(namespace:string,key:string,bytes:Uint8Array):Promise<boolean>;
   hotSize?(namespace:string,key:string):Promise<number>;
-  moveCold?(records:ColdRecord[],beforeUpload?:(bytes:number)=>void):Promise<{pack:string;bytes:number}>;
+  moveCold?(records:ColdRecord[],beforeUpload?:(bytes:number)=>void,uploadChunk?:(bytes:number)=>Promise<void>):Promise<{pack:string;bytes:number}>;
   removeOriginals?(records:Pick<ColdRecord,'namespace'|'key'>[]):Promise<void>;
 }
 // POSIX boundary only: no event classification, run ownership, retention or memory decisions.
@@ -145,9 +145,9 @@ export class PosixStorage implements StoragePort {
     const reason=reasons[0]==='L5_INODE_RESERVE_EMERGENCY'?'L5_INODE_RESERVE_EXHAUSTED':'L5_DISK_RESERVE_EXHAUSTED';
     throw Object.assign(new Error(`${reason}: raw input is not durable`),{code:'ENOSPC'});
   }
-  async moveCold(records:ColdRecord[],beforeUpload?:(bytes:number)=>void){check(this.cold,'COLD_STORAGE_NOT_CONFIGURED',503);
+  async moveCold(records:ColdRecord[],beforeUpload?:(bytes:number)=>void,uploadChunk?:(bytes:number)=>Promise<void>){check(this.cold,'COLD_STORAGE_NOT_CONFIGURED',503);
     // Pack payloads stay in memory and HTTP; SQLite reports its actual local allocation failure.
-    return this.cold.move(records,beforeUpload);}
+    return this.cold.move(records,beforeUpload,uploadChunk);}
   /** Startup only: the caller holds the product process lock before opening any storage owners. */
   async recoverPending():Promise<void>{
     await this.directory('objects');
@@ -293,6 +293,30 @@ export class PosixStorage implements StoragePort {
     const handle=await fs.open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{const stat=await handle.stat();check(stat.isFile(),'UNSAFE_STORAGE_OBJECT');return await handle.readFile();}
     finally{await handle.close();}
+  }
+  /** Bounded parallel reads reuse one namespace validation; absent names may have joined a session fold. */
+  async readHotMany(records:{namespace:string;key:string}[]):Promise<(Uint8Array|null)[]>{
+    const directories=new Map<string,string>();
+    for(const {namespace} of records)if(!directories.has(namespace))directories.set(namespace,await this.directory(namespace,false));
+    return Promise.all(records.map(async record=>{
+      let handle:Awaited<ReturnType<typeof fs.open>>;
+      try{handle=await fs.open(this.filename(directories.get(record.namespace)!,record.key),constants.O_RDONLY|constants.O_NOFOLLOW);}
+      catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
+      try{const stat=await handle.stat();check(stat.isFile()&&stat.size<=64*1024*1024,'COLD_SEGMENT_LIMIT');return await handle.readFile();}
+      finally{await handle.close();}
+    }));
+  }
+  /** Physical files only: session SQLite payloads are accounted by their own authority. */
+  async *hotEntries(namespace:string):AsyncGenerator<{key:string;size:number;modified:number}>{
+    let directory:string;
+    try{directory=await this.directory(namespace,false);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw error;}
+    for await(const entry of await fs.opendir(directory,{bufferSize:256})){
+      if(entry.name.startsWith('.pending-'))continue;
+      check(/^[a-f0-9]{64}$/u.test(entry.name)&&entry.isFile()&&!entry.isSymbolicLink(),'UNSAFE_STORAGE_OBJECT');
+      try{const stat=await fs.lstat(this.filename(directory,entry.name));check(stat.isFile()&&!stat.isSymbolicLink(),'UNSAFE_STORAGE_OBJECT');
+        yield {key:entry.name,size:stat.size,modified:stat.mtimeMs};
+      }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    }
   }
   async *hotKeys(namespace: string, max_keys?: number): AsyncGenerator<string> {
     check(max_keys===undefined || Number.isSafeInteger(max_keys) && max_keys>0,'INVALID_STORAGE_READ_BUDGET');

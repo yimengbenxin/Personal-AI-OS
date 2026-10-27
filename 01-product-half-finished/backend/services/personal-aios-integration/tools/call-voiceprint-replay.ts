@@ -1,6 +1,6 @@
 // Run in the Node 24 gateway image with the data volume mounted :ro and `nice -n 10 node ...`.
 import {readFile} from 'node:fs/promises';
-import {setPriority} from 'node:os';
+import {getPriority,setPriority} from 'node:os';
 import {RawArchive} from '../src/archive.ts';
 import {PosixStorage,type StoragePort} from '../src/storage.ts';
 import {check,ContractError,type ArchivedEvent} from '../src/contracts.ts';
@@ -135,7 +135,7 @@ export async function replayCall(selection:ReplaySelection,ports:{archive:Pick<R
   } finally {await vad.close();abort.abort();}
 }
 export async function main(argv:string[]) {
-  setPriority(0,10);
+  setPriority(0,Math.max(getPriority(),10));
   const listing=argv.includes('--list'),inventory=argv.includes('--registry'),preserve=argv.includes('--preserve-call');
   check(!(listing&&inventory),'REPLAY_ARGUMENTS_INVALID');
   argv=argv.filter(a=>!['--list','--registry','--preserve-call'].includes(a));

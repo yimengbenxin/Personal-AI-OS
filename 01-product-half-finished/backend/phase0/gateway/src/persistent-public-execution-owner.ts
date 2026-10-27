@@ -155,7 +155,7 @@ export async function createPersistentPublicExecutionHost(options: Omit<Persiste
       ...(options.pcm.continuous?{continuous:{...options.pcm.continuous,onError:options.onError}}:{}),
       // The one voiceprint registry labels local transcription segments; its speaker model must be the engine's.
       ...(options.central.voiceprint?{speakers:options.central.voiceprint}:{}),
-    },options.pcm.ports) : undefined);
+    },options.pcm.ports,options.central.local_models) : undefined);
   const notify=options.stagingEffects?.notify??options.notify;
   let assembly:ReturnType<typeof createPersonalAIOSAssembly>|undefined,desktopRelay:SharedExecution['desktop'];
   let errands:SharedExecution['errands'];
@@ -209,6 +209,7 @@ export async function createPersistentPublicExecutionHost(options: Omit<Persiste
     if(options.ownerMac)centralResources.http.ownerMac=options.ownerMac.resolve;
     if(options.central.timeline)await central.runtime.configureTimeline(options.central.timeline);
     desktopRelay=(desktop===undefined?undefined:await (await import('./desktop-relay.ts')).createDesktopRelay({config:desktop,analyzeVision:centralResources.native.analyzeVision.bind(centralResources.native),runtime:central.runtime,sources,pool:options.desktopPool!,http:centralResources.http,onError:options.onError,capabilityCatalog:central.runtime.capabilityGateway.tools}));
+    if(desktopRelay)central.runtime.attachMeetingRelay(desktopRelay.invokePresentation);
     return {assembly,sources,terminals,admissions,media,errands,...(assistantVoice?{assistantVoice}:{}),...(desktopRelay?{desktop:desktopRelay}:{}),
       closeResources:async()=>{await Promise.all([errands?.close(),assistantVoice?.close()]);}};
   } catch(error) {

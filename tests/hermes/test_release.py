@@ -728,7 +728,8 @@ if '--keep' in args:
     for name in ('one', 'two'):
         root = tmp_path / name
         for relative in ('deploy/cloud/prepare-build.py', 'deploy/cloud/staging_config.py', 'deploy/cloud/cloud.json', 'deploy/cloud/front.conf.in',
-                         'deploy/cloud/paios_roaming_guard.js.in', 'integrations/hermes/personal_aios/producer.lock.json'):
+                         'deploy/cloud/paios_roaming_guard.js.in', 'deploy/cloud/paios-staging-snapshot.timer',
+                         'integrations/hermes/personal_aios/producer.lock.json'):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             (root / relative).write_bytes((ROOT / relative).read_bytes())
         subprocess.run([sys.executable, str(root / 'deploy/cloud/prepare-build.py')], env=env, check=True, capture_output=True)

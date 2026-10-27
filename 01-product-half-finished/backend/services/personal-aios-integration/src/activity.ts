@@ -1,3 +1,4 @@
+import {projectWorkItems} from './capability/work-items.ts';
 import {digest} from './contracts.ts';
 import {safe} from './timeline.ts';
 import type {NativeRunEvent} from './hermes-client.ts';
@@ -45,7 +46,8 @@ export class ActivityProjection {
   }
   private itemId(kind:string,source:string){return `i:${digest([this.principal,this.session,this.processed,kind,source])}`;}
   event(event:NativeRunEvent):void {
-    if(this.card?.completed_at&&!this.receiptRecords.length)return;
+    if(this.card?.completed_at&&!this.receiptRecords.length&&!(event.event==='subagent.complete'&&
+      this.subagentState(event.subagent_id!)==='unknown'))return;
     if(event.event==='run.snapshot'){
       const progressAt=this.card?.last_progress_at;
       for(const [key,item] of this.items)if(item.kind!=='errand')this.items.delete(key);
@@ -126,10 +128,26 @@ export class ActivityProjection {
       this.changed(new Date(this.now()).toISOString(),false);
     }
   }
+  subagentState(id:string):ItemState|undefined {return this.items.get(this.itemId('subagent',id))?.state;}
+  get hasRunningSubagents():boolean {return [...this.items.values()].some(item=>item.kind==='subagent'&&item.state==='running');}
+  childEnded(id:string,atMs:number):void {
+    if(this.subagentState(id)!=='running')return;
+    this.complete(this.items.get(this.itemId('subagent',id))!,'unknown',new Date(atMs).toISOString(),'ended');
+    this.changed(new Date(this.now()).toISOString(),true);
+  }
   receipts(records:ReceiptRecord[]):void {
     if(!records.length)return;
     this.receiptRecords=records;
-    if(this.card)this.changed(new Date(this.now()).toISOString(),true);
+    const at=new Date(this.now()).toISOString(),rows=projectWorkItems(records);
+    for(const row of rows){const key=this.itemId('task',row.id),prior=this.items.get(key);
+      const state=row.state==='accepted'?'running':row.state;
+      const item:ActivityItem=prior??{id:key,kind:'task',state,summary:publicLine(row.label,48)||'正在处理这件事',started_at:at,elapsed_ms:0};
+      item.state=state;if(['running','waiting'].includes(state))delete item.completed_at;else item.completed_at??=at;
+      this.items.set(key,item);}
+    if(!this.card&&rows.length)this.card={id:`a:${digest([this.principal,this.session,this.processed])}`,revision:0,state:'running',
+      summary:'正在处理这件事',summary_source:'tool_status',started_at:at,observed_at:at,last_progress_at:at,elapsed_ms:0,
+      counts:{total:rows.length,running:0,succeeded:0,failed:0,cancelled:0},items:[],omitted_items:0};
+    if(this.card)this.changed(at,true);
   }
   private complete(item:ActivityItem,state:ItemState,at:string,status:string,reason?:string):void {
     item.state=state;if(['running','waiting'].includes(state))delete item.completed_at;else item.completed_at=at;delete item.step_summary;delete item.progress;
@@ -149,7 +167,7 @@ export class ActivityProjection {
       item.elapsed_ms=Math.max(0,Date.parse(item.completed_at??at)-Date.parse(item.started_at));}
     if(!items.length)counts[this.receiptRecords.length?aggregateReceipts(this.receiptRecords):this.final?(this.final==='completed'?'succeeded':['cancelled','canceled','interrupted'].includes(this.final)?'cancelled':'failed'):'running']=1;
     const terminal=!!this.final&&!counts.running&&!counts.waiting;
-    card.state=!terminal?'running':counts.partial?'partial':counts.failed?(counts.failed===counts.total?'failed':'partial'):counts.cancelled?(counts.cancelled===counts.total?'cancelled':'partial'):'succeeded';
+    card.state=!terminal?'running':counts.unknown?'unknown':counts.partial?'partial':counts.failed?(counts.failed===counts.total?'failed':'partial'):counts.cancelled?(counts.cancelled===counts.total?'cancelled':'partial'):'succeeded';
     if(terminal){card.completed_at=new Date(Math.max(this.finalAt??Date.parse(at),...items.map(item=>Date.parse(item.completed_at!)))).toISOString();immediate=true;}
     card.observed_at=at;card.last_progress_at=progressAt;card.elapsed_ms=Math.max(0,Date.parse(card.completed_at??at)-Date.parse(card.started_at));
     card.revision=Math.max(this.now(),card.revision+1);card.counts=counts;card.items=items.slice(0,8);card.omitted_items=Math.max(0,items.length-8);
@@ -171,6 +189,8 @@ export class ActivityProjection {
       card.summary_source=tool?.progress?(tool.intent?'agent_intent':'generic'):running!.kind==='subagent'?'subagent_goal':'tool_status';
     }else delete card.progress;
     if(step)card.step_summary=step;else delete card.step_summary;
+    const work=projectWorkItems(this.receiptRecords);
+    if(work.length)card.progress={version:1,value:work.filter(item=>item.state==='succeeded').length,total:work.length};
     if(['failed','partial'].includes(card.state))card.failure_reason=items.find(item=>item.failure_reason)?.failure_reason??failure(this.final!);else delete card.failure_reason;
     if(immediate)this.flush();else if(!this.timer)this.timer=setTimeout(()=>this.flush(),Math.max(0,500-(this.now()-this.lastSent)));
   }

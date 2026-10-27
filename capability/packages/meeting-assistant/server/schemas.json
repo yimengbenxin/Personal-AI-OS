@@ -1,0 +1,274 @@
+{
+  "read_deck": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "context": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "session_id",
+          "tool_call_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "owner_requested": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "target_id",
+      "context"
+    ],
+    "additionalProperties": false
+  },
+  "locate_region": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "context": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "session_id",
+          "tool_call_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "owner_requested": {
+        "type": "boolean"
+      },
+      "utterance_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "snapshot_ref": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "frame_refs": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        }
+      }
+    },
+    "required": [
+      "target_id",
+      "context",
+      "utterance_id",
+      "snapshot_ref",
+      "frame_refs"
+    ],
+    "additionalProperties": false
+  },
+  "plan_text": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "context": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "session_id",
+          "tool_call_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "owner_requested": {
+        "type": "boolean"
+      },
+      "suggestion_ids": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        }
+      },
+      "base_snapshot_ref": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      }
+    },
+    "required": [
+      "target_id",
+      "context",
+      "suggestion_ids",
+      "base_snapshot_ref"
+    ],
+    "additionalProperties": false
+  },
+  "apply_text": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "context": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "session_id",
+          "tool_call_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "owner_requested": {
+        "type": "boolean"
+      },
+      "plan_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "plan_sha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "idempotency_key": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      }
+    },
+    "required": [
+      "target_id",
+      "context",
+      "plan_id",
+      "plan_sha256",
+      "idempotency_key"
+    ],
+    "additionalProperties": false
+  },
+  "edit_status": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "context": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "session_id",
+          "tool_call_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "owner_requested": {
+        "type": "boolean"
+      },
+      "operation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      },
+      "idempotency_key": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+      }
+    },
+    "required": [
+      "target_id",
+      "context"
+    ],
+    "additionalProperties": false,
+    "anyOf": [
+      {
+        "required": [
+          "operation_id"
+        ]
+      },
+      {
+        "required": [
+          "idempotency_key"
+        ]
+      }
+    ]
+  }
+}

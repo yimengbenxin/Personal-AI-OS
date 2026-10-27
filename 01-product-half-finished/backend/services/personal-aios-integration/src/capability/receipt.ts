@@ -1,3 +1,5 @@
+import {qualifyWorkItems} from './work-items.ts';
+import type {WorkItemReceipt} from '../../../../../../capability/contracts/work-items.ts';
 import Ajv2020Module from 'ajv/dist/2020.js';
 import {readFileSync} from 'node:fs';
 import {unknown, unknown_fact, type Receipt} from '../../../../../../capability/sdk/ts/receipt.ts';
@@ -12,7 +14,7 @@ const validate = ajv.compile<Receipt>(schema);
 const uncertainReason = /(?:^|_)(?:TIMEOUT|DISCONNECTED)(?:_|$)/u;
 
 /** Package trust boundary. Call with MCP structuredContent, not its text summary. */
-export function admitReceipt(raw: unknown): Receipt {
+export function admitReceipt(raw: unknown): WorkItemReceipt {
   if (!validate(raw)) {
     return unknown({status: {reason_code: 'CAPABILITY_RECEIPT_INVALID'},
       unknowns: [unknown_fact('contract_violation', ajv.errorsText(validate.errors))]});
@@ -37,5 +39,5 @@ export function admitReceipt(raw: unknown): Receipt {
       body.unknowns.push(unknown_fact('contradiction', 'Succeeded was claimed with unverified effects.'));
     }
   }
-  return body;
+  return qualifyWorkItems(body);
 }

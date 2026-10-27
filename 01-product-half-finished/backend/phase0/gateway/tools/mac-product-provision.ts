@@ -20,8 +20,10 @@ import type { ProductResourceConfiguration } from '../src/rayneo-persistent-prod
 import { createRayneoLocalOwnerPolicyStore, parseConfiguredOwnerPolicy, RAYNEO_LOCAL_OWNER_POLICY_PATH } from '../src/rayneo-demo-owner-projection.ts';
 import { pairDevice, revokePairedDevice } from '../src/paired-device-registration.ts';
 import {releaseCoreProfile, coreProfileReleaseFailure} from '../src/core-profile-release.ts';
+import {fileURLToPath} from 'node:url';
+import {releaseSendConsents} from '../src/send-consent-release.ts';
 
-const MIGRATIONS = resolve(new URL('../../../migrations', import.meta.url).pathname);
+const MIGRATIONS = resolve(fileURLToPath(new URL('../../../migrations', import.meta.url)));
 
 function args(argv: string[]) {
   const [command, ...rest] = argv;
@@ -142,7 +144,8 @@ async function revoke(configPath:string,deviceId:string|undefined) {
 const parsed = args(process.argv.slice(2));
 try {
 const result = parsed.command === 'init' ? await init(parsed.root, parsed.configPath)
-  : parsed.command === 'migrate' ? {...await migrate(parsed.configPath), core_profile: await releaseCoreProfile(parsed.configPath, 'migrate')}
+  : parsed.command === 'migrate' ? {...await migrate(parsed.configPath), core_profile: await releaseCoreProfile(parsed.configPath, 'migrate'),
+      send_consents:await releaseSendConsents(parsed.configPath)}
   : parsed.command === 'config' ? config(parsed.configPath)
   : parsed.command === 'pair' ? await pair(parsed.root, parsed.configPath, parsed.registration)
   : parsed.command === 'revoke' ? await revoke(parsed.configPath,parsed.deviceId)

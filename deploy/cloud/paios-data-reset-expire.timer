@@ -1,0 +1,9 @@
+[Unit]
+Description=Expire RQ-102 in-place quarantines after seven days
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

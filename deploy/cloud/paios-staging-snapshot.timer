@@ -1,8 +1,9 @@
+# Rendered by prepare-build.py into .build before installation.
 [Unit]
-Description=Taiwan night production snapshot, retry busy calls before 06:00
+Description=Deployment-local night production snapshot, retry busy calls before 06:00
 
 [Timer]
-OnCalendar=*-*-* 03,04,05:05:00 Asia/Taipei
+OnCalendar=*-*-* 03,04,05:05:00 @PAIOS_TIME_ZONE@
 RandomizedDelaySec=300
 Persistent=false
 Unit=paios-staging-snapshot.service

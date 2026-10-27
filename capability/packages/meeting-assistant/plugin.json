@@ -1,0 +1,106 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "meeting-assistant",
+  "version": "0.1.0",
+  "description": "在本地 Keynote 文件上整理并执行经确认的会议文字修改；改完由主人检查后自行投屏。",
+  "extensions": {
+    "ai.yimi.capability": {
+      "schema": "yimi.capability.v1",
+      "receipt_schema": 1,
+      "compat": {
+        "hermes": ">=0.22.5 <0.24",
+        "gateway_api": 1
+      },
+      "maintainer": "lead",
+      "runtime": {
+        "server": "meeting_assistant",
+        "lazy": true,
+        "idle_timeout_seconds": 900,
+        "host": "shared"
+      },
+      "secrets": [
+        {
+          "name": "PAIOS_HERMES_INTERNAL_KEY"
+        }
+      ],
+      "network": {
+        "egress": []
+      },
+      "scopes": [
+        "owner"
+      ],
+      "tools": {
+        "read_deck": {
+          "effect": "observe",
+          "target": "$.target_id",
+          "task_type": "document.read",
+          "retry": "allowed",
+          "context_inject": [
+            "context"
+          ]
+        },
+        "locate_region": {
+          "effect": "observe",
+          "target": "$.target_id",
+          "task_type": "document.region.read",
+          "retry": "allowed",
+          "context_inject": [
+            "context"
+          ]
+        },
+        "plan_text": {
+          "effect": "workspace",
+          "target": "$.target_id",
+          "task_type": "document.text.plan",
+          "retry": "allowed",
+          "context_inject": [
+            "context"
+          ]
+        },
+        "apply_text": {
+          "effect": "owner_data",
+          "target": "$.target_id",
+          "task_type": "document.text.update",
+          "retry": "after_check",
+          "check_with": "edit_status",
+          "context_inject": [
+            "context",
+            "idempotency_key"
+          ],
+          "long_running": true
+        },
+        "edit_status": {
+          "effect": "observe",
+          "target": "$.target_id",
+          "task_type": "document.edit.read",
+          "retry": "allowed",
+          "context_inject": [
+            "context"
+          ]
+        }
+      },
+      "staging": {
+        "fake": {
+          "command": "python3",
+          "args": [
+            "-m",
+            "capability.hosts.python",
+            "capability.packages.meeting-assistant.fake.server"
+          ]
+        }
+      },
+      "tests": {
+        "contract": "tests/contract.yaml"
+      },
+      "provenance": {
+        "source_commit": "0d679139ac82ba016d35a532f03eaa9dfbaf1928",
+        "workshop_run": null,
+        "adapter_modules": [
+          "server/server.py",
+          "server/port.py",
+          "server/contract.py"
+        ]
+      }
+    }
+  }
+}

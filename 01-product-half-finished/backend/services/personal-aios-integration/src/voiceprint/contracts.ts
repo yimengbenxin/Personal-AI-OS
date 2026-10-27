@@ -61,6 +61,7 @@ export interface SpeechEngine {
   readonly tagging_model?: {id:string;sha256:string;labels_sha256:string}|undefined;
   /** 16 kHz mono float samples in [-1, 1]. */
   transcribe(samples: Float32Array, signal?: AbortSignal): Promise<SpeechTranscript>;
+  transcribeWords?(samples:Float32Array,signal?:AbortSignal):Promise<string>;
   tag?(samples:Float32Array,signal?:AbortSignal):Promise<SoundEvent|undefined>;
   embed(samples: Float32Array, signal?: AbortSignal): Promise<Float32Array>;
   close(): Promise<void>;

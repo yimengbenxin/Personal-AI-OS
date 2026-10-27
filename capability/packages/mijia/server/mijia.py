@@ -106,6 +106,10 @@ def create_server(api, load_spec, data_root, call_log=None):
                 return CallToolResult(content=[TextContent(**wire["content"][0])],
                                       structured_content=wire["structuredContent"])
         mcp.add_tool(call)
+        registered = mcp._tool_manager.get_tool(fn.__name__)
+        registered.fn_metadata.arg_model.model_config['extra'] = 'forbid'
+        registered.fn_metadata.arg_model.model_rebuild(force=True)
+        registered.parameters = registered.fn_metadata.arg_model.model_json_schema(by_alias=True)
 
     def ready():
         if login.get("task") and not login["task"].done():
@@ -181,10 +185,10 @@ def create_server(api, load_spec, data_root, call_log=None):
                     cancelled = error
             result = pending.result()
             outcome = {0: "succeeded", 1: "accepted"}.get(result["code"], "failed")
-            return {"status": outcome, "code": result["code"]}
+            return {"status": outcome, "code": result["code"], "device_id": str(params["did"])}
         except requests.RequestException:
             outcome = "outcome_unknown"
-            return {"status": outcome, "error": "mijia_request_failed"}
+            return {"status": outcome, "error": "mijia_request_failed", "device_id": str(params["did"])}
         finally:
             record(data_root / "actions.jsonl", {"device": device, "action": action,
                    "result": outcome, "ms": round((time.monotonic() - started) * 1000)})
@@ -247,7 +251,7 @@ def create_server(api, load_spec, data_root, call_log=None):
                 for d in devices], "capabilities": {keys[urn]: capabilities(spec) for urn, spec in specs.items()}}
 
     @tool
-    async def read_device(device: str, home: str = "", room: str = "", include_spec: bool = False) -> dict:
+    async def read_device(device: str, home: str = "", room: str = "", include_spec: bool = False, check_for: str = "") -> dict:
         """读设备状态，包括门锁；include_spec=true 同时返回此设备完整 MIoT 规格。非零 code 不是成功读数。"""
         ready()
         d = device_named(device, home, room)
@@ -255,19 +259,19 @@ def create_server(api, load_spec, data_root, call_log=None):
         result = await asyncio.to_thread(api.get_devices_prop, [
             {"did": d["did"], "siid": s["iid"], "piid": p["iid"]} for s, p in props]) if props else []
         values = {(str(r["did"]), r["siid"], r["piid"]): {"code": r["code"], "value": r.get("value")} for r in result}
-        return {"device": device, **({"spec": d["spec"]} if include_spec else {}),
+        return {"device": device, "device_id": str(d["did"]), **({"spec": d["spec"]} if include_spec else {}),
                 "properties": [{"service": s["name"], "property": urn_name(p),
                 "unit": p.get("unit", "none"), **values[(str(d["did"]), s["iid"], p["iid"])]} for s, p in props]}
 
     @tool
     async def control_device(device: str, service: str, home: str = "", room: str = "", property: str = "",
                              value: bool | int | float | str | None = None, action: str = "", arguments: list | None = None,
-                             owner_requested: OwnerRequested = False) -> dict:
+                             owner_requested: OwnerRequested = False, idempotency_key: str = "") -> dict:
         """按发现的名称设置 property/value 或执行 action/arguments，二选一。门锁及入口开门设备/服务只读。"""
         return await execute(plan(device, service, home, room, property, value, action, arguments))
 
     @tool
-    async def run_scene(name: str, steps: list[dict], owner_requested: OwnerRequested = False) -> dict:
+    async def run_scene(name: str, steps: list[dict], owner_requested: OwnerRequested = False, idempotency_key: str = "") -> dict:
         """执行明确设备步骤组成的场景。steps 是 control_device 参数对象；先整体拒绝门锁和入口开门，再逐步执行。不要传不透明云场景 ID。"""
         # owner_requested belongs to the whole scene (the gateway decided it once); a step copying it carries no meaning.
         planned = [plan(**{k: v for k, v in step.items() if k != "owner_requested"}) for step in steps]

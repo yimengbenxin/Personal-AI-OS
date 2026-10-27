@@ -1,5 +1,7 @@
 """Merge interface for the manifest loader and the existing phone-runtime factory."""
-from copy import deepcopy
+from pathlib import Path
+import json
+from capability.packages.load import bind_runtime
 
 
 def select_transport(selection, legacy, package):
@@ -8,7 +10,6 @@ def select_transport(selection, legacy, package):
         return legacy
     if legacy is None:
         return None
-    entry = deepcopy(package)
-    entry["command"] = legacy["command"]
-    entry["env"] = {**legacy.get("env", {}), **entry.get("env", {})}
-    return {**legacy, **entry}
+    manifest = json.loads(Path(__file__).parents[1].joinpath('plugin.json').read_text())
+    secrets = manifest['extensions']['ai.yimi.capability']['secrets']
+    return {**legacy, **bind_runtime(package, legacy, [secret['name'] for secret in secrets])}

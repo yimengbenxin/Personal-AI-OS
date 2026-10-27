@@ -12,6 +12,7 @@ import {memoryOverlay,replayCall,listCallStreams} from '../tools/call-voiceprint
 import {createSourceMediaClock} from '../../../phase0/gateway/src/source-media-clock.ts';
 import {pcmEventId} from '../../../phase0/gateway/src/personal-aios-formal-pcm.ts';
 import type {SourceMediaCaptureBinding} from '../../../phase0/gateway/src/source-media-permission.ts';
+import {fileURLToPath} from 'node:url';
 const at='2026-10-17T00:00:00.000Z',model={id:'fixture',sha256:'a'.repeat(64),dim:32};
 const vector=(x:number,y:number,z=0,w=0)=>Float32Array.from({length:32},(_,i)=>[x,y,z,w][i]??0);
 const owner=vector(1,0),guest=vector(0,0,0,1),tv=vector(.42,Math.sqrt(1-.42*.42)),reply=vector(0.5,Math.sqrt(0.75));
@@ -147,7 +148,7 @@ test('listing verifies admitted metadata and wall clock without reading audio, t
   // The production container mounts SHM read-only too; a writable SHM permits SQLite to update read marks.
   await fs.chmod(join(f.root,'session-records.sqlite-shm'),0o440);
   const {execFile}=await import('node:child_process'),{promisify}=await import('node:util');
-  const result=await promisify(execFile)(process.execPath,[new URL('../tools/call-voiceprint-replay.ts',import.meta.url).pathname,
+  const result=await promisify(execFile)(process.execPath,[fileURLToPath(new URL('../tools/call-voiceprint-replay.ts',import.meta.url)),
     '--list','--config',config,'--since',since,'--until',until]);
   assert.deepEqual(JSON.parse(result.stdout),rows[0]);assert.doesNotMatch(result.stdout,/transcript|speech|payload|embedding/iu);
   const originalRead=storage.read;storage.read=async(n,k)=>{
@@ -173,12 +174,13 @@ test('registry CLI reports per-set numerical facts without opening speech models
   await fs.writeFile(config,JSON.stringify({storage_root:f.root,max_event_bytes:200000,pcm:{media:{stream_budget:budget}},
     voiceprint:{speaker_model:{file:modelFile,dim:32},encryption_key_file:join(f.root,'key')}}));
   const before=await snapshot(f.root),{execFile}=await import('node:child_process'),{promisify}=await import('node:util');
-  const {stdout}=await promisify(execFile)(process.execPath,[new URL('../tools/call-voiceprint-replay.ts',import.meta.url).pathname,
+  const {stdout}=await promisify(execFile)(process.execPath,[fileURLToPath(new URL('../tools/call-voiceprint-replay.ts',import.meta.url)),
     '--registry','--config',config]);
   const facts=JSON.parse(stdout);
   assert.equal(facts.sets[0].channel,'phone_app');assert.equal(facts.sets[0].samples,5);
+  assert.equal(facts.sets[0].verified_threshold,.65);
   assert.equal(facts.sets[0].model.sha256,model.sha256);assert.equal(facts.sets[0].stale_model,true);
   assert.equal(typeof facts.sets[0].centroid_age_ms,'number');
-  assert.doesNotMatch(stdout,/embedding|source_device|principal|transcript|payload|centroid"/iu);
+  assert.doesNotMatch(stdout,/embedding|source_device|principal|transcript|payload|"centroid"/iu);
   assert.deepEqual(await snapshot(f.root),before);
 });

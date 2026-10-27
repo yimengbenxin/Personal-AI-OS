@@ -18,6 +18,12 @@ const policy:AdmissionPolicy={max_pending_events:4,max_pending_bytes:100000,max_
  poll_interval_ms:5,native_idempotency_retention_ms:2000,policy_version:'controlled-recovery',
  native_retry:{max_attempts:4,initial_backoff_ms:10,max_backoff_ms:20}};
 async function until(fn:()=>boolean|Promise<boolean>){for(let i=0;i<200;i++){if(await fn())return;await new Promise(r=>setTimeout(r,5));}assert.fail('recovery did not settle');}
+function logicalBackoff(t:test.TestContext){
+ let now=Date.now();t.mock.method(Date,'now',()=>now);
+ return (a:RunAdmission)=>{(a as unknown as {pause(ms:number|Promise<void>):Promise<void>}).pause=async ms=>{
+  if(typeof ms==='number')now+=ms;else await ms;
+ };};
+}
 async function fixture(t:test.TestContext,configured=true){
  const path=await fs.mkdtemp(join(tmpdir(),'admission-recovery-'));const storage=new PosixStorage(path);
  const runs=new Map<string,NativeRun>();const calls:{key:string;body:string}[]=[];let loss=true,disconnected=false,refusals=0,statusFailures=0;
@@ -35,7 +41,7 @@ async function fixture(t:test.TestContext,configured=true){
  return {cleanup,path,storage,native,settings,admission,d,runs,calls,set:(v:{loss?:boolean;disconnected?:boolean;refusals?:number;statusFailures?:number})=>{if(v.loss!==undefined)loss=v.loss;if(v.disconnected!==undefined)disconnected=v.disconnected;if(v.refusals!==undefined)refusals=v.refusals;if(v.statusFailures!==undefined)statusFailures=v.statusFailures;}};
 }
 test('lost create and status responses recover automatically; next D waits for actual terminal',async t=>{
- const f=await fixture(t);f.set({statusFailures:2});const a=f.admission(),first=await f.d('first'),next=await f.d('next');
+ const control=logicalBackoff(t),f=await fixture(t);f.set({statusFailures:2});const a=f.admission(),first=await f.d('first'),next=await f.d('next');control(a);
  await a.admit(first,'session','skill');await a.admit(next,'session','skill');
  await until(()=>a.get('owner','session',first.processed_event_id)?.state==='running');assert.equal(f.runs.size,1);
  assert.equal(a.get('owner','session',next.processed_event_id)?.state,'pending');assert.equal(f.calls.length,2);
@@ -64,16 +70,22 @@ test('unconfigured unknown is explicitly recoverable by same D without new key',
  await until(()=>a.get('owner','session',first.processed_event_id)?.state==='running');assert.equal(f.runs.size,1);assert.deepEqual(f.calls[0],f.calls[1]);
 });
 test('explicit 429/503 recover under original bounded policy, no business duplication',async t=>{
- const f=await fixture(t);f.set({loss:false,refusals:2});const a=f.admission(),first=await f.d('refusals');await a.admit(first,'session','skill');
- await until(()=>a.get('owner','session',first.processed_event_id)?.state==='running');assert.equal(f.calls.length,3);assert.equal(f.runs.size,1);
+ const control=logicalBackoff(t),f=await fixture(t);f.set({loss:false,refusals:2});const a=f.admission(),first=await f.d('refusals');control(a);
+ const running=Promise.withResolvers<void>();a.setStateOwner(async entry=>{if(entry.record.state==='running')running.resolve();});
+ await a.admit(first,'session','skill');await running.promise;assert.equal(f.calls.length,3);assert.equal(f.runs.size,1);
  assert.deepEqual(f.calls[0],f.calls[1]);assert.deepEqual(f.calls[1],f.calls[2]);
 });
 test('persistent uncertainty respects configured attempts and never releases next D',async t=>{
- const f=await fixture(t);f.set({disconnected:true});const a=f.admission(),first=await f.d('offline'),next=await f.d('waiting');
- await a.admit(first,'session','skill');await a.admit(next,'session','skill');await until(()=>f.calls.length===4);await new Promise(r=>setTimeout(r,50));
+ const control=logicalBackoff(t),f=await fixture(t);f.set({disconnected:true});const a=f.admission(),first=await f.d('offline'),next=await f.d('waiting');control(a);
+ const exhausted=Promise.withResolvers<void>(),running=Promise.withResolvers<void>();a.setStateOwner(async entry=>{
+  if(entry.d.processed_event_id!==first.processed_event_id)return;
+  if(entry.record.state==='reconcile_required'&&entry.record.attempt_count===4)exhausted.resolve();
+  if(entry.record.state==='running')running.resolve();
+ });
+ await a.admit(first,'session','skill');await a.admit(next,'session','skill');await exhausted.promise;
  assert.equal(f.calls.length,4);assert.equal(a.get('owner','session',first.processed_event_id)?.state,'reconcile_required');assert.equal(a.get('owner','session',next.processed_event_id)?.state,'pending');assert.equal(f.runs.size,0);
  f.set({disconnected:false,loss:false});await a.reconcile('owner','session',first.processed_event_id);
- await until(()=>a.get('owner','session',first.processed_event_id)?.state==='running');assert.equal(f.runs.size,1);
+ await running.promise;assert.equal(f.runs.size,1);
 });
 
 test('configured shared assembly listening lifecycle restores a run without new ingress',async t=>{
@@ -118,7 +130,12 @@ test(`shared recovery shutdown joins both owners once: ${mode}`,async t=>{
  await new Promise<void>(resolve=>a.server.listen(0,'127.0.0.1',resolve));await entered.promise;
  let stopping:Promise<void>|undefined;
  if(mode!=='read-failure'){stopping=a.close();assert.equal(a.close(),stopping);await ownerEntered.promise;}
- release.resolve();await ownerEntered.promise;
+ release.resolve();
+ if(mode==='read-failure'){
+  await new Promise(resolve=>setTimeout(resolve,50));assert.equal(a.server.listening,true,'recovery failure is not shutdown');
+  stopping=a.close();
+ }
+ await ownerEntered.promise;
  stopping??=a.close();assert.equal(a.close(),stopping);let settled=false;void stopping.then(()=>settled=true,()=>settled=true);
  await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false,'pending runtime owner must be joined');
  ownerRelease.resolve();await stopping;await new Promise(resolve=>setImmediate(resolve));
@@ -148,17 +165,18 @@ test('configured unknown startup cannot exceed durable retry budget; explicit sa
 });
 
 test('acceptance-unknown recovery freezes the original confirmation fact under the same native idempotency key',async t=>{
- const f=await fixture(t,false),base=await f.d('frozen-voice-confirmation');
+ const control=logicalBackoff(t),f=await fixture(t,false),base=await f.d('frozen-voice-confirmation');
  const first:ProcessedEvent={...base,origin:'device_observation',user_identity:'unknown',media_type:'app_event',mime:'application/json',
   content:{app_event:{kind:'voice_turn',speaker:'owner_uncertain',user:'帮我查询日程'}},processing:{...base.processing,path_id:'direct_app'}};
  const fact={confirmation_id:'a'.repeat(64),expires_at_ms:Date.now()+60000};
- const old=f.admission();old.setVoiceConfirmation(()=>fact);
+ const old=f.admission();control(old);old.setVoiceConfirmation(()=>fact);
  const admitted=await old.admit(first,'session','skill');
  await until(()=>old.get('owner','session',first.processed_event_id)?.state==='reconcile_required');await old.close();
  assert.equal(f.calls.length,1);assert.deepEqual(JSON.parse(JSON.parse(f.calls[0]!.body).input).voice_confirmation,fact);
  let liveReads=0;const restarted=f.admission({native_retry:policy.native_retry!});
+ control(restarted);const running=Promise.withResolvers<void>();restarted.setStateOwner(async entry=>{if(entry.record.state==='running')running.resolve();});
  restarted.setVoiceConfirmation(()=>{liveReads++;return null;});
- await restarted.recover();await until(()=>restarted.get('owner','session',first.processed_event_id)?.state==='running');
+ await restarted.recover();await running.promise;
  assert.equal(f.calls.length,2);assert.deepEqual(f.calls[1],f.calls[0],'the same key must carry byte-identical native input after the card disappears');
  assert.equal(f.runs.size,1);assert.equal(restarted.get('owner','session',first.processed_event_id)?.idempotency_key,admitted.idempotency_key);
  assert.equal(liveReads,0,'recovery reads its durable native input instead of the current pending card');

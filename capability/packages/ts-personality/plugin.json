@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ts-personality",
+  "version": "1.0.0",
+  "description": "依米自己的性格偏好区：平台版本文档、只读提案及撤销",
+  "extensions": {"ai.yimi.capability": {
+    "schema": "yimi.capability.v1", "receipt_schema": 1,
+    "compat": {"hermes": ">=0.22.5 <0.24", "gateway_api": 1}, "maintainer": "lead",
+    "runtime": {"server": "platform_ts", "lazy": true, "idle_timeout_seconds": 900, "host": "shared"},
+    "secrets": [{"name": "HERMES_INTERNAL_KEY"}], "network": {"egress": []}, "scopes": ["owner"],
+    "tools": {"paios_personality_zone": {
+      "effect_by_arg": {"$.action": {"read": "observe", "propose": "observe", "apply": "self_change", "revert": "self_change"}},
+      "retry": "forbidden", "check_with": "paios_personality_zone", "context_inject": ["_context"],
+      "task_type": "platform:personality_zone"
+    }},
+    "staging": {"fake": {"command": "node", "args": ["fake/server.ts"]}},
+    "tests": {"contract": "tests/contract.yaml"},
+    "provenance": {"source_commit": "0feecab588020253452cacc57bd9ba05ba1c0e20", "workshop_run": null, "adapter_modules": ["server/index.ts"]}
+  }}
+}

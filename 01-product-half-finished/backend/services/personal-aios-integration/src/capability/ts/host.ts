@@ -11,6 +11,7 @@ import {readBody} from '../../http-body.ts';
 import type {PersonalAIOSRuntime, ToolCall} from '../../runtime.ts';
 import type {ToolSchema} from '../../tool-contracts.ts';
 import {to_mcp_result} from '../../../../../../../capability/sdk/ts/receipt.ts';
+import {withMedia} from '../../../../../../../capability/sdk/ts/mcp-media.ts';
 import {failure, type ResultAdapter, type ResultInput, type ToolPolicy} from '../../../../../../../capability/packages/ts-host/result.ts';
 
 /** Supplied by the enabled-package authority; the host does not keep another registry or decide policy. */
@@ -77,7 +78,8 @@ export function createTSMcpHost(runtime: Runtime, catalog: CapabilityToolCatalog
         .find((row:{tool:string})=>row.tool===name).raw:
         await runtime.tool(name, {context: _context as ToolCall['context'], args: business});
       input.result = raw; input.now = new Date().toISOString();
-      return to_mcp_result(adapter.mapResult(input));
+      const result=to_mcp_result(adapter.mapResult(input));
+      return withMedia(result,raw);
     } catch (error) {
       return to_mcp_result(failure(input, error));
     }

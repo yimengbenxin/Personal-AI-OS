@@ -76,7 +76,7 @@ const trusted:TrustedContext={principal_id:'owner',device_id:'glasses',device_ty
  *  is one candidate, so the consumer itself must split utterances. Times map onto utc_epoch_ms from `base`. `carrier`: the
  *  window is a follow-up turn opening with the replied request's speech (the processor passes it from the turn segment). */
 export async function transcribeWindow(t:test.TestContext,pcm:Buffer,engine:LocalAudioEngine,speakers?:SpeakerIdentifier,base=1_760_000_000_000,
-  mode:'utterance'|'turn'='utterance',carrier?:WorkerRequest['speaker_carrier']) {
+  mode:'utterance'|'turn'='utterance',carrier?:WorkerRequest['speaker_carrier'],purpose?:'meeting'|'meeting_paused') {
   const directory=await fs.mkdtemp(join(tmpdir(),'paios-sherpa-window-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
   const storage=new PosixStorage(directory),budget={max_chunk_bytes:400000,max_total_bytes:400000,max_chunks:4,max_revisions:4,max_seq:4};
   const archive=new RawArchive(storage,400000,undefined,budget),streamArchive=new StreamArchive(storage,budget);
@@ -85,6 +85,7 @@ export async function transcribeWindow(t:test.TestContext,pcm:Buffer,engine:Loca
   const worker=carrier?{effects:'pure_analysis' as const,analyze:(request:WorkerRequest,signal:AbortSignal)=>sherpa.analyze({...request,speaker_carrier:carrier},signal)}:sherpa;
   const processor=new MediaProcessor(storage,new Map([[capability.id,worker]]),{policy_version:'sherpa-fixture',max_inflight:1,
     max_input_bytes:400000,timeout_ms:30000,allow_external:false,allow_replay:false,allow_partial:true});
+  if(purpose)processor.setSpeechPurpose(async()=>purpose);
   const service=new MediaService({storage,archive,streamArchive,processor,capabilities:async()=>[capability],fixtureOnly:true,
     vad:{candidates:async request=>{const r=request.time_range as {start_ms:number;end_ms:number};
       return [{start_ms:r.start_ms,end_ms:r.end_ms,semantic_status:'open',basis:'controlled-whole-window'}];}},

@@ -99,6 +99,17 @@ test('I5 speaker-evidence clause: owner check uses voiced carrier, pinned L5 ran
   assert.equal((await f.verifier.verifyInitiating('owner', initiating)).verdict, 'pass');
 });
 
+test('payment voice confirmation becomes stricter with its enrolled channel verified line',async t=>{
+  const f=await fixture(t),engine=await f.options.engine(),probe=vector(0);
+  probe[0]=.66;probe[3]=Math.sqrt(1-.66**2);
+  const verifier=new VoiceprintPaymentVerifier({...f.options,engine:async()=>({...engine,embed:async()=>probe})});
+  const initiating=await f.record(pcm(1000,2400)),pay=await f.record(pcm(1000,640));
+  assert.equal((await verifier.verifyPay('owner',initiating,pay)).verdict,'pass');
+  await f.registry.enrollOwner({speaker_model:MODEL,channel:'glasses',mode:'add',
+    samples:Array.from({length:15},()=>({embedding:vector(0),speech_ms:2000})),at:AT});
+  assert.equal((await verifier.verifyPay('owner',initiating,pay)).verdict,'uncertain');
+});
+
 for (const stage of ['initiating', 'combined'] as const) test(`payment rejects learned call-only identity at ${stage} verification`, async t => {
   const f = await fixture(t), identify = f.registry.identify.bind(f.registry);
   let calls = 0;
@@ -270,9 +281,9 @@ test('A6 cancellation: a late initiating or combined owner identity cannot compl
 });
 
 test('I5 speaker-evidence clause: non-default verified and request thresholds come from registry policy', async t => {
-  const lower = await fixture(t, {policy: {thresholds: {owner_verified: 0.5, owner_uncertain: 0.4}}});
+  const lower = await fixture(t, {policy: {thresholds: {owner_verified: 0.7, owner_uncertain: 0.4}}});
   const initiating = await lower.verifier.verifyInitiating('owner', await lower.record(pcm(4000, 2400)));
-  assert.deepEqual([initiating.verdict, initiating.initiating.score], ['pass', 0.55]);
+  assert.deepEqual([initiating.verdict, initiating.initiating.score], ['uncertain', 0.55]);
   const higher = await fixture(t, {policy: {thresholds: {owner_verified: 0.9, owner_uncertain: 0.6}}});
   const result = await higher.verifier.verifyPay('owner', await higher.record(pcm(1000, 2400)), await higher.record(pcm(4000, 640)));
   assert.equal(result.verdict, 'uncertain', 'pay alone is below the configured 0.6 request floor');
@@ -307,15 +318,17 @@ test(`payment isolates real ${channel} learned evidence at ${stage} verification
 });
 
 test('payment ignores ordinary-channel calibration at initiating and combined verification', async t => {
-  const f = await fixture(t, {scoring: {calibration: {ambient: {verified: .5, uncertain: .4}}}});
-  const probe = new Float32Array(MODEL.dim); probe[0] = .55; probe[3] = Math.sqrt(1 - .55 ** 2);
+  const f = await fixture(t, {scoring: {calibration: {ambient: {verified: .9, uncertain: .4}}}});
+  const probe = new Float32Array(MODEL.dim); probe[0] = .7; probe[3] = Math.sqrt(1 - .7 ** 2);
   const ordinary = await f.registry.identify(probe, {mode: 'verify', speech_ms: 2400, observed_at: AT});
-  assert.equal(ordinary.kind === 'owner' && ordinary.band, 'verified');
+  assert.equal(ordinary.kind === 'owner' && ordinary.band, 'uncertain');
+  const engine=await f.options.engine();
+  const verifier=new VoiceprintPaymentVerifier({...f.options,engine:async()=>({...engine,embed:async()=>probe})});
   const initiating = await f.record(pcm(4000, 2400));
-  assert.equal((await f.verifier.verifyInitiating('owner', initiating)).verdict, 'uncertain');
-  const combined = await f.verifier.verifyPay('owner', await f.record(pcm(1000, 2400)), await f.record(pcm(4000, 12000)));
-  assert.equal(combined.verdict, 'uncertain');
-  assert.ok(combined.combined!.score! < f.registry.policy.thresholds.owner_verified);
+  assert.equal((await verifier.verifyInitiating('owner', initiating)).verdict, 'pass');
+  const combined = await verifier.verifyPay('owner', await f.record(pcm(1000, 2400)), await f.record(pcm(4000, 12000)));
+  assert.equal(combined.verdict, 'pass');
+  assert.ok(combined.combined!.score! >= f.registry.policy.thresholds.owner_verified);
 });
 
 test('payment uses the global best enrolled set across capture channels', async t => {
@@ -359,4 +372,21 @@ test('owner override makes payment voice verification unavailable, including act
   const result = racing.verifyPay('owner', initiating, pay);await began;
   active = true;resume();
   assert.equal((await result).verdict, 'unavailable');
+});
+
+test('retired model activation drops in-flight payment scores', async t => {
+  let active = true;
+  const f = await fixture(t, {model_active: () => active});
+  const initiating = await f.record(pcm(1000, 3200));
+  let resume!: () => void, entered!: () => void;
+  const began = new Promise<void>(resolve => {entered = resolve;});
+  const pending = new Promise<void>(resolve => {resume = resolve;});
+  const verifier = new VoiceprintPaymentVerifier({...f.options, engine: async () => {
+    const engine = await f.options.engine();
+    return {...engine, embed: async (samples, signal) => {entered(); await pending; return engine.embed(samples, signal);}};
+  }});
+  const result = verifier.verifyInitiating('owner', initiating);
+  await began; active = false; resume();
+  assert.equal((await result).verdict, 'unavailable');
+  assert.equal(await f.registry.paymentReady('glasses'), false);
 });

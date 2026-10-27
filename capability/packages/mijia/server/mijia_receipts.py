@@ -31,16 +31,17 @@ def package_receipt(tool, args, result):
                 unknowns.append(unknown_fact(label, "属性读取未获有效结果"))
         if unknowns:
             state = "partial" if values else "unknown"
-    if tool in {"control_device", "run_scene"} and "code" in result or "results" in result:
+        if state == "succeeded" and values and args.get("check_for"):
+            effects.append(effect("observe", "mijia:" + result["device_id"], "read_device", "verified",
+                                  "MIoT properties read from this device", args["check_for"]))
+    if tool in {"control_device", "run_scene"} and any(key in result for key in ("code", "device_id", "results")):
         steps = args.get("steps", [args])
         outcomes = result.get("results", [result])
         for step, outcome in zip(steps, outcomes):
-            if "code" not in outcome:
-                continue
-            verification = "service_ack" if outcome["code"] == 0 else "not_verified"
-            effects.append(effect("physical", step["device"],
+            verification = "unknown" if "code" not in outcome else "service_ack" if outcome["code"] == 0 else "not_verified"
+            effects.append(effect("physical", "mijia:" + outcome["device_id"] if "device_id" in outcome else step["device"],
                 step["service"] + "." + (step.get("property") or step.get("action", "")),
-                verification, json.dumps({"code": outcome["code"]}), None))
+                verification, json.dumps({"code": outcome.get("code")}), args.get("idempotency_key") or None))
         if any(outcome.get("status") == "outcome_unknown" for outcome in outcomes):
             state = "partial" if any(e["verification"] == "service_ack" for e in effects) else "unknown"
             unknowns.append(unknown_fact(args.get("name", args.get("device", "操作结果")), "连接中断，执行结果尚未核实"))

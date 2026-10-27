@@ -74,12 +74,12 @@ export function inTransaction<T>(db:DatabaseSync,work:()=>T):T {
 
 export interface ResetCategory {name:string;delete_count:number;keep_count:number;delete_bytes:number;keep_bytes:number;unresolved_sources?:number;crossing_sources?:number}
 /** Preview SQLite on an offline byte copy: readOnly connections can create source WAL/SHM files. */
-export function openReadOnlySnapshot(path:string):{db:DatabaseSync;close:()=>void} {
+export function openReadOnlySnapshot(path:string,allowExtension=false):{db:DatabaseSync;close:()=>void} {
   const temporary=mkdtempSync(join(tmpdir(),'paios-reset-preview-')),target=join(temporary,basename(path));
   try {
     const stat=lstatSync(path),directory=lstatSync(dirname(path));check(stat.isFile()&&!stat.isSymbolicLink()&&directory.isDirectory()&&!directory.isSymbolicLink(),'RESET_DATABASE_PATH_UNSAFE');
     copyFileSync(path,target);if(existsSync(path+'-wal')){const wal=lstatSync(path+'-wal');check(wal.isFile()&&!wal.isSymbolicLink(),'RESET_DATABASE_PATH_UNSAFE');copyFileSync(path+'-wal',target+'-wal');}
-    const db=new DatabaseSync(target,{readOnly:true});return {db,close:()=>{try{db.close();}finally{rmSync(temporary,{recursive:true,force:true});}}};
+    const db=new DatabaseSync(target,{readOnly:true,allowExtension});return {db,close:()=>{try{db.close();}finally{rmSync(temporary,{recursive:true,force:true});}}};
   } catch(error){rmSync(temporary,{recursive:true,force:true});throw error;}
 }
 /** Offline reset opens existing stores only. Preview never runs DDL or opens a write transaction. */

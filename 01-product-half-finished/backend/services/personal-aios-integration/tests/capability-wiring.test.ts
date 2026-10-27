@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm,writeFile,mkdir} from 'node:fs/promises';
-import {join} from 'node:path';
+import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import {PersonalAIOSRuntime,RunAdmission,sourceClient,type NativeClient,type NativeRun} from './native-source-fixture.ts';
+import {PersonalAIOSRuntime,RunAdmission,sourceClient,nativeSubmission,type NativeClient,type NativeRun} from './native-source-fixture.ts';
 import {PosixStorage} from '../src/storage.ts';
 import {OutputAuthority} from '../src/output.ts';
 import {RawArchive} from '../src/archive.ts';
-import {sha256,canonical,ownerActionGrant,type ProcessedEvent} from '../src/contracts.ts';
+import {sha256,canonical,digest,ownerActionGrant,type ProcessedEvent} from '../src/contracts.ts';
 import {nativeApprovalId,VoiceConfirmations} from '../src/voiceprint/confirmation.ts';
 import {StaticFixtureDeviceAuthority,PHONE_CAPABILITIES,MAC_CAPABILITIES} from '../src/source-authority.ts';
 import {createPersonalAIOSServer} from '../src/server.ts';
@@ -24,9 +24,14 @@ import {checkReport} from '../src/capability/checker.ts';
 import {readPackage} from '../src/capability/registry/registry.ts';
 import {OfflineRegistrationRunner} from '../src/capability/registry/runner.ts';
 import {EnabledPackages} from '../src/capability/registry/selection.ts';
+import type {PackageContext} from '../src/capability/registry/interfaces.ts';
 import {PaymentAuthority} from '../src/payment/authority.ts';
 import {paymentFixture,signed} from './payment-fixture.ts';
 import {receipt,succeeded,effect,to_mcp_result,value} from '../../../../../capability/sdk/ts/receipt.ts';
+import {fileURLToPath} from 'node:url';
+import {migrateSendConsents} from '../src/capability/send-consent-migration.ts';
+import {directory,records,recordScope} from './send-consent-fixture.ts';
+import {SEND_CONSENTS} from '../src/capability/send-identity.ts';
 
 async function until<T>(read:()=>T|Promise<T>,done:(row:T)=>boolean):Promise<T>{
   const deadline=Date.now()+5000;
@@ -41,7 +46,8 @@ async function fixture(t:test.TestContext,packages:string[],payment?:PaymentAuth
   },status:async run=>runs.get(run)!,cancel:async run=>({...runs.get(run)!,status:'cancelled'})};
   const native=sourceClient(fake);
   native.capability=async(op,body:any)=>{
-    if(op==='prepare')return {args:body.args,consent:{target:body.args.target,
+    if(op==='prepare')return {args:body.args,consent:{target:body.args.target??(String(body.tool_name).includes('wechat-mac')?'wechat:name:fixture':body.args.recipient),
+      message_kind:body.args.task_type==='send_file'?'file':body.args.action==='react'?'react':body.args.action==='unreact'?'unreact':'text',
       task_type:`send_message:${String(body.args.target??'email:').split(':')[0]}:${body.args.action??'send'}`}};
     assert.equal(op,'execute');executed.push(structuredClone(body));
     return to_mcp_result(succeeded({effects:[effect(body.consent.effect,body.consent.target,'fixture','service_ack','isolated fake')] }));
@@ -62,11 +68,16 @@ async function fixture(t:test.TestContext,packages:string[],payment?:PaymentAuth
   t.after(async()=>{await server.closeAndDrain();await runtime.close();await rm(folder,{recursive:true,force:true});});
   const address=server.address();assert.ok(address&&typeof address!=='string');const base=`http://127.0.0.1:${address.port}`;
   const source=await runtime.authenticate('device');let sequence=0;
+  async function bind(context:{run:string;session:string}){
+    await admission.observeHook({hook:'pre_llm_call',payload:{session_id:context.session,turn_id:`turn-${context.run}`,task_id:'trusted-child',
+      user_message:nativeSubmission(native,context.run).input}});
+  }
   async function owner(session='session'){
     const result=await runtime.submit({schema_version:'paios.event.v1',event_id:`owner-${++sequence}`,device_id:source.device_id,
       device_type:source.device_type,captured_at:new Date().toISOString(),source:{channel:'chat'},media_type:'text',mime:'text/plain;charset=utf-8',
       representation:'uploaded_original',payload:Buffer.from('按我的要求办理')},source,session,true);
     const bound=await until(()=>admission.getAsync('owner',session,result.processed_event.processed_event_id),row=>!!row?.run_id);
+    await bind({session,run:bound!.run_id!});
     return {run:bound!.run_id!,session,processed:result.processed_event.processed_event_id};
   }
   async function rpc(operation:string,body:unknown){
@@ -74,9 +85,9 @@ async function fixture(t:test.TestContext,packages:string[],payment?:PaymentAuth
       Authorization:'Bearer synthetic-internal-token-abcdefghijklmnop','Content-Type':'application/json'},body:JSON.stringify(body)});
     const result=await response.json();assert.equal(response.status,200,JSON.stringify(result));return result as any;
   }
-  const envelope=(context:{run:string;session:string},tool:string,args:object,call=`call-${++sequence}`)=>({api_request_id:context.run,
-    session_id:context.session,task_id:'trusted-child',tool_call_id:call,turn_id:'turn',tool_name:tool,args,middleware_trace:[]});
-  return {runtime,storage,owner,rpc,envelope,runs,inputs,executed,source,base,native,folder,admission,authority};
+  const envelope=(context:{run:string;session:string},tool:string,args:object,call=`call-${++sequence}`)=>({api_request_id:`opaque-attempt-${call}`,
+    session_id:context.session,task_id:'trusted-child',tool_call_id:call,turn_id:`turn-${context.run}`,tool_name:tool,args,middleware_trace:[]});
+  return {runtime,storage,owner,bind,rpc,envelope,runs,inputs,executed,source,base,native,folder,admission,authority};
 }
 
 test('declared MCP identities match the exact composed native sanitizer and length limit',()=>{
@@ -98,6 +109,32 @@ test('HTTP gateway overwrites all phone identity and job fields and preserves sc
   }
   const result=await f.rpc('decide',f.envelope(context,'mcp__phone__phone_save_apps',{apps:['fixture'],owner_requested:false}));
   assert.equal(result.action,'block');assert.equal(JSON.parse(result.message).structuredContent.status.state,'waiting');
+});
+
+test('HTTP reconciliation injects the original operation identity and requires an explicit choice when ambiguous',async t=>{
+  const f=await fixture(t,['wechat-mac','mijia']),bound=await f.owner();
+  for(const [send,read,args,target]of [
+    ['wechat_send_text','wechat_read_recent',{recipient:'wechat:fixture',command:'fixture'},'wechat:fixture'],
+    ['control_device','read_device',{device:'lamp',service:'light',property:'on',value:true},'mijia:1']
+  ] as const){
+    const identity=(name:string)=>[...f.runtime.capabilityGateway.tools].find(([,tool])=>tool.name===name)![0];
+    const original=f.envelope(bound,identity(send),args),id=digest(['owner',bound.run,original.task_id,original.tool_call_id]);
+    const {middleware_trace:_,...wire}=original;
+    const telemetry={status:'success',duration_ms:1,error_type:null,error_message:null};
+    await f.rpc('receipt',{...wire,...telemetry,result:to_mcp_result(receipt('unknown',{
+      effects:[effect(send==='control_device'?'physical':'send',target,'fixture','unknown','',id)],
+      next:{retry:'after_check',check_with:read}}))});
+    const input=f.envelope(bound,identity(read),send==='control_device'?{device:'lamp'}:{recipient:'wechat:fixture'});
+    const checked=await f.rpc('decide',input);assert.equal(checked.action,'modify');assert.equal(checked.args.check_for,id);
+    const later=f.envelope(bound,identity(send),{...args,fixture:'another'}),laterId=digest(['owner',bound.run,later.task_id,later.tool_call_id]);
+    const {middleware_trace:__,...laterWire}=later;
+    await f.rpc('receipt',{...laterWire,...telemetry,result:to_mcp_result(receipt('unknown',{
+      effects:[effect(send==='control_device'?'physical':'send',target,'fixture','unknown','',laterId)],next:{retry:'after_check',check_with:read}}))});
+    const ambiguous=await f.rpc('decide',input);assert.equal(ambiguous.args.check_for,'');
+    const explicit=await f.rpc('decide',{...input,args:{...input.args,check_for:id}});
+    assert.ok(['allow','modify'].includes(explicit.action));assert.equal(explicit.args?.check_for??id,id);
+    await assert.rejects(f.runtime.capabilityCall('decide',{...input,args:{...input.args,check_for:'foreign'}}),/CAPABILITY_CHECK_BINDING_REQUIRED/);
+  }
 });
 
 test('real HTTP confirmation executes the frozen send once after parent completion, carries the same ledger facts and remembers only person plus kind',async t=>{
@@ -125,6 +162,39 @@ test('real HTTP confirmation executes the frozen send once after parent completi
   const changed=await f.rpc('decide',f.envelope(again,'send_message',{action:'react',target:'email:fixture@example.com',owner_requested:true}));
   assert.equal(changed.action,'block');assert.equal(JSON.parse(changed.message).structuredContent.status.state,'waiting');
   assert.equal(f.executed.length,1);
+});
+
+test('RQ-103 real gateway + native WeChat preparation reuse migrated grants and ignore forged effect metadata',async t=>{
+  const f=await fixture(t,['wechat-mac']),native=f.native.capability.bind(f.native);
+  f.native.capability=async(operation,body:any)=>{
+    if(operation!=='prepare')return native(operation,body);
+    const prepared=spawnSync(process.env.PAIOS_HERMES_PYTHON!,['-c',
+      "import sys,json,importlib;from gateway import channel_directory;body=json.load(sys.stdin);channel_directory.load_directory=lambda:body['directory'];server=importlib.import_module('capability.packages.wechat-mac.server.server');print(json.dumps(server.prepare_call(body['name'],body['args'])))"],
+      {input:JSON.stringify({directory,name:body.tool_name.split('__').at(-1),args:body.args}),encoding:'utf8',
+        env:{...process.env,PYTHONPATH:resolve(import.meta.dirname,'../../../../..')+':'+process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT}});
+    assert.equal(prepared.status,0,prepared.stderr);return JSON.parse(prepared.stdout);
+  };
+  for(const record of records){const scoped={...record,principal_id:'owner',confirmed_by:'owner'};
+    await f.storage.publish('effect-consents',digest(recordScope(scoped)),Buffer.from(canonical(scoped)));}
+  assert.equal((await migrateSendConsents(f.storage,'owner',directory)).migrated,2);
+  const bound=await f.owner();
+  for(const tool of ['wechat_send_text','wechat_reply','wechat_send_file']){
+    const decision=await f.rpc('decide',f.envelope(bound,'mcp__wechat-mac__'+tool,{recipient:'wechat:测试联系人',
+      command:'fixture-'+tool,owner_requested:true,task_type:'an-invented-new-release-task',effect:{recipient:'wechat:另一个人',task_type:'different'}}));
+    assert.equal(decision.action,'modify');assert.equal(decision.args.recipient,'wechat:name:测试联系人');
+    assert.equal(decision.args.task_type,undefined);assert.equal(decision.args.effect,undefined);
+  }
+  assert.equal((await f.runtime.voiceConfirmations(f.source)).length,0);
+  for(const tool of f.runtime.capabilityGateway.tools.values())tool.version_digest='f'.repeat(64);
+  const upgraded=await f.rpc('decide',f.envelope(bound,'mcp__wechat-mac__wechat_send_text',{
+    recipient:'wechat:测试·联系人',command:'release-upgrade',owner_requested:true}));
+  assert.equal(upgraded.action,'modify');
+  const stranger=await f.rpc('decide',f.envelope(bound,'mcp__wechat-mac__wechat_send_text',{
+    recipient:'wechat:另一个人',command:'new-person',owner_requested:true}));
+  assert.equal(stranger.action,'block');assert.equal((await f.runtime.voiceConfirmations(f.source)).length,1);
+  const raw=await f.runtime.effectConsent({run_id:bound.run,session_id:bound.session,tool_call_id:'forged-stable-key'},
+    {kind:'send',recipient:'wechat:name:测试联系人',task_type:'message.text',requested:true});
+  assert.equal(raw.status,'confirmation_required');assert.equal(f.executed.length,0);
 });
 
 test('assembly restores an approved frozen call that calls its own HTTP ports during recovery',async t=>{
@@ -201,8 +271,9 @@ test('native multimodal results keep their structured receipt in the real HTTP l
   const f=await fixture(t,['owner-mac']),bound=await f.owner();
   const call=f.envelope(bound,'mcp__owner_mac__computer_use',{action:'capture'});
   const decision=await f.rpc('decide',call),{middleware_trace:_trace,...wire}=call;
-  const result={_multimodal:true,text_summary:JSON.stringify({result:'succeeded\nMEDIA:/fixture.png',structuredContent:succeeded()}),
-    content:[{type:'text',text:'native'},{type:'image_url',image_url:{url:'data:image/png;base64,fixture'}}]};
+  const result={_multimodal:true,text_summary:'not a public receipt source',
+    content:[{type:'text',text:JSON.stringify({result:'succeeded\nMEDIA:/fixture.png',structuredContent:succeeded()})},
+      {type:'image_url',image_url:{url:'data:image/png;base64,fixture'}}]};
   const view=await f.rpc('receipt',{...wire,args:decision.args,result,status:'success',duration_ms:1,error_type:null,error_message:null});
   assert.match(view.model_view,/"state":"succeeded"/);
   assert.equal((await f.runtime.capabilityGateway.ledger.current({principal_id:'owner',run_id:bound.run}))[0]!.receipt.status.state,'succeeded');
@@ -220,10 +291,24 @@ test('combined TS read/write arguments are classified by the source and cannot f
   }
 });
 
+test('one package monitor exception does not suppress the next package health check',async t=>{
+  const f=await fixture(t,['yimi']);await f.runtime.monitorCapabilities();
+  const tool=[...packageCatalog({enabled:['phone'],gateway:['phone']}).values()][0]!;
+  for(const name of ['unavailable-package','healthy-package'])f.runtime.capabilityGateway.tools.set(name,
+    {...tool,package:name,principal_id:'owner',version_digest:sha256(name)});
+  const checked:string[]=[];t.mock.method(console,'warn',()=>{});
+  t.mock.method(f.runtime.capabilityRegistry!,'monitor',async(_context:PackageContext,name:string)=>{
+    checked.push(name);if(name==='unavailable-package')throw Error('fictional monitor failure');
+    return {health:true,current:{total:0,failed:0,unknown:0},previous:null,rollback:null};
+  });
+  await f.runtime.monitorCapabilities();
+  assert.deepEqual(checked,['unavailable-package','healthy-package']);
+});
+
 test('all six authenticated registry RPCs use admission, the enabled CAS and real ledger version outcomes',async t=>{
   const f=await fixture(t,['yimi']),bound=await f.owner();
   const context={run_id:bound.run,session_id:bound.session,tool_call_id:'registry',principal_id:'spoofed'};
-  const files=await readPackage(new URL('../../../../../capability/templates/yimi-capability-template',import.meta.url).pathname);
+  const files=await readPackage(fileURLToPath(new URL('../../../../../capability/templates/yimi-capability-template',import.meta.url)));
   const declared=JSON.parse(files['plugin.json']!),mcp=JSON.parse(files['mcp.json']!);
   const original=declared.extensions['ai.yimi.capability'].runtime.server;
   declared.extensions['ai.yimi.capability'].runtime.server='platform_ts';files['plugin.json']=JSON.stringify(declared);
@@ -290,6 +375,9 @@ async function tableScopes(t:test.TestContext,packages:string[]){
   const owner=await f.owner();let serial=0;
   const find=f.admission.find.bind(f.admission),identities=new Map<string,ProcessedEvent>();
   f.admission.find=(run,session)=>{const entry=find(run,session);if(entry&&identities.has(run))entry.d=structuredClone(identities.get(run)!);return entry;};
+  const binding=f.admission.hookBinding.bind(f.admission);
+  f.admission.hookBinding=async(call,execution)=>{const entry=await binding(call,execution);
+    if(identities.has(entry.record.run_id!))entry.d=structuredClone(identities.get(entry.record.run_id!)!);return entry;};
   const scopes=new Map<string,typeof owner>([['owner',owner]]);
   for(const scope of ['owner_observation','guest','care','owner_uncertain','background','background_unattributed','cron','cron_unbound','build']){
     const session='table-'+scope;
@@ -317,6 +405,7 @@ async function tableScopes(t:test.TestContext,packages:string[]){
     if(scope==='guest'||scope==='owner_uncertain')entry.d.content.app_event={kind:'voice_turn',speaker:scope==='guest'?'speaker:guest':'owner_uncertain'};
     if(scope==='care')entry.d.content.app_event={kind:'proactive_care'};
     identities.set(record!.run_id!,entry.d);
+    await f.bind({run:record!.run_id!,session:actualSession});
     scopes.set(scope,{run:record!.run_id!,session:actualSession,processed:entry.d.processed_event_id});
   }
   return {...f,scopes};
@@ -332,7 +421,7 @@ function disposition(result:any){
 
 test('P3 684-cell legacy gate table replays through the HTTP gateway; only scope-only observe cells change',async t=>{
   const f=await tableScopes(t,['phone']);
-  const root=new URL('../../../../../',import.meta.url).pathname;
+  const root=fileURLToPath(new URL('../../../../../',import.meta.url));
   const env={...process.env,PYTHONPATH:process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT};
   const oracle=(mode:string,input?:unknown)=>{
     const result=spawnSync(process.env.PAIOS_HERMES_PYTHON!,[join(root,'tests/hermes/capability_consent_table.py'),mode],{
@@ -350,12 +439,18 @@ test('P3 684-cell legacy gate table replays through the HTTP gateway; only scope
     let legacy:unknown,error:string|undefined;
     try{
       if(remembered){const id='remembered';await f.runtime.effectConsent(context,legacyEffect,true,false,id,{
-        confirmation_id:nativeApprovalId('owner',bound.run,id),confirmed_by:'owner',surface:{device_id:'phone',device_type:'phone'},confirmed_at:new Date().toISOString()});}
+        confirmation_id:nativeApprovalId('owner',bound.run,id),confirmed_by:'owner',surface:{device_id:'phone',device_type:'phone'},confirmed_at:new Date().toISOString()});
+        // The equivalence table compares the trigger, using a grant in each implementation's own key schema.
+        if(effect==='send'){
+          const scope={principal_id:'owner',kind,task_type: 'message.text',recipient:target,...(!requested?{run_id:bound.run,tool_call_id}:{})};
+          await f.storage.publish(SEND_CONSENTS,digest(scope),Buffer.from(canonical({...scope,confirmation_id:nativeApprovalId('owner',bound.run,id),
+            confirmed_by:'owner',confirmed_at:new Date().toISOString()})));
+        }}
       legacy=await f.runtime.effectConsent(context,legacyEffect);
     }catch(caught){error=(caught as {code:string}).code;}
     const identity='mcp__table__'+row.tool;
     f.runtime.capabilityGateway.tools.set(identity,{package:'table',server:'table',name:row.tool,scopes:['owner'],
-      effect,target:'$.recipient',task_type,retry:'forbidden'});
+      effect,target:'$.recipient',task_type,retry:'forbidden',...(effect==='send'?{send_consent:{recipient:'channel' as const,kind:'message.text'}}:{})});
     const wire=await f.rpc('decide',f.envelope(bound,identity,{owner_requested:requested,recipient:target},tool_call_id));
     const actual=disposition(wire);
     cases.push({...row,effect:legacyEffect,manifest_effect:effect,scope_allowed:row.allowed,context,legacy,error,actual,wire,remembered});
@@ -399,13 +494,16 @@ test('P2 203-cell table uses the real gateway and declares every owner-decided r
       if(actual!==legacy)assert.ok(['observe','workspace'].includes(tool.effect!),JSON.stringify(cells.at(-1)));
     }
   }
-  assert.equal(count,203);
+  const original=cells.filter(row=>row.tool!=='phone_check'),checks=cells.filter(row=>row.tool==='phone_check');
+  assert.equal(original.length,203);assert.equal(checks.length,7);assert.equal(count,210);
+  for(const row of checks)assert.equal(row.actual,original.find(cell=>cell.tool==='phone_status'&&cell.scope===row.scope)!.actual);
   if(process.env.PAIOS_WIRING_EVIDENCE)await writeFile(join(process.env.PAIOS_WIRING_EVIDENCE,'p2-gateway-equivalence.json'),
-    JSON.stringify({total:203,owner_decided:cells.filter(row=>row.actual!==row.legacy).length,cells},null,2));
+    JSON.stringify({total:210,p2_cells:203,check_cells:7,owner_decided:cells.filter(row=>row.actual!==row.legacy).length,cells},null,2));
 });
 
 test('TS 180-cell source table crosses the HTTP gateway and shared HTTP MCP before the original runtime',async t=>{
-  const f=await tableScopes(t,packageNames),schemas=enabledToolSchemas({memory:true,actions:true,ambient:true,visual:true,
+  // The new personality tool has no legacy predecessor; its self_change door is covered in personality-runtime.test.ts.
+  const f=await tableScopes(t,packageNames.filter(name=>name!=='ts-personality')),schemas=enabledToolSchemas({memory:true,actions:true,ambient:true,visual:true,
     voiceprint:true,health:true,contacts:true,places:true,movement:true,desktop_queue:true,model_settings:true});
   f.runtime.toolSchemas=()=>schemas;
   const catalog=new Map(f.runtime.capabilityGateway.tools),cells:any[]=[];
@@ -502,6 +600,7 @@ test('a failed phone receipt creates one source-bound read-only self-check and r
   await until(()=>f.runs.size,n=>n===2);
   const self=[...f.runs.keys()].map(run=>f.admission.find(run)).find(entry=>(entry?.d.content.app_event as {kind?:string}|undefined)?.kind==='task_failure')!;
   assert.ok(self);const context={run:self.record.run_id!,session:self.record.session_id};
+  await f.bind(context);
   const checked=await f.rpc('decide',f.envelope(context,'mcp__phone__phone_task',{
     task_type:'read_app',goal:'read the original task',owner_requested:false,self_check_of:'forged'}));
   assert.equal(checked.action,'modify');assert.equal(checked.args.self_check_of,job+':0');

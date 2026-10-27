@@ -1,3 +1,4 @@
+import {DEFAULT_TIME_ZONE,timeZoneName} from '../deployment-time.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import {digest,principalAttribution,type CaptureLocation,type ProcessedEvent} from '../contracts.ts';
 import {inTransaction,openOwnerDatabase,resetOwnerDatabase,resetRowCounts} from '../owner-db.ts';
@@ -35,10 +36,10 @@ CREATE INDEX IF NOT EXISTS timeline_time ON timeline(principal_id,at_ms);
 CREATE TABLE IF NOT EXISTS decisions(care_id TEXT PRIMARY KEY,principal_id TEXT NOT NULL,input TEXT NOT NULL,payload TEXT) STRICT;`;
 const clip=(text:string,limit:number)=>{const all=Array.from(text.replace(/\s+/gu,' ').trim());
   return all.length>limit?`${all.slice(0,limit-1).join('')}…`:all.join('');};
-/** Local (the Mac's zone) time for the owner and their contacts. */
-const stamp=(ms:number)=>new Intl.DateTimeFormat('zh-CN',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'shortOffset'}).format(ms);
-const locationLine=(fix:CaptureLocation|undefined,current=false)=>fix?
-  `${current?'当前位置':'最后已知位置'}（台湾时间${new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Taipei',year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(Date.parse(fix.observed_at))}）：`+
+/** Deployment-local time for the owner and their contacts. */
+const stamp=(ms:number,timeZone:string)=>new Intl.DateTimeFormat('zh-CN',{timeZone,month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'shortOffset'}).format(ms);
+const locationLine=(zone:string,fix:CaptureLocation|undefined,current=false)=>fix?
+  `${current?'当前位置':'最后已知位置'}（${timeZoneName(zone)}${new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(Date.parse(fix.observed_at))}）：`+
   `${fix.place?`${fix.place}，`:''}https://uri.amap.com/marker?position=${fix.longitude},${fix.latitude}&coordinate=wgs84（误差约${Math.round(fix.accuracy_m)}米）`:
   '位置未知（手机最近没有定位）';
 const failed=(code:string)=>(error:unknown)=>console.error(code,error instanceof Error?error.message:'unknown');
@@ -55,12 +56,13 @@ export class CareAuthority {
       return result;
     });
   }
+  private readonly time_zone:string;
   private readonly db:DatabaseSync;private readonly now:()=>number;
   private readonly timers=new Map<string,ReturnType<typeof setTimeout>>();
   private ports:CarePorts|undefined;
-  private constructor(db:DatabaseSync,now:()=>number){this.db=db;this.now=now;}
-  static open(directory:string,now:()=>number=Date.now):CareAuthority {
-    return new CareAuthority(openOwnerDatabase(directory,'care.sqlite',DDL,SCHEMA,'CARE_STORE'),now);
+  private constructor(db:DatabaseSync,now:()=>number,time_zone:string){this.db=db;this.now=now;this.time_zone=time_zone;}
+  static open(directory:string,now:()=>number=Date.now,time_zone=DEFAULT_TIME_ZONE):CareAuthority {
+    return new CareAuthority(openOwnerDatabase(directory,'care.sqlite',DDL,SCHEMA,'CARE_STORE'),now,time_zone);
   }
   attach(ports:CarePorts):void {
     this.ports=ports;
@@ -153,8 +155,8 @@ export class CareAuthority {
       this.note(e.principal_id,this.now(),'主人有回应，没有通知紧急联系人');return;
     }
     const fix=position.current??position.last_known??(e.location?JSON.parse(e.location) as CaptureLocation:undefined);
-    const where=locationLine(fix,position.current!==undefined);
-    const text=`【依米紧急提醒】我是${who}的AI助理依米。${who}的手表在${stamp(e.at_ms)}检测到可能摔倒，已60秒无回应，可能受伤或失去意识。${where}。请尽快联系${who}。`;
+    const where=locationLine(this.time_zone,fix,position.current!==undefined);
+    const text=`【依米紧急提醒】我是${who}的AI助理依米。${who}的手表在${stamp(e.at_ms,this.time_zone)}检测到可能摔倒，已60秒无回应，可能受伤或失去意识。${where}。请尽快联系${who}。`;
     const sent:string[]=[],missed:string[]=[];
     await Promise.all(contacts.map(async c=>{
       if(c.phone)try {await ports.sms({principal_id:e.principal_id,id:digest([care_id,c.phone]),to:c.phone,text});sent.push(c.name);return;} catch(error){failed('CARE_SMS_FAILED')(error);}
@@ -193,7 +195,7 @@ export class CareAuthority {
   }
   recent(principal:string):string[] {
     return (this.db.prepare("SELECT at_ms,line FROM timeline WHERE principal_id=? AND at_ms>=? AND line!='依米没有打扰' ORDER BY at_ms DESC,rowid DESC")
-      .all(principal,this.now()-RECENT_MS) as {at_ms:number;line:string}[]).reverse().map(r=>`${stamp(r.at_ms)} ${r.line}`);
+      .all(principal,this.now()-RECENT_MS) as {at_ms:number;line:string}[]).reverse().map(r=>`${stamp(r.at_ms,this.time_zone)} ${r.line}`);
   }
   private note(principal:string,at:number,line:string):void {
     this.db.prepare('INSERT INTO timeline(principal_id,at_ms,line) VALUES(?,?,?)').run(principal,at,line);

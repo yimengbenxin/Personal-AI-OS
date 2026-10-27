@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {HealthStore,type HealthBatch} from '../src/health/store.ts';
 import {metricByKey} from '../src/health/metrics.ts';
-import {boundary} from '../src/health/calendar.ts';
+import {boundary,dayWindow} from '../src/health/calendar.ts';
 import {openOwnerDatabase} from '../src/owner-db.ts';
 import {aggregateNumber} from '../src/health/summary.ts';
 import {queryHealth,recentHealthLine} from '../src/health/query.ts';
@@ -77,6 +77,23 @@ test('sleep overlap union, local reporting-day clipping and DST',async t=>{
   store.ingest('dst','phone',batch('dst',[{id:id(5),s:dstStart,e:dstEnd,src:0,c:1}],{metric:'sleepAnalysis',unit:'category-code',tz:'America/Los_Angeles'}));
   assert.equal(store.days('dst',sleep,'2026-03-08','2026-03-08')[0]!.summary.asleep_min,1380);
   assert.equal(boundary('2026-11-01','America/Los_Angeles',18)-boundary('2026-10-31','America/Los_Angeles',18),25*3600000);
+});
+test('fractional offsets: Lord Howe half-hour DST days and Kathmandu local midnight',()=>{
+  const utc=(iso:string)=>Date.parse(iso),hours=([from,until]:[number,number])=>(until-from)/3600000;
+  // Lord Howe: +10:30 standard, +11:00 daylight; clocks move by 30 minutes at 02:00 local.
+  // 2026-10-04 starts daylight time: 23.5 hours from 00:00 +10:30 to 00:00 +11:00.
+  assert.deepEqual(dayWindow('2026-10-04','Australia/Lord_Howe'),[utc('2026-10-03T13:30:00Z'),utc('2026-10-04T13:00:00Z')]);
+  assert.equal(hours(dayWindow('2026-10-04','Australia/Lord_Howe')),23.5);
+  // 2026-04-05 ends daylight time: 24.5 hours from 00:00 +11:00 to 00:00 +10:30.
+  assert.deepEqual(dayWindow('2026-04-05','Australia/Lord_Howe'),[utc('2026-04-04T13:00:00Z'),utc('2026-04-05T13:30:00Z')]);
+  assert.equal(hours(dayWindow('2026-04-05','Australia/Lord_Howe')),24.5);
+  // The sleep reporting day spans the same transition from 18:00 to 18:00 local.
+  assert.deepEqual(dayWindow('2026-10-04','Australia/Lord_Howe',true),[utc('2026-10-03T07:30:00Z'),utc('2026-10-04T07:00:00Z')]);
+  assert.deepEqual(dayWindow('2026-04-05','Australia/Lord_Howe',true),[utc('2026-04-04T07:00:00Z'),utc('2026-04-05T07:30:00Z')]);
+  // Kathmandu: fixed +05:45, so local midnight falls at 18:15 UTC on the previous day.
+  assert.equal(boundary('2026-10-09','Asia/Kathmandu'),utc('2026-10-08T18:15:00Z'));
+  assert.deepEqual(dayWindow('2026-10-09','Asia/Kathmandu'),[utc('2026-10-08T18:15:00Z'),utc('2026-10-09T18:15:00Z')]);
+  assert.deepEqual(dayWindow('2026-10-09','Asia/Kathmandu',true),[utc('2026-10-08T12:15:00Z'),utc('2026-10-09T12:15:00Z')]);
 });
 test('cumulative source approximation and interval allocation are explicit',async t=>{
   const {store}=await open(t),s=Date.parse('2026-10-08T23:00Z'),e=Date.parse('2026-10-09T01:00Z');

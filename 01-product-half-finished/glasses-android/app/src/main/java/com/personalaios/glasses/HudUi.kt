@@ -110,7 +110,7 @@ fun visibleHud(state: HudState, now: Long, serverNow: Long = now): HudState {
         conversationError = state.conversationError.takeUnless { masked },
         say = if (useCaption) caption!!.text else say,
         sayAt = if (useCaption) caption!!.at else state.sayAt,
-        cards = state.cards.filter { !masked && it.expiresAt > now && (!moving || it.progress != null || interrupts(it)) })
+        cards = state.cards.filter { !it.companion && !masked && it.expiresAt > now && (!moving || it.progress != null || interrupts(it)) })
 }
 // Choices, call offers and high-priority cards such as the care check-in never wait.
 private fun interrupts(card: HudCard) = card.priority > 1 || card.actions.size >= 2

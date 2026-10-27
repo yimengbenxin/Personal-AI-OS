@@ -5,9 +5,10 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PRODUCT_RESOURCE_KEYS, PRODUCT_RESOURCE_OPTIONAL_KEYS } from '../src/product-resource-keys.ts';
 
-const tool = new URL('../tools/mac-product-provision.ts', import.meta.url).pathname;
+const tool = fileURLToPath(new URL('../tools/mac-product-provision.ts', import.meta.url));
 
 test('config keeps every resource the entrypoint reads (errands, Bark) and drops only retired ones', async () => {
   const root = await mkdtemp(join(tmpdir(), 'mac-provision-'));
@@ -62,7 +63,7 @@ for resources in [{},{'amap_key_file':str(home/'missing.key')},{'amap_key_file':
     product.write_text(json.dumps({'product_resources':resources})); module.configure_amap(home,product)
     assert 'amap' not in _load_mcp_config() and 'PAIOS_AMAP_KEY' not in os.environ
     assert 'amap' not in yaml.safe_load((home/'config.yaml').read_text())['platform_toolsets']['api_server']
-` ,home,product,new URL('../../../../../integrations/hermes/personal_aios/run_api.py',import.meta.url).pathname],
+` ,home,product,fileURLToPath(new URL('../../../../../integrations/hermes/personal_aios/run_api.py',import.meta.url))],
     {env:{...process.env,HERMES_HOME:home,PYTHONPATH:runtime,PYTHONDONTWRITEBYTECODE:'1',NV1_KEY_FILE:file},stdio:'pipe'});
   assert.ok(!(await readFile(join(home,'config.yaml'),'utf8')).includes(KEY));
 });

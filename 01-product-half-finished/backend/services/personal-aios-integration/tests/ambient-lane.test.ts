@@ -24,6 +24,7 @@ import type {SoundEvent,SpeechEmotion} from '../src/voiceprint/contracts.ts';
 import {PHONE_CAPABILITIES,GLASSES_CAPABILITIES,StaticFixtureDeviceAuthority,type SourceDeviceAuthority,type RegisteredDevice} from '../src/source-authority.ts';
 import {randomUUID} from 'node:crypto';
 import {openFixtureDatabase} from '../src/memory/fixture-database.ts';
+import {fileURLToPath} from 'node:url';
 
 const T0=Date.parse('2026-10-09T08:00:00.000Z');
 const capability:Capability={id:'local-sherpa-audio',version:'fixture',modalities:['audio'],formats:['pcm_s16le:16000:1'],joint_av:false,
@@ -157,7 +158,7 @@ test('ambient evidence reaches real L3 through the main tool and raw erasure rem
   {skip:!process.env.PAIOS_L3_TEST_DATABASE_URL},async t=>{
   const schema='paios_fixture_ambient_'+randomUUID().replaceAll('-','').slice(0,20);
   const database=await openFixtureDatabase({url:process.env.PAIOS_L3_TEST_DATABASE_URL!,schema,
-    migration_file:new URL('../../../migrations/0009_hermes_l3.up.sql',import.meta.url).pathname});
+    migration_file:fileURLToPath(new URL('../../../migrations/0009_hermes_l3.up.sql',import.meta.url))});
   const f=await fixture(t,[{text:'我周四把设计稿发给你。',speaker:'speaker:1'},
     {text:'依米，记下刚才的约定。',speaker:'owner',wake:0.2,gap_ms:500}],[{text:'记下刚才的约定。',speaker:'owner'}],{l3:database.l3});
   t.after(async()=>{await f.runtime.close();await database.pool.query('DROP SCHEMA '+schema+' CASCADE');await database.close();});
@@ -806,7 +807,8 @@ test(`ambient follow-up carrier is armed before ${delivery} call delivery settle
     assert.equal(f.turnWindows.length,2);assert.ok(f.turnWindows[1]!.carrier,'sealed source speech is the short follow-up carrier before delivery settles');
   }finally{release.resolve();}
   await f.runs(2);assert.deepEqual(f.errors,[]);
-  if(delivery==='failed'){await until(()=>f.outputErrors.length===1);assert.match(String(f.outputErrors[0]),/CONTROLLED_DELIVERY_FAILED/);}
+  if(delivery==='failed'){await until(()=>f.outputErrors.some(error=>String(error).includes('CONTROLLED_DELIVERY_FAILED')));
+    assert.ok(f.outputErrors.every(error=>String(error).includes('CONTROLLED_DELIVERY_FAILED')),'delivery retries report the same controlled failure');}
   else assert.deepEqual(f.outputErrors,[]);
 });
 

@@ -12,7 +12,8 @@ import {policy} from './sealed-replay-check.ts';
 import {createPersonalAIOSServer} from '../src/server.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-async function fixture(t:TestContext,mode:'text'|'none'='text',routeSelfcheckResult?: (result:ErrandResult)=>Promise<boolean>) {
+import {fileURLToPath} from 'node:url';
+async function fixture(t:TestContext,mode:'text'|'none'|'admitted'='text',routeSelfcheckResult?: (result:ErrandResult)=>Promise<boolean>) {
  const root=await fs.mkdtemp(join(tmpdir(),'paios-errand-delivery-')),storage=new PosixStorage(root);
  let creates=0,historyReads=0;
  const runs=new Map<string,NativeRun>(),bound=Promise.withResolvers<void>(),secondBound=Promise.withResolvers<void>(),inputs:string[]=[];
@@ -27,13 +28,35 @@ async function fixture(t:TestContext,mode:'text'|'none'='text',routeSelfcheckRes
  const result:ErrandResult={principal_id:'owner',job_id:'job-0123456789ab',task:'Read the requested page',success:true,answer:'Finished',finished_at:new Date().toISOString()};
  const raw=(value:ErrandResult)=>({schema_version:EVENT_SCHEMA,event_id:`errand:${value.job_id}`,device_id:'phone',device_type:'phone' as const,captured_at:value.finished_at,source:{channel:'text'},media_type:'app_event' as const,mime:'application/json',representation:'uploaded_original' as const,payload:Buffer.from(JSON.stringify({kind:'errand_result',...value}))});
  const submit=(value=result,session='session')=>runtime.submitErrand(raw(value),source,session);
- const finish=async(d:string,runId='run-1',outreach=true,session='session')=>{await bound.promise;await runtime.tool('paios_open_reply',{context:{run_id:runId,session_id:session,tool_call_id:'open'},args:{reply_mode:mode}});
+ const finish=async(d:string,runId='run-1',outreach=true,session='session')=>{await bound.promise;
+ if(mode!=='admitted')await runtime.tool('paios_open_reply',{context:{run_id:runId,session_id:session,tool_call_id:'open'},args:{reply_mode:mode}});
+ else {const wire=JSON.parse(await fs.readFile(new URL('./fixtures/native-final-response/native-proof.json',import.meta.url),'utf8')) as NativeRun;
+   const text='这次任务没有完成。已读到页面上的部分内容，其余结果尚未核实。';
+   Object.assign(runs.get(runId)!,{output:text,native_final_response:{...wire.native_final_response!,run_id:runId,session_id:session,sha256:sha256(text)}});}
  const done=Promise.withResolvers<Awaited<ReturnType<PersonalAIOSRuntime['result']>>>();
  await runtime.subscribeResult(source,session,d,async value=>{done.resolve(value);},error=>done.reject(error),outreach?{outreach:'errand'}:{});
  runs.get(runId)!.status='completed';return done.promise;};
  const watch=(deliver:(result:ErrandResult)=>Promise<boolean>,reply:(...args:any[])=>Promise<boolean|'pending'>)=>runtime.watchCare(source,async()=>true,undefined,undefined,undefined,{deliver,progress:async()=>true,reply});
  return {runtime,storage,admission,output,source,result,submit,finish,watch,errors,inputs,ready:bound.promise,secondBound:secondBound.promise,counts:()=>({creates,historyReads})};
 }
+test('failed errand with partial findings delivers its durable final text without a model OPEN call',async t=>{
+ const f=await fixture(t,'admitted'),result={...f.result,success:false,terminal_reason:'failed' as const,
+   answer:'Synthetic executor asset error',partial_findings:{verified:[],not_verified:['remaining task'],last_screen_text:'Synthetic page content',truncated:false}};
+ const first=await f.submit(result),value=await f.finish(first.processed_event.processed_event_id);
+ assert.equal(value.result.reply_phase,'sealed');assert.equal(value.result.reply_mode,'text');
+ assert.ok(value.result.reply_text.includes('没有完成'));assert.ok(value.result.output_plan.length);
+ assert.ok(value.result.warnings.includes('FINAL_BUFFER_DURABLE_ASSISTANT_BOUNDARY'));
+ assert.equal(value.result.warnings.includes('OPEN_REQUIRED'),false);
+ let published=0;await f.watch(async()=>false,async()=>{published++;return true;});
+ assert.equal(await f.runtime.errandReply('owner',value,error=>f.errors.push(error),{first:true}),'pending');
+ assert.equal(published,1);
+ const chunk=value.chunks.at(-1)!;
+ await f.runtime.acknowledge(f.source,'session',first.processed_event.processed_event_id,{output_id:chunk.output_id,reply_id:chunk.reply_id,
+   reply_epoch:chunk.reply_epoch,target_device_id:chunk.target_device_id,route_version:chunk.route_version,
+   highest_contiguous_seq:chunk.seq,status:'rendered',observed_at:new Date().toISOString()});
+ assert.equal(await f.runtime.errandReply('owner',value,error=>f.errors.push(error),{first:true}),true);
+ assert.equal(published,1);assert.deepEqual(f.errors,[]);
+});
 test('a timed-out phone result carries found and missing facts into the reporting run once',async t=>{
  const f=await fixture(t),partial_findings={verified:['示例店甲：68–98 元'],not_verified:['[pending] 配送费未读到'],
    last_screen_text:'示例店乙，距离 2 公里',truncated:false};
@@ -298,7 +321,7 @@ finally: clear_session_vars(token)
 `;
    const {stdout}=await promisify(execFile)(process.env.PAIOS_HERMES_PYTHON??'/opt/personal-aios-runtime/hermes-agent/.venv/bin/python',
      ['-c',script,`http://127.0.0.1:${address.port}`,key,f.result.job_id],{
-       cwd:new URL('../../../../../',import.meta.url).pathname,env:{...process.env,PYTHONPATH:nativeRoot!},timeout:15000});
+       cwd:fileURLToPath(new URL('../../../../../',import.meta.url)),env:{...process.env,PYTHONPATH:nativeRoot!},timeout:15000});
    const completion=JSON.parse(stdout);assert.deepEqual(completion.prior_reports,payload.prior_reports);
  });
  const read=f.storage.read.bind(f.storage),failure=Object.assign(new Error('fixture unavailable'),{code:'EIO'});

@@ -29,11 +29,16 @@ final class VoiceAudioRouteTraceTests: XCTestCase {
         let downstream = RouteTraceDownstream()
         trace.next = downstream
         let first = AVAudioEngine(), second = AVAudioEngine()
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
+        // These engines are observer identities only; keep the source detached from any engine graph.
+        let source = AVAudioSourceNode(format: format) { silence, _, _, _ in
+            silence.pointee = true
+            return noErr
+        }
         XCTAssertEqual(trace.engineDidCreate(first), -17)
         center.post(name: .AVAudioEngineConfigurationChange, object: first)
         XCTAssertTrue(capture.lines.last!.contains("event=engine_config_change"))
-        let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
-        XCTAssertEqual(trace.engineWillConnectOutput(first, src: first.mainMixerNode, dst: nil, format: format, context: [:]), -18)
+        XCTAssertEqual(trace.engineWillConnectOutput(first, src: source, dst: nil, format: format, context: [:]), -18)
         XCTAssertTrue(capture.lines.last!.contains("rate=16000.0 channels=1 result=-18"))
         XCTAssertEqual(trace.engineWillStart(first, isPlayoutEnabled: true, isRecordingEnabled: true), -19)
         XCTAssertEqual(trace.engineWillRelease(first), -20)

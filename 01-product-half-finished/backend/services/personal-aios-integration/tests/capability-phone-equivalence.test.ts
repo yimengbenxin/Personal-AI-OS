@@ -47,10 +47,12 @@ for(const scope of ['owner','guest','care','background','cron','background_unbou
 
 test('phone single-tool cells: only the owner-decision cells differ from P2',()=>{
   // 7 tools x 7 scopes = P2's 49 single-tool cells, each now also split by owner_requested.
-  assert.equal(cells.length,98);
+  const original=cells.filter(cell=>cell.tool!=='phone_check'),checks=cells.filter(cell=>cell.tool==='phone_check');
+  assert.equal(original.length,98);assert.equal(checks.length,14);assert.equal(cells.length,112);
+  for(const cell of checks)assert.equal(cell.n13,original.find(row=>row.tool==='phone_status'&&row.scope===cell.scope&&row.requested===cell.requested)!.n13);
   const changed=cells.filter(cell=>cell.n13!==cell.p2).map(cell=>`${cell.tool} ${cell.scope} requested=${cell.requested} -> ${cell.n13}`);
   assert.deepEqual(cells.filter(cell=>cell.requested).filter(cell=>cell.n13!==cell.p2),[]);
   assert.deepEqual(changed.sort(),['owner','background','cron'].flatMap(scope=>['phone_restore_apps','phone_save_apps']
     .map(tool=>`${tool} ${scope} requested=false -> ${scope==='owner'?'approve':'block'}`)).sort());
-  console.log(JSON.stringify({p2_cells:203,phone_task_cells_identical:154,single_tool_cells:49,changed_when_not_requested:changed.sort()}));
+  console.log(JSON.stringify({p2_cells:203,phone_task_cells_identical:154,single_tool_cells:49,check_cells:14,changed_when_not_requested:changed.sort()}));
 });

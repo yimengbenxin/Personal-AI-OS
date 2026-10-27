@@ -40,7 +40,11 @@ class CompanionService : Service() {
     private val appearance by lazy { AppearanceState(this, scope) { state.value = state.value.copy(avatar = it) } }
     private val ambientSwitch by lazy { AmbientSwitch(enrollment, state, ::setAmbient) }
     private val avatar by lazy { GlassesAvatar(this, scope, avatarStream, avatarHosts, ::queue) }
-    private val playback by lazy { VoicePlayback(this, scope, { inbox?.replies }, ::queue, ::failedRequest) }
+    private val playback by lazy { VoicePlayback(this, scope, { inbox?.replies }, ::queue, ::failedRequest) { packet, playing ->
+        val chunk = packet.getJSONObject("chunk")
+        inbox?.companionReply?.playback(packet.getString("processed_event_id"), chunk.getLong("reply_epoch"), playing,
+            !playing && chunk.getBoolean("final"), monotonicMillis()); snapshot()
+    } }
     private var session: LiveSession? = null
     private var inbox: HudCards? = null
     private var wake: WakeWord? = null
@@ -87,6 +91,9 @@ class CompanionService : Service() {
     private val voiceSupplement = VoiceSupplement()
     private var enrolmentExpiry: Job? = null
     private var enrolmentUntil: Long? = null
+    private var paymentExpiry: Job? = null
+    private var paymentDeadline: PaymentNotice? = null
+    private var expirePaymentMicrophone: (() -> Unit)? = null
     private val screenChanges = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val on = intent.action == Intent.ACTION_SCREEN_ON
@@ -161,15 +168,22 @@ class CompanionService : Service() {
     }
     /** The one place the published microphone follows [microphone]. Idempotent: the connect and every change converge. */
     private suspend fun syncMicrophone() = microphoneSync.withLock {
-        val wanted = microphone(state.value, wakeCallId = wakeCallId)
-        state.value = state.value.copy(microphoneApplied = null)
-        try {
-            if (session?.microphone(wanted) == true && state.value.listening && microphone(state.value, wakeCallId = wakeCallId) == wanted)
-                state.value = state.value.copy(microphoneApplied = wanted, ambientError = null)
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) {
-            state.value = state.value.copy(ambientError = if (error is SecurityException) "麦克风权限未开启" else error.message ?: "麦克风开启失败")
-            throw error
+        supervisorScope {
+            val wanted = microphone(state.value, wakeCallId = wakeCallId)
+            val applying = async(start = CoroutineStart.LAZY) { session?.microphone(wanted) }
+            var expired = false
+            expirePaymentMicrophone = { expired = true; applying.cancel() }
+            state.value = state.value.copy(microphoneApplied = null)
+            try {
+                if (applying.await() == true && state.value.listening && microphone(state.value, wakeCallId = wakeCallId) == wanted)
+                    state.value = state.value.copy(microphoneApplied = wanted, ambientError = null)
+            } catch (cancelled: CancellationException) {
+                if (!expired) throw cancelled
+                currentCoroutineContext().ensureActive()
+            } catch (error: Exception) {
+                state.value = state.value.copy(ambientError = if (error is SecurityException) "麦克风权限未开启" else error.message ?: "麦克风开启失败")
+                throw error
+            } finally { expirePaymentMicrophone = null }
         }
     }
     override fun onStartCommand(intent: Intent?, flags: Int, id: Int): Int {
@@ -194,6 +208,7 @@ class CompanionService : Service() {
                 val ack = inbox?.snapshot()?.firstOrNull { it.id == intent!!.getStringExtra("card_id") }?.ack
                 if (ack != null && canonicalJson(ack) == canonicalJson(JSONObject(intent!!.getStringExtra("receipt")!!))) {
                     inbox?.replies?.rendered(ack)?.let(::queue)
+                    inbox?.companionReply?.rendered(ack, monotonicMillis()); snapshot()
                 }
             }
             "PRIVATE" -> { startCompanion(); scope.launch { request { setPrivatePause() } } }
@@ -360,6 +375,16 @@ class CompanionService : Service() {
     }
     private suspend fun receive(message: JSONObject) {
         when (message.getString("operation")) {
+            "ready" -> {
+                val epoch = message.optString("history_epoch")
+                val history = getSharedPreferences("server-history", Context.MODE_PRIVATE)
+                if (epoch.isNotEmpty() && epoch != history.getString("epoch", null)) {
+                    playback.retireHistory(); inbox?.clear()
+                    state.value = state.value.copy(backgroundWorkCount = 0, foregroundCalls = emptySet())
+                    snapshot()
+                    check(history.edit().putString("epoch", epoch).commit())
+                }
+            }
             "turns_state" -> {
                 val foreground = message.getJSONArray("foreground_replies")
                 val count = message.getInt("background_work_count"); require(count >= 0)
@@ -449,8 +474,8 @@ class CompanionService : Service() {
                 }
                 notice()
             }
-            "accepted", "display_card", "activity_update", "result_header", "ack_receipt" -> {
-                inbox!!.accept(message)
+            "ambient_reply", "accepted", "display_card", "activity_update", "result_header", "ack_receipt" -> {
+                inbox!!.accept(message, companionMode = state.value.ambient && state.value.callId == null)
                 if (capture.state.value.worn != true) inbox!!.clearInteractions()
                 snapshot(); inbox!!.accepted?.let(::queue); playback.update(state.value.callId != null)
                 if (message.getString("operation") == "result_header") inbox!!.replies.pendingReceipts(message.getString("processed_event_id")).forEach(::queue)
@@ -583,10 +608,10 @@ class CompanionService : Service() {
             driver?.join(); retired?.microphoneDisabled?.await(); released?.await(); enrollment.clearPairing()
             appearance.bind(null)
         }
-        playback.cancel(); inbox = null; gateway.clear()
+        playback.cancel(); inbox?.clearActivities(); inbox = null; gateway.clear()
         state.value = state.value.copy(status = "已停止", paired = !resetEnrollment && state.value.paired,
             listening = false, callId = null, localWake = LocalWakeState.Off, camera = false, busy = false, micMuted = false, cards = emptyList(),
-            recording = false, microphoneApplied = null)
+            recording = false, microphoneApplied = null, activities = emptyList(), legacyProgressCovered = false)
         stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
     }
     private suspend fun bounded(label: String, work: suspend () -> Unit) {
@@ -594,8 +619,22 @@ class CompanionService : Service() {
     }
     private fun snapshot() {
         state.value = state.value.copy(cards = inbox?.snapshot().orEmpty(), captions = inbox?.captions().orEmpty(),
+            companionReply = if (inbox == null) null else inbox?.companionReply?.snapshot(monotonicMillis()) ?: state.value.companionReply,
             activities = inbox?.activities().orEmpty(), legacyProgressCovered = inbox?.legacyProgressCovered() ?: false,
             payment = inbox?.payment(), paymentLock = unlock.state, voiceEnrollment = voiceEnrollment.state, voiceSupplement = voiceSupplement.state)
+        val payment = state.value.payment
+        if (paymentDeadline != payment) {
+            paymentExpiry?.cancel(); paymentDeadline = payment
+            paymentExpiry = payment?.takeIf { it.until != Long.MAX_VALUE }?.let { notice -> scope.launch {
+                delay((notice.until - monotonicMillis()).coerceAtLeast(0))
+                if (paymentDeadline === notice) {
+                    paymentExpiry = null; snapshot()
+                    val wanted = microphone(state.value, wakeCallId = wakeCallId)
+                    if (wanted == Microphone.Off) expirePaymentMicrophone?.invoke()
+                    if (state.value.microphoneApplied != wanted) syncMicrophone()
+                }
+            } }
+        }
         val until = voiceEnrollment.state.until
         if (enrolmentUntil != until) {
             enrolmentExpiry?.cancel(); enrolmentUntil = until
@@ -607,7 +646,7 @@ class CompanionService : Service() {
     }
     private fun notice() { inbox?.notice(); snapshot() }
     private fun ensureInbox(deviceId: String): HudCards = inbox ?: HudCards(deviceId,
-        FormalReplies(deviceId, enrollment.replyJournal(), enrollment::saveReplyJournal)).also { inbox = it }
+        FormalReplies(deviceId, enrollment.replyJournal(), enrollment::saveReplyJournal), activityChanged = ::snapshot).also { inbox = it }
     private fun failedRequest(error: Exception) {
         if (error is GatewayReadinessTimeout) calls.failOpening()
         if (error is GatewayReadinessTimeout) calls.retryClose()
@@ -627,8 +666,10 @@ class CompanionService : Service() {
     }
     override fun onDestroy() {
         Log.w("Yimi", "companion_destroy")
-        state.value = state.value.copy(localWake = LocalWakeState.Off, microphoneApplied = null, callPcmPublished = false, callPlayback = false)
         unregisterReceiver(screenChanges); phoneAudio.close(); invalidatePayment()
+        inbox?.clearActivities()
+        state.value = state.value.copy(localWake = LocalWakeState.Off, microphoneApplied = null, callPcmPublished = false, callPlayback = false,
+            activities = emptyList(), legacyProgressCovered = false)
         avatarStream.end(); wakeAudio.end(); scope.cancel(); wake?.close(); capture.close(); session?.close(); gateway.clear(); super.onDestroy()
     }
 }

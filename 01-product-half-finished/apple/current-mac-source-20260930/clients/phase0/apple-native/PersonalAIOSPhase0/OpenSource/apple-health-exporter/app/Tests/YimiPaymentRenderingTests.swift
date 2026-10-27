@@ -136,19 +136,36 @@ final class YimiPaymentRenderingTests: XCTestCase {
         let window = UIWindow(windowScene: scene)
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { lock.configure(CentralPaymentPhone(enabled: false, relock_s: 60, relock_choices_s: [0, 60], unlocked: false)); window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
-        try await Task.sleep(for: .milliseconds(150))
+        let hostAttached = try await waitForUIKit { window.isKeyWindow && host.viewIfLoaded?.window === window }
+        XCTAssertTrue(hostAttached, "The test host must be attached before presenting its sheet")
         let sheet = UIViewController()
-        host.present(sheet, animated: false)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            host.present(sheet, animated: false) { continuation.resume() }
+        }
         lock.configure(CentralPaymentPhone(enabled: true, relock_s: 60, relock_choices_s: [0, 60], unlocked: false))
-        try await Task.sleep(for: .milliseconds(150))
-        let cover = try XCTUnwrap(scene.windows.first { !$0.isHidden && $0.rootViewController is UIHostingController<YimiAppLockCover> })
+        let coverReady = try await waitForUIKit {
+            scene.windows.contains { !$0.isHidden && $0.isKeyWindow && $0.rootViewController is UIHostingController<YimiAppLockCover> }
+        }
+        XCTAssertTrue(coverReady, "Locking must show the cover in its key window")
+        let cover = try XCTUnwrap(scene.windows.first { !$0.isHidden && $0.isKeyWindow && $0.rootViewController is UIHostingController<YimiAppLockCover> })
         XCTAssertGreaterThan(cover.windowLevel.rawValue, UIWindow.Level.alert.rawValue)
         XCTAssertTrue(cover.isKeyWindow)
         XCTAssertTrue(host.presentedViewController === sheet, "Locking must keep the mounted screen and its work")
         lock.didUnlock(generation: lock.generation)
-        try await Task.sleep(for: .milliseconds(150))
+        let coverHidden = try await waitForUIKit { cover.isHidden }
+        XCTAssertTrue(coverHidden, "Unlocking must hide the lock cover")
         XCTAssertTrue(cover.isHidden)
         XCTAssertTrue(host.presentedViewController === sheet)
+    }
+
+    private func waitForUIKit(_ condition: () -> Bool) async throws -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while clock.now < deadline {
+            if condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
 
     func testSubmittedDecisionStillOffersUnsignedCancelAndDeny() async throws {

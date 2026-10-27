@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {fixture,connect,eventually,waveform,pcmBytes,latest} from './current-unknown-harness.ts';
+import {timeoutClock} from '../../../services/personal-aios-integration/tests/timeout-clock-fixture.ts';
 async function isolated(f:any){await eventually(()=>!!f.owner.pcmIngress.snapshot().latest_quarantine);return f.owner.pcmIngress.snapshot().latest_quarantine;}
 test('current P missing UTC PCM stores exact original under current receive permission, no VAD D Agent',async t=>{
  const f=await fixture(t);f.pcm.clock!.resolve=async()=>undefined;let vad=0;f.pcm.ports!.vad!.candidates=async()=>{vad++;assert.fail();};
@@ -56,13 +57,17 @@ test('current P Stop retains received unknown-clock PCM while source preparation
 });
 test('current P receipt EIO retains admission and automatically publishes the exact first frame',async t=>{
  let failed=true;t.after(()=>{failed=false;});const f=await fixture(t);f.pcm.clock!.resolve=async()=>undefined;await connect(f);let attempts=0;
+ const clock=timeoutClock(t),published=Promise.withResolvers<void>();
+ f.owner.pcmIngress!.tap((_pcm,archive)=>{assert.ok(archive);void archive.then(()=>published.resolve(),published.reject);});
  const pub=f.storage.publish.bind(f.storage);f.storage.publish=async(n,k,b)=>{
   if(n==='quarantine-manifests'){attempts++;if(failed)throw Object.assign(new Error('RECEIPT_EIO'),{code:'EIO'});}return pub(n,k,b);};
  try{
-  f.feed();await eventually(()=>attempts>=2);assert.equal(f.owner.pcmIngress!.snapshot().pending_frames,0);
+  f.feed();await clock.scheduled(1000);clock.tick(1000);
+  // Join the second failed publication; keep its recovery timer stationary while inspecting retention.
+  await clock.scheduled(1000);assert.equal(attempts,2);assert.equal(f.owner.pcmIngress!.snapshot().pending_frames,0);
   assert.equal(f.owner.pcmIngress!.snapshot().latest_quarantine,undefined);assert.equal((await f.storage.list('raw-ingress')).length,1);
   assert.equal((await f.storage.list('objects')).length,1);assert.equal(f.locked,false);assert.ok(f.permissionReads.includes(true));
-  failed=false;const q=await isolated(f);
+  failed=false;clock.tick(1000);await published.promise;const q=f.owner.pcmIngress!.snapshot().latest_quarantine!;
   assert.deepEqual((await f.owner.media!.archive.readUnknownClock(q.quarantine_ref,'owner',q.archive_revision)).bytes,pcmBytes(waveform()));
   await f.owner.pcmIngress!.stop();await f.owner.pcmIngress!.drain();assert.equal(f.owner.pcmIngress!.snapshot().pending_bytes,0);
   assert.deepEqual(await f.storage.list('raw-ingress'),[]);assert.deepEqual(f.errors,[]);

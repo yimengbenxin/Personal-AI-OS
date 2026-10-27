@@ -98,6 +98,9 @@ export async function evaluateVoiceprints(manifest:EvaluationManifest,ports:{bas
       cohort:prepared.filter(p=>p.sample.role==='cohort').length},results};
 }
 export async function main(argv:string[]){
+  if(argv.includes('--mode')||argv.includes('--registry-store')||argv.includes('--registry-file')){
+    await (await import('./voiceprint-offline.ts')).main(argv);return;
+  }
   const args=new Map<string,string>();check(argv.length%2===0,'EVALUATION_ARGUMENTS_INVALID');
   for(let i=0;i<argv.length;i+=2){check(['--manifest','--config','--output','--record-result'].includes(argv[i]!)&&!args.has(argv[i]!),
     'EVALUATION_ARGUMENTS_INVALID');args.set(argv[i]!,argv[i+1]!);}

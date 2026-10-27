@@ -191,6 +191,8 @@ test(`unavailable automatic outreach retains one admission obligation and resume
     automatic_output:{onError:error=>{errors.push(error);failed.resolve();}}});
   let runtime=make();t.after(async()=>{await runtime.close();await fs.rm(root,{recursive:true,force:true});});
   await runtime.configureTimeline({directory:join(root,'timeline')});
+  let outreachAttempts=0;const outreach=runtime.timeline!.outreach.bind(runtime.timeline);
+  runtime.timeline!.outreach=(...args)=>{outreachAttempts++;return outreach(...args);};
   const source=await runtime.authenticate('fixture');
   const accepted=await runtime.submit({schema_version:EVENT_SCHEMA,event_id:'outreach',device_id:'mac',device_type:'mac',captured_at:now,
     source:{channel:'text'},media_type:'app_event',mime:'application/json',representation:'uploaded_original',
@@ -202,6 +204,29 @@ test(`unavailable automatic outreach retains one admission obligation and resume
   for(let n=0;n<100&&admission!.find(run.run_id,'session');n++)await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal(admission!.find(run.run_id,'session'),undefined,'pending transport recovery releases the native execution barrier');
   assert.equal((await storage.list('admission-inputs')).length,1);
+  if(lifecycle==='online'){
+    await new Promise(resolve=>setTimeout(resolve,3200));
+    assert.equal(outreachAttempts,1,'offline delivery waits for a terminal instead of retrying');
+    assert.equal(errors.length,1,'one log per terminal outage');
+    assert.equal((await storage.list('admission-inputs')).length,1,'offline output is retained');
+    run.run_id='outreach-2';run.status='running';run.output='another fixture result';
+    await runtime.submit({schema_version:EVENT_SCHEMA,event_id:'outreach-2',device_id:'mac',device_type:'mac',captured_at:now,
+      source:{channel:'text'},media_type:'app_event',mime:'application/json',representation:'uploaded_original',
+      payload:Buffer.from(JSON.stringify({kind:'scheduled_task',job_id:'fixture-job-2',task:'another fixture task'}))},source,'session',false);
+    for(let n=0;n<100&&!admission!.find(run.run_id,'session');n++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(creates,2,'offline output must release the native execution barrier');
+    const opened=await runtime.tool('paios_open_reply',{context:{run_id:run.run_id,session_id:'session',tool_call_id:'open-2'},args:{reply_mode:'text'}});assert.equal(opened.status,'opened');
+    run.status='completed';
+    for(let n=0;n<1000&&outreachAttempts<2;n++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(outreachAttempts,2);assert.equal(errors.length,1,'other results share the same outage');
+    t.mock.timers.enable({apis:['setTimeout']});
+    for(let minute=0;minute<240;minute++){
+      t.mock.timers.tick(60000);await new Promise(resolve=>setImmediate(resolve));
+    }
+    assert.equal(outreachAttempts,2,'four offline hours cause no additional attempts');
+    assert.equal(errors.length,1);
+    assert.equal((await storage.list('admission-inputs')).length,2,'both outputs remain durable');
+  }
   if(lifecycle!=='online'){
     await runtime.close();
     if(lifecycle==='close'){
@@ -217,9 +242,11 @@ test(`unavailable automatic outreach retains one admission obligation and resume
   native.status=async()=>{throw new Error('NATIVE_RETENTION_EXPIRED');};
   if(lifecycle==='restart')await admission!.recover();
   await delivered.promise;
+  if(lifecycle==='online')t.mock.timers.reset();
   for(let n=0;n<100&&(await storage.list('admission-inputs')).length;n++)await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal((await storage.list('admission-inputs')).length,0);
-  assert.equal(creates,1);assert.equal(attempts,1);
-  assert.equal(runtime.timeline!.page('owner').items.filter(item=>item.kind==='yimi').length,1);
+  const expected=lifecycle==='online'?2:1;
+  assert.equal(creates,expected);assert.equal(attempts,expected);
+  assert.equal(runtime.timeline!.page('owner').items.filter(item=>item.kind==='yimi').length,expected);
   assert.equal((await runtime.event(await runtime.authenticate('fixture'),'session',accepted.processed_event.processed_event_id)).admission.state,'completed');
 });

@@ -56,10 +56,12 @@ final class LocationServiceTests: XCTestCase {
         let manager = TestLocationManager()
         manager.status = CLAuthorizationStatus(rawValue: 4)!
         var requests = 0
-        let service = LocationService(manager: manager, defaults: defaults, requestAlways: { requests += 1 })
+        let service = LocationService(manager: manager, defaults: defaults, requestAlways: { requests += 1 },
+            isForeground: { true })
         try await service.requestAlwaysAuthorization(userInitiated: true, glassesPaired: true)
         try await service.requestAlwaysAuthorization(userInitiated: true, glassesPaired: true)
-        let relaunched = LocationService(manager: manager, defaults: defaults, requestAlways: { requests += 1 })
+        let relaunched = LocationService(manager: manager, defaults: defaults, requestAlways: { requests += 1 },
+            isForeground: { true })
         try await relaunched.requestAlwaysAuthorization(userInitiated: true, glassesPaired: true)
         XCTAssertEqual(requests, 1)
     }
@@ -350,8 +352,12 @@ final class LocationServiceTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
-    func testAlwaysPermissionRequiresUserEnablingPlaces() async {
-        let manager = TestLocationManager(), service = LocationService(manager: manager)
+    func testAlwaysPermissionRequiresUserEnablingPlaces() async throws {
+        let domain = "places-always-\(UUID())"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let manager = TestLocationManager()
+        let service = LocationService(manager: manager, defaults: defaults, isForeground: { true })
         do { try await service.requestAlwaysAuthorization(userInitiated: true); XCTFail("Places are disabled") }
         catch { XCTAssertEqual(error as? AssistantLocationError, .requestWasNotUserInitiated) }
         service.configurePlaces(enabled: true, regions: [])
@@ -359,7 +365,7 @@ final class LocationServiceTests: XCTestCase {
         catch { XCTAssertEqual(error as? AssistantLocationError, .requestWasNotUserInitiated) }
 #if os(iOS)
         manager.status = .authorizedWhenInUse
-        try? await service.requestAlwaysAuthorization(userInitiated: true)
+        try await service.requestAlwaysAuthorization(userInitiated: true)
         XCTAssertEqual(manager.alwaysRequests, 1)
 #endif
     }

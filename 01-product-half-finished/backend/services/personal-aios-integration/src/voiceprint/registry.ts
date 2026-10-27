@@ -16,10 +16,13 @@ export interface DeviceOwnerConfirmationInput {
   evidence_start_at?: string; quality?: number; trust_scope?: VoiceprintTrustScope; call_id?: string;
 }
 export interface SpeakerModel {id: string; sha256: string; dim: number}
+/** Calibrated cosine lines belong to this exact model and capture channel; absent channels stay locked. */
+export interface ModelVerification {speaker_model: SpeakerModel; channels: Partial<Record<OwnerChannel, number>>}
+interface VerifiedLineDoc {model: SpeakerModel; channel: VoiceprintChannel; threshold: number}
 export interface VoiceprintThresholds {
-  /** Cosine to the owner centroid at or above which the owner is verified. */
+  /** Initial per-channel verified line and permanent floor (at least 0.65). */
   owner_verified: number;
-  /** [owner_uncertain, owner_verified): sounds like the owner; chat only until the phone's "确认是我". */
+  /** Below the channel's verified line: chat only until the phone's "确认是我". */
   owner_uncertain: number;
   /** Nearest other-person cluster at or above which a segment joins it. */
   cluster: number;
@@ -27,9 +30,13 @@ export interface VoiceprintThresholds {
   enroll_consistency: number;
   /** Nearest assistant voice at or above which (and above the owner and every person) a segment is 依米's own voice. */
   assistant: number;
+  /** In-call follow, trusted-centroid learning and enrollment matching have independent fixed contracts. */
+  call_anchor: number; trusted_centroid: number; enroll_match: number;
 }
+export interface AdaptiveVerifiedPolicy {min_samples: number; margin: number; step: number; ceiling: number}
 export interface VoiceprintPolicy {
   thresholds: VoiceprintThresholds;
+  adaptive_verified: AdaptiveVerifiedPolicy;
   min_identify_ms: number; min_cluster_ms: number; min_enroll_ms: number; min_enroll_samples: number;
   max_owner_samples: number; max_clusters: number; centroid_cap: number; flush_ms: number;
   /** Shortest speech checked against any voice: the assistant's (owner and people need min_identify_ms), and a short
@@ -40,14 +47,55 @@ export interface VoiceprintPolicy {
   trust_window_ms: number;
 }
 /** Real speech can score lower than synthetic speech: calibrate from the owner's enrollment consistency
- *  before trusting the verified band. Assistant-voice scores also depend on reply length and capture channel. */
+ *  before trusting the verified band. Assistant-voice scores also depend on reply length and capture channel.
+ *  Adaptive verified line: after 8 confirmed same-chain samples, each additional sample permits a 0.0025 rise from
+ *  the configured floor; cap it at both minimum leave-one-out cosine across that channel's sets minus 0.04 and 0.68.
+ *  Historical calibration supplied in the requirement: same-chain owner 0.69-0.89, impostors <=0.61, call 0.46-0.69.
+ *  A low-consistency set (minimum <=0.69) cannot raise the line. Eight samples delay adaptation beyond the five-sample
+ *  enrollment minimum; the 0.04 reserve and 0.68 ceiling leave room below those observed owner scores.
+ *  Persist max(previous, candidate) in the channel's sets only when confirmed evidence joins; enrollment replacement,
+ *  invalidation, restart and lower policy reload retain that watermark. A higher configured floor is persisted on load.
+ *  These calibration ranges justify a conservative candidate, not held-out human recall: replay the owner's store
+ *  offline before release and require zero additional confirmed-owner rejections against fixed 0.65. */
 export const DEFAULT_VOICEPRINT_POLICY: VoiceprintPolicy = Object.freeze({
-  thresholds: Object.freeze({owner_verified: 0.65, owner_uncertain: 0.45, cluster: 0.65, enroll_consistency: 0.6, assistant: 0.5}),
+  thresholds: Object.freeze({owner_verified: 0.65, owner_uncertain: 0.45, cluster: 0.65, enroll_consistency: 0.6, assistant: 0.5,
+    call_anchor: 0.65, trusted_centroid: 0.65, enroll_match: 0.65}),
+  adaptive_verified: Object.freeze({min_samples: 8, margin: 0.04, step: 0.0025, ceiling: 0.68}),
   min_identify_ms: 1000, min_cluster_ms: 2000, min_enroll_ms: 1500, min_enroll_samples: 5,
   max_owner_samples: 20, max_clusters: 200, centroid_cap: 50, flush_ms: 10000, min_assistant_ms: 400, max_assistant_voices: 4,
   // Short wake-word requests need a lower minimum than ordinary utterances; their request evidence is checked separately.
   min_turn_ms: 800, trust_window_ms: 60000,
 });
+/** Shared by live admission and the read-only historical evaluator; never infer evidence on reload. */
+export function advanceVerifiedThreshold(previous: number, evidence: {samples: number; min: number}, policy = DEFAULT_VOICEPRINT_POLICY): number {
+  const {min_samples, margin, step, ceiling} = policy.adaptive_verified, floor = policy.thresholds.owner_verified;
+  return Math.max(previous, floor, evidence.samples < min_samples ? floor :
+    Math.min(ceiling, floor + (evidence.samples - min_samples + 1) * step, evidence.min - margin));
+}
+
+export type VoiceprintPolicyOptions = Partial<Omit<VoiceprintPolicy, 'thresholds'|'adaptive_verified'>> & {
+  thresholds?: Partial<VoiceprintThresholds>; adaptive_verified?: Partial<AdaptiveVerifiedPolicy>};
+/** Live provisioning and offline measurements validate the same policy. */
+export function voiceprintPolicy(options: VoiceprintPolicyOptions = {}): VoiceprintPolicy {
+  const thresholds = {...DEFAULT_VOICEPRINT_POLICY.thresholds, ...options?.thresholds};
+  const adaptive_verified = {...DEFAULT_VOICEPRINT_POLICY.adaptive_verified, ...options?.adaptive_verified};
+  const policy = {...DEFAULT_VOICEPRINT_POLICY, ...options, thresholds, adaptive_verified};
+  check(Object.values(thresholds).every(value => Number.isFinite(value) && value > 0 && value < 1) &&
+    thresholds.owner_verified >= DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified &&
+    (['call_anchor','trusted_centroid','enroll_match'] as const).every(key=>thresholds[key]===DEFAULT_VOICEPRINT_POLICY.thresholds[key]) &&
+    thresholds.owner_uncertain <= thresholds.owner_verified, 'VOICEPRINT_THRESHOLDS_INVALID');
+  check(Object.keys(adaptive_verified).every(key => ['min_samples','margin','step','ceiling'].includes(key)) &&
+    Number.isSafeInteger(adaptive_verified.min_samples) && adaptive_verified.min_samples >= 2 &&
+    ['margin','step','ceiling'].every(key => Number.isFinite(adaptive_verified[key as keyof AdaptiveVerifiedPolicy]) &&
+      adaptive_verified[key as keyof AdaptiveVerifiedPolicy] > 0 && adaptive_verified[key as keyof AdaptiveVerifiedPolicy] < 1) &&
+    adaptive_verified.ceiling >= DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified, 'VOICEPRINT_POLICY_INVALID');
+  check(['min_identify_ms', 'min_cluster_ms', 'min_enroll_ms', 'min_enroll_samples', 'max_owner_samples', 'max_clusters',
+    'centroid_cap', 'flush_ms', 'min_assistant_ms', 'max_assistant_voices', 'min_turn_ms', 'trust_window_ms'].every(key => Number.isSafeInteger(policy[key as keyof VoiceprintPolicy]) &&
+    (policy[key as keyof VoiceprintPolicy] as number) > 0) && policy.max_owner_samples >= policy.min_enroll_samples &&
+    policy.min_cluster_ms >= policy.min_identify_ms && policy.min_identify_ms >= policy.min_turn_ms && policy.min_turn_ms >= policy.min_assistant_ms,
+  'VOICEPRINT_POLICY_INVALID');
+  return Object.freeze({...policy, thresholds: Object.freeze(thresholds), adaptive_verified: Object.freeze(adaptive_verified)});
+}
 
 /** Capture channels an owner enrollment set comes from. Embeddings move with the capture chain
  *  (WebRTC AEC/NS/AGC, Opus and resampling), so each channel keeps its own set: `file` (WAV recordings through the enrollment CLI and
@@ -63,12 +111,14 @@ export function deviceChannel(deviceType: string): OwnerChannel {
   return deviceType === 'phone' ? 'phone_app' : deviceType as 'glasses'|'mac';
 }
 /** One enrollment set: the owner's utterances from one capture channel, judged for consistency and averaged on their own. */
-interface OwnerSetDoc {
+export interface OwnerSetDoc {
   channel: OwnerChannel; model: SpeakerModel; samples: {embedding: string; speech_ms: number; added_at: string; quality?: number; evidence_start_at?: string}[]; centroid: string;
   source_device?: {device_id: string; device_type: string};
   enrolled_at: string; updated_at: string; consistency: {min: number; mean: number};
+  verified_threshold?: number;
+  enrollment_generation?: number;
 }
-type LearnedSetDoc = Omit<OwnerSetDoc, 'channel'> & {channel: VoiceprintChannel; source_sets: string; provenance?: 'biometric_confirmed'};
+export type LearnedSetDoc = Omit<OwnerSetDoc, 'channel'> & {channel: VoiceprintChannel; source_sets: string; provenance?: 'biometric_confirmed'};
 interface ClusterDoc {
   cluster_id: string; model_sha256: string; centroid: string; count: number; speech_ms: number;
   created_at: string; last_seen: string; display_name?: string; known_person_id?: string;
@@ -77,7 +127,7 @@ interface ClusterDoc {
 }
 /** One outgoing voice of the assistant (`voice`: its source, e.g. `system_tts`), learned from the speech the system sends. */
 interface AssistantDoc {voice: string; model_sha256: string; centroid: string; count: number; speech_ms: number; created_at: string; last_seen: string}
-interface RegistryDoc {
+export interface RegistryDoc {
   schema: 'paios.voiceprint.registry.v2'; revision: number; next_number: number;
   /** The owner's enrollment sets, at most one per capture channel; none: not enrolled. */
   call_owner?: LearnedSetDoc & {channel: 'call'};
@@ -85,24 +135,36 @@ interface RegistryDoc {
   conversation_owner?: OwnerSetDoc[];
   owner_sets: OwnerSetDoc[]; clusters: ClusterDoc[]; assistant: AssistantDoc[]; face_recognition?: boolean; recognition_hints?: boolean;
   face_people?: ClusterDoc[];
+  /** Template replacement must not erase an established model/channel operating line. No vectors are retained here. */
+  verified_lines?: VerifiedLineDoc[];
 }
 /** v1 held one owner set (enrolled from WAV files) and no assistant voices before those existed. */
-interface RegistryDocV1 {
+export interface RegistryDocV1 {
   schema: 'paios.voiceprint.registry.v1'; revision: number; next_number: number; owner: Omit<OwnerSetDoc, 'channel'> | null;
   clusters: ClusterDoc[]; assistant?: AssistantDoc[];
 }
 /** In-place migration on load: a v1 owner profile becomes the `file` channel's set. The document keeps its key and is
- *  written as v2 on the next durable mutation, or immediately when encryption is configured. */
-function migrate(doc: RegistryDoc | RegistryDocV1): RegistryDoc {
+ *  written as v2 on the next durable mutation, or immediately for encryption or a higher configured floor. */
+export function migrateRegistry(doc: RegistryDoc | RegistryDocV1): RegistryDoc {
   if (doc?.schema !== 'paios.voiceprint.registry.v1') return doc as RegistryDoc;
   const {owner, assistant, ...rest} = doc;
   return {...rest, schema: 'paios.voiceprint.registry.v2', owner_sets: owner && typeof owner === 'object' ? [{channel: 'file', ...owner}] : [],
     assistant: assistant ?? []};
 }
+export function registryOwnerSets(doc: RegistryDoc): (OwnerSetDoc|LearnedSetDoc)[] {
+  return [...doc.owner_sets, ...(doc.conversation_owner ?? []), ...(doc.call_owner ? [doc.call_owner] : []),
+    ...Object.values(doc.learned_owner ?? {})];
+}
+/** The stored channel watermark also survives stale learned-source bindings and model migrations. */
+export function channelVerifiedLine(doc: RegistryDoc, channel: VoiceprintChannel, policy = DEFAULT_VOICEPRINT_POLICY): number {
+  return Math.max(policy.thresholds.owner_verified, ...registryOwnerSets(doc).filter(set => set.channel === channel)
+    .map(set => set.verified_threshold ?? policy.thresholds.owner_verified));
+}
 /** Decoded vectors exist only for profiles of the current speaker model; others stay opaque until re-enrolled or forgotten. */
 interface State {doc: RegistryDoc; owner: Map<OwnerChannel, Float32Array>; clusters: Map<string, Float32Array>; assistant: Map<string, Float32Array>}
 export interface OwnerSetStatus {
   channel: OwnerChannel; samples: number; enrolled_at: string; updated_at: string; consistency: {min: number; mean: number}; stale_model: boolean;
+  verified_threshold: number;
 }
 /** Independent enrollment status, or a selected channel. `channels` also exposes the bounded derived call set. */
 export interface OwnerStatus {
@@ -199,26 +261,36 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
   private readonly ownerOverrideActive: (() => Promise<boolean>) | undefined;
+  private readonly modelActive: (() => boolean) | undefined;
+  private readonly verification: ModelVerification | undefined;
+  private readonly enrollmentGeneration: number | undefined;
+  private readonly priorModelThresholds: {speaker_model:SpeakerModel; owner_verified:number}[];
   private faceGeneration = 0;
   private visual: VisualMemory | undefined;
   private readonly trustWindows = new Map<string, TrustWindow>();
   private readonly nearbySeen = new Map<string, string>();
-  constructor(storage: StoragePort, model: SpeakerModel, options: {policy?: Partial<Omit<VoiceprintPolicy, 'thresholds'>> & {thresholds?: Partial<VoiceprintThresholds>};
+  constructor(storage: StoragePort, model: SpeakerModel, options: {policy?: VoiceprintPolicyOptions;
     onError?: (error: unknown) => void; cipher?: RegistryCipher; call_learning?: boolean; scoring?: VoiceprintScoring;
-    owner_override_active?:()=>Promise<boolean>} = {}) {
+    owner_override_active?:()=>Promise<boolean>; model_active?:()=>boolean; verification?:ModelVerification; enrollment_generation?:number;
+    prior_model_thresholds?:{speaker_model:SpeakerModel; owner_verified:number}[]} = {}) {
     this.ownerOverrideActive=options.owner_override_active;
+    this.modelActive=options.model_active;
+    check(options.enrollment_generation===undefined||Number.isSafeInteger(options.enrollment_generation)&&options.enrollment_generation>=0,
+      'VOICEPRINT_ENROLLMENT_GENERATION_INVALID');
+    this.enrollmentGeneration=options.enrollment_generation;
+    const prior=options.prior_model_thresholds??[];
+    check(Array.isArray(prior)&&prior.every(entry=>validModel(entry.speaker_model)&&Number.isFinite(entry.owner_verified)&&entry.owner_verified>0&&entry.owner_verified<1),
+      'VOICEPRINT_PRIOR_MODEL_THRESHOLD_INVALID');
+    this.priorModelThresholds=structuredClone(prior);
+    const verification = options.verification;
+    check(verification === undefined || verification.speaker_model.id === model.id && verification.speaker_model.sha256 === model.sha256 &&
+      verification.speaker_model.dim === model.dim && Object.entries(verification.channels).every(([channel, line]) =>
+        validChannel(channel) && channel !== 'call' && Number.isFinite(line) && line >= (options.policy?.thresholds?.owner_verified ?? DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified) && line < 1),
+      'VOICEPRINT_VERIFICATION_MODEL_INVALID');
+    this.verification = verification && structuredClone(verification);
     check(typeof storage.replace === 'function', 'VOICEPRINT_STORAGE_REQUIRED', 500);
     check(validModel(model), 'VOICEPRINT_SPEAKER_MODEL_INVALID');
-    const thresholds = {...DEFAULT_VOICEPRINT_POLICY.thresholds, ...options.policy?.thresholds};
-    const policy = {...DEFAULT_VOICEPRINT_POLICY, ...options.policy, thresholds};
-    check(Object.values(thresholds).every(value => Number.isFinite(value) && value > 0 && value < 1) &&
-      thresholds.owner_uncertain <= thresholds.owner_verified, 'VOICEPRINT_THRESHOLDS_INVALID');
-    check(['min_identify_ms', 'min_cluster_ms', 'min_enroll_ms', 'min_enroll_samples', 'max_owner_samples', 'max_clusters',
-      'centroid_cap', 'flush_ms', 'min_assistant_ms', 'max_assistant_voices', 'min_turn_ms', 'trust_window_ms'].every(key => Number.isSafeInteger(policy[key as keyof VoiceprintPolicy]) &&
-      (policy[key as keyof VoiceprintPolicy] as number) > 0) && policy.max_owner_samples >= policy.min_enroll_samples &&
-      policy.min_cluster_ms >= policy.min_identify_ms && policy.min_identify_ms >= policy.min_turn_ms && policy.min_turn_ms >= policy.min_assistant_ms,
-    'VOICEPRINT_POLICY_INVALID');
-    this.storage = storage; this.model = Object.freeze({...model}); this.policy = Object.freeze({...policy, thresholds: Object.freeze(thresholds)});
+    this.storage = storage; this.model = Object.freeze({...model}); this.policy = voiceprintPolicy(options.policy);
     this.scoring = options.scoring ?? {};
     const scoring = this.scoring;
     check(typeof scoring === 'object' && !Array.isArray(scoring) && Object.keys(scoring).every(k =>
@@ -236,7 +308,56 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     this.onError = options.onError ?? (error => console.error('VOICEPRINT_FLUSH_FAILED', error instanceof Error ? error.message : 'unknown'));
   }
   private live(sha: string) {return sha === this.model.sha256;}
-  async requireLearning():Promise<void> {check(!await this.ownerOverrideActive?.(),'VOICEPRINT_LEARNING_FROZEN',409);}
+  private ownerLive(set: OwnerSetDoc | LearnedSetDoc): boolean {
+    return set.model.id===this.model.id&&set.model.sha256===this.model.sha256&&set.model.dim===this.model.dim&&
+      (this.enrollmentGeneration===undefined||set.enrollment_generation===this.enrollmentGeneration);
+  }
+  /** Model-settings owns activation. An immutable registry cannot accept work after that activation is retired. */
+  requireModelActive(): void {check(this.modelActive?.() !== false, 'VOICEPRINT_MODEL_RETIRED', 409);}
+  private sameModel(a:SpeakerModel,b:SpeakerModel):boolean {return a.id===b.id&&a.sha256===b.sha256&&a.dim===b.dim;}
+  private modelLine(doc:RegistryDoc,model:SpeakerModel,channel:VoiceprintChannel,floor:number):number {
+    return Math.max(floor,...(doc.verified_lines??[]).filter(line=>line.channel===channel&&this.sameModel(line.model,model)).map(line=>line.threshold),
+      ...this.ownerEvidence(doc).filter(set=>set.channel===channel&&this.sameModel(set.model,model)).map(set=>set.verified_threshold??floor));
+  }
+  private ownerEvidence(doc:RegistryDoc):(OwnerSetDoc|LearnedSetDoc)[]{
+    return [...doc.owner_sets,...(doc.conversation_owner??[]),...(doc.call_owner?[doc.call_owner]:[]),...Object.values(doc.learned_owner??{})];
+  }
+  private rememberLine(doc:RegistryDoc,model:SpeakerModel,channel:VoiceprintChannel,threshold:number):boolean {
+    const lines=doc.verified_lines??= [],existing=lines.find(line=>line.channel===channel&&this.sameModel(line.model,model));
+    if(existing){if(existing.threshold>=threshold)return false;existing.threshold=threshold;}
+    else lines.push({model:{...model},channel,threshold});
+    return true;
+  }
+  private archiveVerifiedLines(doc:RegistryDoc):boolean {
+    let changed=false;
+    for(const set of this.ownerEvidence(doc)){
+      const matching=this.priorModelThresholds.filter(prior=>this.sameModel(set.model,prior.speaker_model)).map(prior=>prior.owner_verified);
+      if(this.sameModel(set.model,this.model))matching.push(this.policy.thresholds.owner_verified);
+      const floor=matching.length?Math.max(...matching):undefined;
+      const line=set.verified_threshold===undefined?floor:Math.max(set.verified_threshold,floor??0);
+      if(line!==undefined&&this.rememberLine(doc,set.model,set.channel,line))changed=true;
+    }
+    return changed;
+  }
+  private paymentLine(state: State, channel: OwnerChannel): number | undefined {
+    const calibrated = this.verification?.channels[channel];
+    if (calibrated === undefined) return undefined;
+    return this.modelLine(state.doc,this.model,channel,Math.max(calibrated,this.policy.thresholds.owner_verified));
+  }
+  /** Payment has no learned-call or conversation fallback. Model-settings can intentionally supply no calibrated lines. */
+  paymentReady(channel?: OwnerChannel): Promise<boolean> {
+    return this.exclusive(state => {
+      if (this.modelActive?.() === false) return false;
+      if (!this.verification) return this.ownerStatus(state).enrolled;
+      return state.doc.owner_sets.some(set => (channel === undefined || set.channel === channel) && this.ownerLive(set) &&
+        this.verification!.channels[set.channel] !== undefined);
+    });
+  }
+  async requireLearning():Promise<void> {
+    this.requireModelActive();
+    check(!await this.ownerOverrideActive?.(),'VOICEPRINT_LEARNING_FROZEN',409);
+    this.requireModelActive();
+  }
   setVisualMemory(visual: VisualMemory | undefined): void {this.visual = visual;}
   /** Import legacy sample links once, then recover an interrupted cross-store merge/delete from canonical identities and aliases. */
   reconcileFramePeople(): Promise<void> {
@@ -256,7 +377,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       const bytes = await this.storage.read(NAMESPACE, KEY), sealed = isSealedRegistry(bytes);
       if (sealed) check(this.cipher, 'VOICEPRINT_REGISTRY_KEY_REQUIRED', 503);
       else check(bytes[0] === 123, 'VOICEPRINT_REGISTRY_CORRUPT', 503);
-      doc = migrate(JSON.parse(Buffer.from(sealed ? this.cipher!.open(bytes) : bytes).toString('utf8')));
+      doc = migrateRegistry(JSON.parse(Buffer.from(sealed ? this.cipher!.open(bytes) : bytes).toString('utf8')));
       plaintext = !sealed;
     }
     catch (error) {
@@ -278,8 +399,16 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       doc.conversation_owner.every(set => set.channel !== 'call' && validChannel(set.channel) && validModel(set.model) &&
         Array.isArray(set.samples) && set.samples.length <= this.policy.max_owner_samples) &&
       new Set(doc.conversation_owner.map(set => set.channel)).size === doc.conversation_owner.length, 'VOICEPRINT_REGISTRY_CORRUPT', 503);
+    check(this.ownerEvidence(doc).every(set => set.verified_threshold === undefined ||
+      Number.isFinite(set.verified_threshold) && set.verified_threshold > 0 && set.verified_threshold < 1), 'VOICEPRINT_REGISTRY_CORRUPT', 503);
+    check(doc.verified_lines===undefined||Array.isArray(doc.verified_lines)&&doc.verified_lines.every(line=>validModel(line.model)&&
+      ['file','phone_app','glasses','mac','call','video','ambient','journal'].includes(line.channel)&&Number.isFinite(line.threshold)&&line.threshold>0&&line.threshold<1),
+      'VOICEPRINT_REGISTRY_CORRUPT',503);
+    check([...doc.owner_sets,...(doc.conversation_owner??[]),...(doc.call_owner?[doc.call_owner]:[]),...Object.values(doc.learned_owner??{})]
+      .every(set=>set.enrollment_generation===undefined||Number.isSafeInteger(set.enrollment_generation)&&set.enrollment_generation>=0),
+      'VOICEPRINT_REGISTRY_CORRUPT',503);
     const state: State = {doc, owner: new Map(), clusters: new Map(), assistant: new Map()};
-    for (const set of doc.owner_sets) if (this.live(set.model.sha256)) state.owner.set(set.channel, decodeEmbedding(set.centroid, this.model.dim));
+    for (const set of doc.owner_sets) if (this.ownerLive(set)) state.owner.set(set.channel, decodeEmbedding(set.centroid, this.model.dim));
     for (const cluster of doc.clusters) {
       check(cluster.count > 0 && isIdentifier(cluster.cluster_id) && Number(cluster.cluster_id) < doc.next_number, 'VOICEPRINT_REGISTRY_CORRUPT', 503);
       if (cluster.count > 0 && this.live(cluster.model_sha256)) state.clusters.set(cluster.cluster_id, decodeEmbedding(cluster.centroid, this.model.dim));
@@ -293,9 +422,19 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       check(isIdentifier(sample.frame_id), 'VOICEPRINT_REGISTRY_CORRUPT', 503); utc(sample.at); decodeEmbedding(sample.embedding, SFACE_DIM);
     }
     delete (doc as RegistryDoc & {nearby_seen?: unknown}).nearby_seen;
-    if (plaintext && this.cipher) {
+    const linesChanged=this.priorModelThresholds.length>0&&this.archiveVerifiedLines(doc);
+    let thresholdChanged = false;
+    for (const set of this.ownerSets(state)) {
+      check(set.verified_threshold === undefined || Number.isFinite(set.verified_threshold) &&
+        set.verified_threshold >= DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified && set.verified_threshold < 1, 'VOICEPRINT_REGISTRY_CORRUPT', 503);
+      const threshold = this.modelLine(doc,set.model,set.channel,this.sameModel(set.model,this.model)?
+        this.policy.thresholds.owner_verified:DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified);
+      if (set.verified_threshold !== threshold && (set.verified_threshold !== undefined ||
+        threshold > DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified)) {set.verified_threshold = threshold; thresholdChanged = true;}
+    }
+    if (plaintext && this.cipher || thresholdChanged || linesChanged) {
       await this.write(doc);
-      console.info('VOICEPRINT_REGISTRY_ENCRYPTED');
+      if (plaintext && this.cipher) console.info('VOICEPRINT_REGISTRY_ENCRYPTED');
     }
     return this.state = state;
   }
@@ -353,6 +492,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   }
   identify(embedding: Float32Array, input: IdentifyInput): Promise<SpeakerIdentity> {
     try {
+      this.requireModelActive();
       check(embedding instanceof Float32Array && embedding.length === this.model.dim, 'VOICEPRINT_EMBEDDING_INVALID');
       check(input && Number.isFinite(input.speech_ms) && input.speech_ms >= 0 && ['observe', 'verify', 'interrupt','call','payment'].includes(input.mode),
         'VOICEPRINT_IDENTIFY_INPUT_INVALID');
@@ -370,10 +510,21 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     } catch (error) {return Promise.reject(error);}
     return this.exclusive<SpeakerIdentity>(async state => {
       const frozen=await this.ownerOverrideActive?.()??false;
+      this.requireModelActive();
       input.signal?.throwIfAborted();
       const effective=frozen?{...input,learning:false as const}:input;
       const trusted = this.trustIdentify(state, embedding, effective);
       let identity = trusted ?? await this.decide(state, embedding, effective,frozen);
+      this.requireModelActive();
+      if (input.mode === 'payment' && this.verification) {
+        const channel = input.channel as OwnerChannel | undefined;
+        const set = state.doc.owner_sets.find(set => set.channel === channel && this.ownerLive(set));
+        const line = channel === undefined ? undefined : this.paymentLine(state, channel);
+        if (!set || line === undefined) return {kind: 'unknown', reason: 'no_enrollment'};
+        if (identity.kind === 'owner' && identity.band === 'verified' &&
+          dot(unit(embedding)!, decodeEmbedding(set.centroid, this.model.dim)) < line)
+          identity = {...identity, band: 'uncertain'};
+      }
       if(!trusted && input.request && identity.kind === 'owner' && identity.band === 'verified'){
         const request = input.request.embedding && (input.request.speech_ms ?? Infinity) >= this.policy.min_assistant_ms ? unit(input.request.embedding) : undefined;
         if(!request || this.ownerScore(state, request, input.mode !== 'payment') < this.policy.thresholds.owner_uncertain) identity = {kind:'owner', band:'uncertain', score:identity.score};
@@ -387,16 +538,34 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   private ownerScore(state: State, e: Float32Array, conversation = false): number {
     let best = -1;
     for (const centroid of state.owner.values()) best = Math.max(best, dot(e, centroid));
-    if (conversation) for (const set of state.doc.conversation_owner ?? []) if (this.live(set.model.sha256))
+    if (conversation) for (const set of state.doc.conversation_owner ?? []) if (this.ownerLive(set))
       best = Math.max(best, dot(e, decodeEmbedding(set.centroid, this.model.dim)));
     return best;
   }
+  private ownerSets(state: State): (OwnerSetDoc|LearnedSetDoc)[] {
+    return registryOwnerSets(state.doc);
+  }
+  /** The one per-channel line, shared by enrollment, conversation and learned sets of that capture chain. */
+  private verifiedLine(state: State, channel: VoiceprintChannel): number {
+    return this.modelLine(state.doc,this.model,channel,this.policy.thresholds.owner_verified);
+  }
+  private updateVerifiedLine(state: State, set: OwnerSetDoc|LearnedSetDoc): void {
+    const currentSets=this.ownerSets(state).filter(current=>current.channel===set.channel&&this.ownerLive(current));
+    const threshold = advanceVerifiedThreshold(this.verifiedLine(state, set.channel),
+      {samples: set.samples.length, min: Math.min(...currentSets.map(current=>current.consistency.min))}, this.policy);
+    for (const current of currentSets) current.verified_threshold = threshold;
+    this.rememberLine(state.doc,this.model,set.channel,threshold);
+  }
+  private ownerVerified(state: State, e: Float32Array, conversation = false): boolean {
+    return [...state.doc.owner_sets, ...(conversation ? state.doc.conversation_owner ?? [] : [])].some(set =>
+      this.ownerLive(set) && dot(e, decodeEmbedding(set.centroid, this.model.dim)) >= this.verifiedLine(state, set.channel));
+  }
   private callSources(state: State): string {
-    return state.doc.owner_sets.map(set => `${set.channel}:${set.model.sha256}:${set.enrolled_at}:${set.updated_at}:${set.centroid}`).join('|');
+    return (this.enrollmentGeneration===undefined?'':`${this.enrollmentGeneration}|`)+state.doc.owner_sets.map(set => `${set.channel}:${set.model.sha256}:${set.enrolled_at}:${set.updated_at}:${set.centroid}`).join('|');
   }
   private callSet(state: State, channel: VoiceprintChannel = 'call') {
     const call = channel === 'call' ? state.doc.call_owner : state.doc.learned_owner?.[channel];
-    return call && this.live(call.model.sha256) && call.source_sets === this.callSources(state) ? call : undefined;
+    return call && this.ownerLive(call) && call.source_sets === this.callSources(state) ? call : undefined;
   }
   /** Diagnostics use the same unit/cosine math as admission; no identity or profile mutation. */
   scoreChannels(embedding: Float32Array, channel: 'call'|'video' = 'call'): Promise<Record<string, number>> {
@@ -404,7 +573,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const e = unit(embedding); if (!e) return Promise.resolve({});
     return this.exclusive(state => {const call = this.callSet(state, channel); return Object.fromEntries([
       ...[...state.owner].map(([channel, centroid]) => [channel, round(dot(e, centroid))]),
-      ...(state.doc.conversation_owner ?? []).filter(set => this.live(set.model.sha256))
+      ...(state.doc.conversation_owner ?? []).filter(set => this.ownerLive(set))
         .map(set => [`conversation:${set.channel}`, round(dot(e, decodeEmbedding(set.centroid, this.model.dim)))]),
       ...(call ? [[channel, round(dot(e, decodeEmbedding(call.centroid, this.model.dim)))]] : []),
     ]);});
@@ -413,9 +582,9 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   diagnostics(now = Date.now()) {
     return this.exclusive(state => {
       const view = (kind:'enrolled'|'conversation'|'learned', set:OwnerSetDoc|LearnedSetDoc) => ({kind, channel:set.channel,
-        samples:set.samples.length, speech_ms:set.samples.reduce((n,sample)=>n+sample.speech_ms,0),
+        samples:set.samples.length, verified_threshold:this.verifiedLine(state,set.channel), speech_ms:set.samples.reduce((n,sample)=>n+sample.speech_ms,0),
         enrolled_age_ms:now-Date.parse(set.enrolled_at), centroid_age_ms:now-Date.parse(set.updated_at),
-        model:{...set.model}, stale_model:!this.live(set.model.sha256),
+        model:{...set.model}, stale_model:!this.ownerLive(set),
         source_sets_current:kind==='learned'?this.callSet(state,set.channel)===set:null});
       return {revision:state.doc.revision, model:{...this.model}, min_identify_ms:this.policy.min_identify_ms,
         min_enroll_samples:this.policy.min_enroll_samples, thresholds:{...this.policy.thresholds}, sets:[
@@ -432,7 +601,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     if (!this.callLearning || input.learning === false || input.mode === 'interrupt' || input.mode === 'payment' ||
       input.mode !== 'call' && !input.channel || input.speech_ms < this.policy.min_identify_ms) return;
     if(input.request){const request = input.request.embedding && unit(input.request.embedding);
-      if(!request || (input.request.speech_ms ?? 0) < this.policy.min_identify_ms || this.ownerScore(state, request) < this.policy.thresholds.owner_verified) return;}
+      if(!request || (input.request.speech_ms ?? 0) < this.policy.min_identify_ms || !this.ownerVerified(state, request)) return;}
     const channel = input.channel ?? 'call', current = this.callSet(state, channel);
     if (input.quality !== undefined && input.quality < .5) return;
     if (current && current.samples.length >= this.policy.max_owner_samples) return;
@@ -449,8 +618,11 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const centroid = blend(vectors.map(vector => ({vector, weight: 1})));
     const learned: LearnedSetDoc = {channel, source_sets: this.callSources(state), ...(current?.provenance ? {provenance: current.provenance} : {}), model: {...this.model}, samples, centroid: encodeEmbedding(centroid),
         enrolled_at: current?.enrolled_at ?? input.observed_at, updated_at: input.observed_at,
-        consistency: {min: round(Math.min(...consistency)), mean: round(consistency.reduce((a, b) => a + b, 0) / consistency.length)}};
+        consistency: {min: round(Math.min(...consistency)), mean: round(consistency.reduce((a, b) => a + b, 0) / consistency.length)},
+        verified_threshold: this.verifiedLine(state, channel)};
+    if(this.enrollmentGeneration!==undefined)learned.enrollment_generation=this.enrollmentGeneration;
     if(channel === 'call') state.doc.call_owner = {...learned, channel: 'call'}; else (state.doc.learned_owner ??= {})[channel] = learned;
+    this.updateVerifiedLine(state, learned);
     this.scheduleFlush();
   }
   private trustKey(scope: VoiceprintTrustScope): string {
@@ -485,6 +657,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   clearTrustWindows(): void {this.trustWindows.clear();}
   /** A biometric-confirmed utterance seeds only its capture chain, never payment or guest authorization. */
   confirmDeviceOwner(embedding: Float32Array, input: DeviceOwnerConfirmationInput): Promise<{accepted: boolean}> {
+    this.requireModelActive();
     check(validModel(input.speaker_model) && input.speaker_model.sha256 === this.model.sha256 &&
       input.speaker_model.id === this.model.id && input.speaker_model.dim === this.model.dim, 'VOICEPRINT_SPEAKER_MODEL_MISMATCH', 409);
     check(embedding instanceof Float32Array && embedding.length === this.model.dim && embedding.every(Number.isFinite), 'VOICEPRINT_EMBEDDING_INVALID');
@@ -497,7 +670,10 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     check(input.call_id === undefined || isIdentifier(input.call_id), 'INVALID_ID');
     const e = unit(embedding);
     if (!e || input.speech_ms < CALL_INTERRUPT_MIN_SPEECH_MS || (input.quality ?? 1) < .5 || !this.callLearning) return Promise.resolve({accepted: false});
-    return this.exclusive(async state => await this.ownerOverrideActive?.() ? {accepted: false} : this.commit(state, next => {
+    return this.exclusive(async state => {
+      const frozen = await this.ownerOverrideActive?.();
+      this.requireModelActive();
+      return frozen ? {accepted: false} : this.commit(state, next => {
       if (this.assistantMatch(next, e)) return {accepted: false};
       if (input.trust_scope && this.trustWindowActive(input.trust_scope)) {
         this.trustWindows.get(this.trustKey(input.trust_scope))!.anchors
@@ -505,14 +681,15 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       }
       const current = this.callSet(next, input.channel);
       if (input.speech_ms < this.policy.min_identify_ms ||
-        current && dot(e, decodeEmbedding(current.centroid, this.model.dim)) < this.policy.thresholds.owner_verified) return {accepted: false};
+        current && dot(e, decodeEmbedding(current.centroid, this.model.dim)) < this.policy.thresholds.trusted_centroid) return {accepted: false};
       this.learnVerified(next, e, {...input, mode: 'call'});
       const learned = this.callSet(next, input.channel);
       if (!learned || !learned.samples.some(sample => sample.embedding === encodeEmbedding(e))) return {accepted: false};
       learned.provenance = 'biometric_confirmed';
       this.absorbConfirmedVoice(next, e);
       return {accepted: true};
-    }));
+      });
+    });
   }
   confirmCallOwner(embedding: Float32Array, input: Omit<DeviceOwnerConfirmationInput, 'channel'>): Promise<{accepted: boolean}> {
     return this.confirmDeviceOwner(embedding, {...input, channel: 'call'});
@@ -520,7 +697,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   /** Confirmed same-chain evidence repairs anonymous owner clusters heard before that chain was enrolled. */
   private absorbConfirmedVoice(state: State, e: Float32Array): void {
     const absorbed = new Set(state.doc.clusters.filter(cluster => !cluster.display_name && !cluster.known_person_id &&
-      state.clusters.has(cluster.cluster_id) && dot(e, state.clusters.get(cluster.cluster_id)!) >= this.policy.thresholds.owner_verified)
+      state.clusters.has(cluster.cluster_id) && dot(e, state.clusters.get(cluster.cluster_id)!) >= this.policy.thresholds.cluster)
       .map(cluster => cluster.cluster_id));
     state.doc.clusters = state.doc.clusters.filter(cluster => !absorbed.has(cluster.cluster_id));
     for (const id of absorbed) state.clusters.delete(id);
@@ -549,8 +726,8 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     if (assistant) return assistant;
     const independent = input.speech_ms >= this.policy.min_identify_ms && (input.quality ?? 1) >= .5 &&
       (input.evidence_start_at === undefined ? observed - input.speech_ms : Date.parse(input.evidence_start_at)) >= window.opened;
-    if (independent && score >= this.policy.thresholds.owner_verified &&
-      (!current || dot(e, decodeEmbedding(current.centroid, this.model.dim)) >= this.policy.thresholds.owner_verified)) {
+    if (independent && score >= this.policy.thresholds.call_anchor &&
+      (!current || dot(e, decodeEmbedding(current.centroid, this.model.dim)) >= this.policy.thresholds.trusted_centroid)) {
       if (!anchor && input.learning !== false) window.anchors.set(key, e);
       if (input.learning !== false) {
         this.learnVerified(state, e, input);
@@ -565,13 +742,14 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   }
   /** Per-call anchors are owned by the call lifecycle; this read-only match grants call scope only. */
   matchCallAnchor(embedding: Float32Array, input: {anchor: Float32Array; speech_ms: number}): SpeakerIdentity {
+    this.requireModelActive();
     check(embedding.length === this.model.dim && input.anchor.length === this.model.dim, 'VOICEPRINT_EMBEDDING_INVALID');
     check(Number.isFinite(input.speech_ms) && input.speech_ms >= 0, 'VOICEPRINT_IDENTIFY_INPUT_INVALID');
     if (input.speech_ms < CALL_INTERRUPT_MIN_SPEECH_MS) return {kind: 'unknown', reason: 'too_short'};
     const e = unit(embedding), anchor = unit(input.anchor);
     if (!e || !anchor) return {kind: 'unknown', reason: 'low_quality'};
     const score = dot(e, anchor);
-    return score >= this.policy.thresholds.owner_verified ? {kind: 'owner', band: 'verified', score: round(score), call_only: true} :
+    return score >= this.policy.thresholds.call_anchor ? {kind: 'owner', band: 'verified', score: round(score), call_only: true} :
       {kind: 'unknown', reason: 'unmatched'};
   }
   /** Independent sets are rechecked against current enrollment; biometric provenance remains independently trusted.
@@ -579,22 +757,15 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   private revalidateLearned(state: State): void {
     for (const set of [state.doc.call_owner, ...Object.values(state.doc.learned_owner ?? {})]) {
       if (!set) continue;
-      if (!this.live(set.model.sha256)) continue;
-      const samples = set.samples.filter(sample => sample.speech_ms >= this.policy.min_identify_ms &&
+      if (!this.ownerLive(set)) continue;
+      const samples = set.samples;
+      if (!samples.every(sample => sample.speech_ms >= this.policy.min_identify_ms &&
         (sample.quality ?? 1) >= .5 && (set.provenance === 'biometric_confirmed' ||
-          this.ownerScore(state, decodeEmbedding(sample.embedding, this.model.dim)) >= this.policy.thresholds.owner_verified));
-      if (!samples.length) {
-        if (set.channel === 'call') delete state.doc.call_owner; else delete state.doc.learned_owner?.[set.channel];
-        continue;
-      }
-      set.samples = samples;
+          this.ownerVerified(state, decodeEmbedding(sample.embedding, this.model.dim))))) continue;
       const vectors = samples.map(s => ({vector: decodeEmbedding(s.embedding, this.model.dim), weight: 1}));
       set.centroid = encodeEmbedding(blend(vectors));
       const scores = vectors.length === 1 ? [1] : vectors.map((v, i) => dot(v.vector, blend(vectors.filter((_, n) => n !== i))));
-      if (scores.some(score => score < this.policy.thresholds.enroll_consistency)) {
-        if (set.channel === 'call') delete state.doc.call_owner; else delete state.doc.learned_owner?.[set.channel];
-        continue;
-      }
+      if (scores.some(score => score < this.policy.thresholds.enroll_consistency)) continue;
       set.consistency = {min: round(Math.min(...scores)), mean: round(scores.reduce((a, b) => a + b, 0) / scores.length)};
       set.source_sets = this.callSources(state);
     }
@@ -611,10 +782,10 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const t = this.policy.thresholds;
     const ownerScore = this.ownerScore(state, e, input.mode !== 'payment');
     const calibration = input.mode === 'payment' ? undefined : this.scoring.calibration?.[input.channel ?? (input.mode === 'call' ? 'call' : 'ambient')];
-    const normalized = calibration && this.scoring.cohort ? Math.max(-Infinity, ...[...state.owner.values(), ...(state.doc.conversation_owner ?? []).filter(s => this.live(s.model.sha256)).map(s => decodeEmbedding(s.centroid, this.model.dim))].map(c =>
+    const normalized = calibration && this.scoring.cohort ? Math.max(-Infinity, ...[...state.owner.values(), ...(state.doc.conversation_owner ?? []).filter(s => this.ownerLive(s)).map(s => decodeEmbedding(s.centroid, this.model.dim))].map(c =>
       normalizedScore(e, c, this.scoring.cohort!, this.scoring.cohort_top_k))) : ownerScore;
-    const verified = calibration ? normalized >= calibration.verified : ownerScore >= t.owner_verified;
-    const uncertain = calibration ? normalized >= calibration.uncertain : ownerScore >= t.owner_uncertain;
+    const verified = this.ownerVerified(state, e, input.mode !== 'payment') && (!calibration || normalized >= calibration.verified);
+    const uncertain = ownerScore >= t.owner_uncertain && (!calibration || normalized >= calibration.uncertain);
     let best: {cluster: ClusterDoc; centroid: Float32Array; score: number} | undefined;
     for (const cluster of state.doc.clusters) {
       const centroid = state.clusters.get(cluster.cluster_id);
@@ -630,11 +801,11 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     if (short) return {kind: 'unknown', reason: 'too_short'};
     const trustedCall = input.mode === 'call' && this.callSet(state, input.channel ?? 'call');
     if (trustedCall && trustedCall.provenance === 'biometric_confirmed' &&
-      dot(e, decodeEmbedding(trustedCall.centroid, this.model.dim)) >= t.owner_verified &&
+      dot(e, decodeEmbedding(trustedCall.centroid, this.model.dim)) >= t.trusted_centroid &&
       dot(e, decodeEmbedding(trustedCall.centroid, this.model.dim)) > Math.max(best?.score ?? -1, assistant)) this.learnVerified(state, e, input);
     if (verified) {
       // A better known voice cannot seed the call set, even when also adjacent to the owner.
-      if (this.ownerScore(state, e) >= t.owner_verified && ownerScore > Math.max(best?.score ?? -1, assistant)) this.learnVerified(state, e, input);
+      if (this.ownerVerified(state, e) && ownerScore > Math.max(best?.score ?? -1, assistant)) this.learnVerified(state, e, input);
       return {kind: 'owner', band: 'verified', score: round(ownerScore)};
     }
     const nearOwner = uncertain;
@@ -653,10 +824,10 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       return this.identity(best.cluster, best.score);
     }
     const call = this.callSet(state, input.channel ?? 'call');
-    if (this.callLearning && (input.mode === 'call' || input.channel && input.mode !== 'payment' && input.mode !== 'interrupt') && call && (nearOwner || call.provenance === 'biometric_confirmed') && this.live(call.model.sha256) &&
+    if (this.callLearning && (input.mode === 'call' || input.channel && input.mode !== 'payment' && input.mode !== 'interrupt') && call && (nearOwner || call.provenance === 'biometric_confirmed') && this.ownerLive(call) &&
       call.samples.length >= this.policy.min_enroll_samples) {
       const score = dot(e, decodeEmbedding(call.centroid, this.model.dim));
-      if (score >= t.owner_verified && score > Math.max(best?.score ?? -1, assistant)) {
+      if (score >= this.verifiedLine(state, call.channel) && score > Math.max(best?.score ?? -1, assistant)) {
         if (call.provenance === 'biometric_confirmed') this.learnVerified(state, e, input);
         return {kind: 'owner', band: 'verified', score: round(score), call_only: true};
       }
@@ -696,6 +867,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   observeAssistant(input: {voice: string; embedding: Float32Array; speech_ms: number; at?: string}): Promise<AssistantVoiceView> {
     let e: Float32Array | undefined;
     try {
+      this.requireModelActive();
       check(validVoice(input?.voice), 'VOICEPRINT_ASSISTANT_VOICE_INVALID');
       check(input.embedding instanceof Float32Array && input.embedding.length === this.model.dim && input.embedding.every(Number.isFinite),
         'VOICEPRINT_EMBEDDING_INVALID');
@@ -705,7 +877,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     } catch (error) {return Promise.reject(error);}
     const at = input.at ?? new Date().toISOString(), sample = e;
     return this.exclusive(async state => {
-      check(!await this.ownerOverrideActive?.(),'VOICEPRINT_LEARNING_FROZEN',409);
+      await this.requireLearning();
       const doc = state.doc.assistant.find(v => v.voice === input.voice), current = doc && state.assistant.get(doc.voice);
       if (doc && current && dot(sample, current) >= this.policy.thresholds.assistant) {
         const centroid = blend([{vector: current, weight: Math.min(doc.count, this.policy.centroid_cap)}, {vector: sample, weight: 1}]);
@@ -749,16 +921,16 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const e = unit(embedding); check(e, 'VOICEPRINT_EMBEDDING_INVALID');
     return this.exclusive(state => {
       const baselines = [...state.doc.owner_sets, ...(state.doc.conversation_owner ?? [])]
-        .filter(set => set.channel === channel && this.live(set.model.sha256));
+        .filter(set => set.channel === channel && this.ownerLive(set));
       const baseline = Math.max(-1, ...baselines.map(set => dot(e, decodeEmbedding(set.centroid, this.model.dim))));
-      if (!candidate.length && baselines.length && baseline < this.policy.thresholds.owner_verified) return false;
+      if (!candidate.length && baselines.length && baseline < this.verifiedLine(state, channel)) return false;
       const claimed = candidate.length ? blend(candidate.map(vector => ({vector: unit(vector)!, weight: 1}))) : undefined;
       const score = claimed ? dot(e, claimed) : baseline;
       const bootstrap = !candidate.length && !baselines.length;
       for (const cluster of state.doc.clusters) {
         const centroid = state.clusters.get(cluster.cluster_id); if (!centroid) continue;
         const match = dot(e, centroid), known = !!(cluster.display_name || cluster.known_person_id);
-        if (!known && claimed && dot(claimed, centroid) >= this.policy.thresholds.owner_verified) continue;
+        if (!known && claimed && dot(claimed, centroid) >= this.policy.thresholds.cluster) continue;
         if (match >= this.policy.thresholds.cluster && match > score &&
           (!bootstrap || known)) return false;
       }
@@ -766,7 +938,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
         const assistant = dot(e, centroid);
         if (assistant >= this.policy.thresholds.assistant && assistant > score) return false;
       }
-      return !candidate.length || score >= this.policy.thresholds.owner_verified;
+      return !candidate.length || score >= this.policy.thresholds.enroll_match;
     });
   }
   /** Owner enrollment of one capture channel's set from per-utterance embeddings of the configured speaker model: `replace`
@@ -775,6 +947,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
   enrollOwner(input: {speaker_model: SpeakerModel; channel: OwnerChannel; mode: 'replace' | 'add'; samples: {embedding: Float32Array; speech_ms: number; quality?: number}[];
     at?: string; purpose?: 'conversation'; check_only?: boolean; source_device?: {device_id: string; device_type: string}}): Promise<OwnerStatus & {absorbed_clusters: string[]}> {
     try {
+      this.requireModelActive();
       check(validModel(input?.speaker_model) && input.speaker_model.sha256 === this.model.sha256 && input.speaker_model.dim === this.model.dim &&
         input.speaker_model.id === this.model.id, 'VOICEPRINT_SPEAKER_MODEL_MISMATCH', 409);
       check(input.channel !== 'call' && validChannel(input.channel), 'VOICEPRINT_CHANNEL_INVALID');
@@ -791,9 +964,10 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const at = input.at ?? new Date().toISOString();
     return this.exclusive(async state => {
       check(input.check_only||!await this.ownerOverrideActive?.(),'VOICEPRINT_LEARNING_FROZEN',409);
+      this.requireModelActive();
       const conversation = input.purpose === 'conversation';
       const set = (conversation ? state.doc.conversation_owner ?? [] : state.doc.owner_sets).find(s => s.channel === input.channel),
-        current = set && this.live(set.model.sha256) ? set : undefined;
+        current = set && this.ownerLive(set) ? set : undefined;
       check(input.mode === 'replace' || !set || current, 'VOICEPRINT_REENROLLMENT_REQUIRED', 409);
       const candidates = [...(input.mode === 'add' && current ? current.samples.map(sample => ({...sample, vector: unit(decodeEmbedding(sample.embedding, this.model.dim))!})) : []),
         ...input.samples.map(sample => ({embedding: encodeEmbedding(sample.embedding), speech_ms: Math.round(sample.speech_ms), added_at: at, ...(sample.quality === undefined ? {} : {quality: sample.quality}),
@@ -812,27 +986,35 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
         throw new VoiceprintEnrollmentError('VOICEPRINT_ENROLLMENT_INCONSISTENT', [...consistency, ...candidateConsistency.slice(samples.length)]);
       const centroid = blend(samples.map(sample => ({vector: sample.vector, weight: sample.speech_ms * (sample.quality ?? 1)})));
       if (input.check_only) return {...this.ownerStatus(state, input.channel, conversation), absorbed_clusters: []};
-      return this.commit(state, next => {
+      const result = await this.commit(state, next => {
+        this.archiveVerifiedLines(next.doc);
         const enrolled: OwnerSetDoc = {channel: input.channel, model: {...this.model}, samples: samples.map(({vector: _vector, ...sample}) => sample),
           centroid: encodeEmbedding(centroid), enrolled_at: input.mode === 'add' && current ? current.enrolled_at : at, updated_at: at,
           consistency: {min: Math.min(...consistency), mean: round(consistency.reduce((sum, value) => sum + value, 0) / consistency.length)}};
+        enrolled.verified_threshold = this.modelLine(next.doc,this.model,input.channel,this.paymentLine(state,input.channel)??this.policy.thresholds.owner_verified);
+        this.rememberLine(next.doc,this.model,input.channel,enrolled.verified_threshold);
+        if(this.enrollmentGeneration!==undefined)enrolled.enrollment_generation=this.enrollmentGeneration;
         if (conversation) {
           if (input.source_device) enrolled.source_device = {...input.source_device};
           next.doc.conversation_owner = [...(next.doc.conversation_owner ?? []).filter(s => s.channel !== input.channel), enrolled];
+          if (!current || samples.length > current.samples.length || input.mode === 'replace') this.updateVerifiedLine(next, enrolled);
           return {...this.ownerStatus(next, input.channel, true), absorbed_clusters: []};
         }
         next.doc.owner_sets = [...next.doc.owner_sets.filter(s => s.channel !== input.channel), enrolled]
           .sort((a, b) => OWNER_CHANNELS.indexOf(a.channel) - OWNER_CHANNELS.indexOf(b.channel));
         next.owner.set(input.channel, centroid);
+        if (!current || samples.length > current.samples.length || input.mode === 'replace') this.updateVerifiedLine(next, enrolled);
         this.revalidateLearned(next);
         // Earlier ambient clusters of the owner's own voice (heard through a channel no set covered yet) would otherwise
         // outscore the owner in the uncertain band.
         const absorbed = next.doc.clusters.filter(c => !c.display_name && !c.known_person_id && next.clusters.has(c.cluster_id) &&
-          this.ownerScore(next, next.clusters.get(c.cluster_id)!) >= this.policy.thresholds.owner_verified).map(c => c.cluster_id);
+          this.ownerScore(next, next.clusters.get(c.cluster_id)!) >= this.policy.thresholds.cluster).map(c => c.cluster_id);
         next.doc.clusters = next.doc.clusters.filter(c => !absorbed.includes(c.cluster_id));
         for (const cluster of absorbed) next.clusters.delete(cluster);
         return {...this.ownerStatus(next, input.channel), absorbed_clusters: absorbed};
       });
+      this.requireModelActive();
+      return result;
     });
   }
   /** "忘记我的声音": every channel, or only the selected capture channel. */
@@ -843,6 +1025,8 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       delete next.doc.call_owner; delete next.doc.learned_owner;
       next.doc.conversation_owner = (next.doc.conversation_owner ?? []).filter(set => channel !== undefined && set.channel !== channel);
       next.doc.owner_sets = next.doc.owner_sets.filter(set => channel !== undefined && set.channel !== channel);
+      if(channel===undefined)delete next.doc.verified_lines;
+      else if(next.doc.verified_lines)next.doc.verified_lines=next.doc.verified_lines.filter(line=>line.channel!==channel);
       if (channel === undefined) next.owner.clear(); else next.owner.delete(channel);
       return this.ownerStatus(next);
     }));
@@ -856,7 +1040,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
     const enrolled = conversation ? state.doc.conversation_owner ?? [] : state.doc.owner_sets;
     const all = [...enrolled, ...(!conversation && state.doc.call_owner ? [state.doc.call_owner] : [])];
     const sets = (channel === 'call' ? all : enrolled).filter(set => channel === undefined || set.channel === channel);
-    const live = sets.filter(set => set.channel === 'call' ? this.callSet(state) && set.samples.length >= this.policy.min_enroll_samples : this.live(set.model.sha256)), samples = sets.reduce((n, set) => n + set.samples.length, 0);
+    const live = sets.filter(set => set.channel === 'call' ? this.callSet(state) && set.samples.length >= this.policy.min_enroll_samples : this.ownerLive(set)), samples = sets.reduce((n, set) => n + set.samples.length, 0);
     return {enrolled: live.length > 0, reenrollment_required: sets.length > 0 && !live.length, samples,
       speaker_model: sets.length ? {...(live[0] ?? sets[0]!).model} : null,
       enrolled_at: sets.length ? sets.map(set => set.enrolled_at).sort()[0]! : null,
@@ -864,7 +1048,8 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       consistency: sets.length ? {min: Math.min(...sets.map(set => set.consistency.min)),
         mean: round(sets.reduce((n, set) => n + set.consistency.mean * set.samples.length, 0) / samples)} : null,
       channels: all.map(set => ({channel: set.channel, samples: set.samples.length, enrolled_at: set.enrolled_at,
-        updated_at: set.updated_at, consistency: {...set.consistency}, stale_model: set.channel === 'call' ? !this.callSet(state) : !this.live(set.model.sha256)}))};
+        verified_threshold: this.modelLine(state.doc,set.model,set.channel,this.sameModel(set.model,this.model)?this.policy.thresholds.owner_verified:DEFAULT_VOICEPRINT_POLICY.thresholds.owner_verified),
+        updated_at: set.updated_at, consistency: {...set.consistency}, stale_model: set.channel === 'call' ? !this.callSet(state) : !this.ownerLive(set)}))};
   }
   /** No embeddings or names: bounded process verdicts and a separately recorded offline evaluation. */
   status(): Promise<unknown> {
@@ -875,6 +1060,7 @@ export class VoiceprintRegistry implements SpeakerIdentifier {
       try {harness = JSON.parse(Buffer.from(await this.storage.read('voiceprint-evaluations', digest('last'))).toString());}
       catch(error){if((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
       return {owner: this.ownerStatus(state), clusters: state.doc.clusters.length, assistant_voices: state.doc.assistant.length,
+        verified_thresholds:Object.fromEntries(this.ownerSets(state).map(set=>[set.channel,this.verifiedLine(state,set.channel)])),
         learned_samples: Object.fromEntries([
           ...(this.callSet(state) ? [['call', this.callSet(state)!.samples.length]] : []),
           ...Object.keys(state.doc.learned_owner ?? {}).map(channel => [channel, this.callSet(state, channel as VoiceprintChannel)?.samples.length ?? 0])]),

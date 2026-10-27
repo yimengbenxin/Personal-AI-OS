@@ -1,13 +1,7 @@
 /** Simulated paired phone for end-to-end verification through the public origin. It builds every request body
  * itself from the pairing file and the bootstrap response (the same rules the iPhone client follows), opens the
  * E2EE key envelope with its own X25519 key, and prints statuses only — never tokens or key material.
- *
- *   node tools/mac-product-sim-client.ts --pairing <pairing file> --recipient-key <private JWK file> [--origin <url>] [--prompt TEXT] [--text-only] [--call] [--confirmation approve|deny] [--control <JSON file>] [--control-on-approval <JSON file>]
- *   Add --desktop <scratch> [--enrollment <phone-issued JSON file>] [--desktop-seconds 300] for a bounded Mac test host.
- *   Add --desktop-attachment <scratch file> [--desktop-via drag|paste] [--desktop-grant-seconds 86400]
- *   [--desktop-revoke-after 60] to rehearse a temporary grant; see docs/desktop-simulator.md.
- *   Desktop PDF extraction requires an existing pdftotext executable; image/Word extraction is outside this synthetic host.
- *   Add --origin-state <file> for the owner origin migration rehearsal; --origin-connect <file> maps its TLS connections to isolated loopback fronts.
+ * Usage: see USAGE below, or run with --help.
  */
 import { generateKeyPairSync, randomUUID, randomBytes, createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -36,6 +30,22 @@ type Json = Record<string, any>;
 const require = createRequire(import.meta.url);
 const { Aes256Gcm, CipherSuite, DhkemX25519HkdfSha256, HkdfSha256 } = require('@hpke/core') as any;
 const argument = (name: string) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
+export const USAGE = `Usage: node tools/mac-product-sim-client.ts --pairing <pairing file> --recipient-key <private JWK file> [options]
+  [--origin <url>] [--prompt TEXT] [--text-only] [--call] [--confirmation approve|deny] [--control <JSON file>] [--control-on-approval <JSON file>]
+  Add --desktop <scratch> [--enrollment <phone-issued JSON file>] [--desktop-seconds 300] for a bounded Mac test host.
+  Add --desktop-attachment <scratch file> [--desktop-via drag|paste] [--desktop-grant-seconds 86400]
+  [--desktop-revoke-after 60] to rehearse a temporary grant; see docs/desktop-simulator.md.
+  Desktop PDF extraction requires an existing pdftotext executable; image/Word extraction is outside this synthetic host.
+  Add --origin-state <file> for the owner origin migration rehearsal; --origin-connect <file> maps its TLS connections to isolated loopback fronts.
+  With --enrollment, --pairing and --recipient-key name new files that the exchange writes.
+`;
+/** Help and missing required arguments end before any file, enrollment, state or network access. */
+export function cliPreflight(argv: readonly string[]): { exitCode: number; stdout?: string; stderr?: string } | undefined {
+  if (argv.includes('--help') || argv.includes('-h')) return { exitCode: 0, stdout: USAGE };
+  const value = (name: string) => { const index = argv.indexOf(name), next = index < 0 ? undefined : argv[index + 1]; return next && !next.startsWith('--') ? next : undefined; };
+  const missing = ['--pairing', '--recipient-key'].filter(name => value(name) === undefined);
+  return missing.length ? { exitCode: 2, stderr: `error: missing required ${missing.join(' and ')}\n${USAGE}` } : undefined;
+}
 /** Validate the same wire output boundary used by both simulator receive channels. */
 export function validateSimulatorOutput(packet:Json,continuity:string,validators:Record<string,(packet:unknown)=>unknown>):Json {
   // Activity cards retain the owner's task session when replayed to a new terminal connection.
@@ -165,7 +175,11 @@ export async function createDesktopSimulator(scratch:string,room:ReturnType<type
       else if(name==='read_text_file'||name==='extract_text'){
         if((await fs.stat(path!)).size>262144)fail('GUARD_TOO_LARGE');let text:string;
         if(name==='extract_text'&&kind(path!)==='pdf'){
-          try{text=(await promisify(execFile)('pdftotext',[...(a.pages?.length===1?['-f',String(a.pages[0]),'-l',String(a.pages[0])]:[]),path!,'-'],{maxBuffer:262144,signal:abort.signal})).stdout;}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')fail('GUARD_TYPE_UNSUPPORTED');throw error;}
+          // Like the Mac host, selected pages are read one at a time in the requested order; no selection reads the whole file.
+          // pdftotext exits 99 for a page outside the document, which the Mac host also reports as unsupported.
+          const pdf=async(page?:number)=>{try{return (await promisify(execFile)('pdftotext',[...(page===undefined?[]:['-f',String(page),'-l',String(page)]),path!,'-'],{maxBuffer:262144,signal:abort.signal})).stdout;}
+            catch(error){const code=(error as NodeJS.ErrnoException).code as unknown;if(code==='ENOENT'||page!==undefined&&code===99)fail('GUARD_TYPE_UNSUPPORTED');throw error;}};
+          if(!a.pages)text=await pdf();else{text='';for(const page of a.pages as number[]){text+=await pdf(page);if(text.length>=(a.max_chars??262144))break;}}
         }else{if(name==='extract_text'&&!['text','spreadsheet'].includes(kind(path!)))fail('GUARD_TYPE_UNSUPPORTED');text=await fs.readFile(path!,'utf8');}
         if(a.head!==undefined)text=text.split('\n').slice(0,a.head).join('\n');if(a.tail!==undefined)text=text.split('\n').slice(-a.tail).join('\n');result=text.slice(0,a.max_chars??262144);
       }else if(name==='create_directory'){await fs.mkdir(path!,{recursive:true});result={path};}
@@ -204,6 +218,8 @@ export function regressionFailureBinding(eventId:string, packets:Json[]):Json {
 }
 
 async function main(){
+const early=cliPreflight(process.argv.slice(2));
+if(early){if(early.stdout)process.stdout.write(early.stdout);if(early.stderr)process.stderr.write(early.stderr);process.exitCode=early.exitCode;return;}
 const desktop=argument('--desktop'),enrollmentPath=argument('--enrollment');
 const textOnly=process.argv.includes('--text-only');
 if(textOnly&&(process.argv.includes('--call')||argument('--speech')))throw new Error('SIM_TEXT_ONLY_AUDIO_CONFLICT');

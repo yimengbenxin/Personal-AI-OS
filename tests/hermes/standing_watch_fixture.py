@@ -2,12 +2,20 @@
 import asyncio
 import importlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
+# This fixture checks persisted job bytes and ACK-loss/module-reload semantics, not power-loss durability.
+# Keep the real file reads/writes; avoid benchmarking a sync of every native registry update under CI I/O load.
+@patch("os.fsync", lambda _fd: None)
+@patch("hermes_cli.plugins.PluginManager.discover_and_load", lambda *_args, **_kwargs: None)
+@patch("tools.registry.discover_builtin_tools", lambda *_args, **_kwargs: [])
+@patch("cron.scheduler._start_heartbeat_thread", lambda *_args, **_kwargs: SimpleNamespace(join=lambda **_kw: None))
 def exercise(home, *, mcp=False, message="包裹到了"):
+    model_tools_was_loaded = 'model_tools' in sys.modules
     from cron.jobs import claim_job_for_fire, get_job
     from cron.scheduler import run_one_job
     from gateway.config import Platform, PlatformConfig
@@ -15,7 +23,9 @@ def exercise(home, *, mcp=False, message="包裹到了"):
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from tools.registry import registry
     from personal_aios import cron
-    from run_agent import AIAgent
+    # Native cron, watch persistence and registry dispatch are the owners under test.
+    # The query is a controlled tool port; loading an unused model runtime and policy workers
+    # for it adds unrelated imports/threads to every fixture process.
 
     owner = {"principal_id": "owner", "device_id": "phone", "allow_owner_mutation": True,
              "allow_reasoning_create": True, "origin_processed_event_id": "d:watch-owner"}
@@ -69,10 +79,6 @@ def exercise(home, *, mcp=False, message="包裹到了"):
         cron.register(ctx, SimpleNamespace(_request=request))
         schema = {"name": query_name, "description": "Synthetic query", "parameters": {"type": "object", "properties": {}}}
         register_tool(query_name, "cronjob", schema, query)
-        definitions = [{"type": "function", "function": registry.get_schema(name)} for name in ("paios_watch_check", query_name)]
-        with patch("model_tools.get_tool_definitions", return_value=definitions), patch("model_tools.check_toolset_requirements", return_value={}), patch("agent.process_bootstrap.OpenAI"):
-            agent = AIAgent(api_key="fixture-unused-key", base_url="https://fixture.invalid/v1", quiet_mode=True,
-                            skip_context_files=True, skip_memory=True)
         prompt, skills = "Run paios_watch_check for the saved watch", ["fixture-watch"]
         created = json.loads(handlers["cronjob_manage"]({"action": "create", "schedule": "every 5m",
             "prompt": prompt, "skills": skills,
@@ -86,44 +92,61 @@ def exercise(home, *, mcp=False, message="包裹到了"):
             adapter = platform_registry.create_adapter("personal_aios", PlatformConfig(enabled=True))
             claimed = claim_job_for_fire(job_id, manual=True, return_job=True)
             assert await asyncio.to_thread(run_one_job, claimed, adapters={Platform("personal_aios"): adapter}, loop=asyncio.get_running_loop())
-            from agent.tool_executor import _run_agent_tool_execution_middleware
-            outcome = await asyncio.to_thread(_run_agent_tool_execution_middleware, agent, function_name="paios_watch_check", function_args={},
-                effective_task_id=agent.session_id, tool_call_id="watch-check", execute=lambda args:
-                    agent._invoke_tool("paios_watch_check", args, agent.session_id, tool_call_id="watch-check",
-                        pre_tool_block_checked=True, skip_tool_request_middleware=True, skip_tool_execution_middleware=True))
-            return json.loads(outcome.result)
+            result = await asyncio.to_thread(registry.dispatch, "paios_watch_check", {},
+                session_id="standing-watch-tool-fixture", tool_call_id="watch-check")
+            return json.loads(result)
 
-        observed = asyncio.run(fire())
-        assert observed.get("status") == "silent", observed
-        assert asyncio.run(fire())["status"] == "silent"
-        state[0] = "arrived"
-        failed = asyncio.run(fire())
-        assert failed.get("error"), failed
-        assert get_job(job_id)["standing_watch"]["pending"] == attempts[0]
-        # Reload adapter and native job reads; only the durable pending observation survives.
-        import personal_aios.watch as watch
-        importlib.reload(watch)
-        cron.register(ctx, SimpleNamespace(_request=request))
-        assert asyncio.run(fire())["status"] == "delivered"
-        assert asyncio.run(fire())["status"] == "silent"
-        assert attempts[0] == attempts[1] and len(attempts) == 2
-        assert len(calls) == 4 and get_job(job_id)["standing_watch"]["delivered_sequence"] == 1
-        # A standing watch keeps observing after delivery; the next transition gets its own receipt.
-        state[0] = "pending"
-        assert asyncio.run(fire())["status"] == "silent"
-        state[0] = "arrived"
-        assert asyncio.run(fire())["status"] == "delivered"
-        assert asyncio.run(fire())["status"] == "silent"
-        assert len(calls) == 7 and len(attempts) == 3
-        assert attempts[2]["id"] != attempts[0]["id"]
-        assert get_job(job_id)["standing_watch"]["delivered_sequence"] == 2
-        assert len(tasks) == len({task["occurrence_id"] for task in tasks}) == 8
-        assert all(task["prompt"] == prompt and task["skills"] == skills for task in tasks)
-        return {"tasks": tasks, "deliveries": attempts, "query_calls": len(calls), "restarted": True,
-                "state": get_job(job_id)["standing_watch"]}
+        async def scenario():
+            observed = await fire()
+            assert observed.get("status") == "silent", observed
+            assert (await fire())["status"] == "silent"
+            state[0] = "arrived"
+            failed = await fire()
+            assert failed.get("error"), failed
+            assert get_job(job_id)["standing_watch"]["pending"] == attempts[0]
+            # Reload adapter and native job reads; only the durable pending observation survives.
+            import personal_aios.watch as watch
+            importlib.reload(watch)
+            cron.register(ctx, SimpleNamespace(_request=request))
+            assert (await fire())["status"] == "delivered"
+            assert (await fire())["status"] == "silent"
+            assert attempts[0] == attempts[1] and len(attempts) == 2
+            assert len(calls) == 4 and get_job(job_id)["standing_watch"]["delivered_sequence"] == 1
+            # A standing watch keeps observing after delivery; the next transition gets its own receipt.
+            state[0] = "pending"
+            assert (await fire())["status"] == "silent"
+            state[0] = "arrived"
+            assert (await fire())["status"] == "delivered"
+            assert (await fire())["status"] == "silent"
+            assert len(calls) == 7 and len(attempts) == 3
+            assert attempts[2]["id"] != attempts[0]["id"]
+            assert get_job(job_id)["standing_watch"]["delivered_sequence"] == 2
+            assert len(tasks) == len({task["occurrence_id"] for task in tasks}) == 8
+            assert all(task["prompt"] == prompt and task["skills"] == skills for task in tasks)
+            return {"tasks": tasks, "deliveries": attempts, "query_calls": len(calls), "restarted": True,
+                    "state": get_job(job_id)["standing_watch"]}
+
+        # The execution ledger also requests FULL sync through SQLite's C API (os.fsync above
+        # cannot intercept it). Retain real transactions/reopens, without a power-loss benchmark.
+        from hermes_cli import sqlite_util
+        open_db = sqlite_util.open_db
+        def fixture_db(*args, **kwargs):
+            kwargs['synchronous_full'] = False
+            connection = open_db(*args, **kwargs)
+            connection.execute('PRAGMA synchronous=OFF')
+            return connection
+        def query_dispatch(name, args, **kwargs):
+            return registry.dispatch(name, args, **kwargs)
+        with patch.object(sqlite_util, 'open_db', fixture_db), patch(
+                'tools.personal_aios_dispatch.dispatch_nested_tool', side_effect=query_dispatch):
+            return asyncio.run(scenario())
     finally:
         platform_registry.unregister("personal_aios")
         reset_hermes_home_override(token)
+        # An error formatter may import model_tools under this fixture's discovery isolation.
+        # A later test must get its normal discovery when it first imports the module.
+        if not model_tools_was_loaded:
+            sys.modules.pop('model_tools', None)
 
 
 if __name__ == "__main__":

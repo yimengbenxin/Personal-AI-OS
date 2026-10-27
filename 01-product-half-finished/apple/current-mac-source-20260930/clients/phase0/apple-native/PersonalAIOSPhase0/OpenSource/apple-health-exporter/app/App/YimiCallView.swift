@@ -379,7 +379,7 @@ struct YimiCallView: View {
                     (Text(line.kind == .me ? "你：" : "依米：")
                         .foregroundStyle(line.kind == .me ? Yimi.ink2 : Yimi.klein)
                         .fontWeight(line.kind == .me ? .regular : .semibold)
-                     + Text(line.text).foregroundStyle(Yimi.ink))
+                     + Text(YimiLongText.preview(line.text) ?? line.text).foregroundStyle(Yimi.ink))
                         .font(.system(size: 16)).lineLimit(3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }

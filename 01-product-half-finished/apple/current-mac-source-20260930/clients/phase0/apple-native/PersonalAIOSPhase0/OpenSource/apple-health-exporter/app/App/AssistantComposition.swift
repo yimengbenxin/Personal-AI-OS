@@ -259,12 +259,14 @@ final class AssistantComposition: ObservableObject {
         }
         self.watchCredentialLifecycle = lifecycle
         let relay = WatchRelay(sources: { [unowned vm] in
-            WatchRelaySources(ownerIdentity: (try? pairedBody?.pairing())?.userID,
-                ownerPairingIdentity: vm.ownerProjectionIdentity, items: vm.conversation.watchItems,
+            let owner = vm.ownerProjectionIdentity
+            return WatchRelaySources(ownerIdentity: (try? pairedBody?.pairing())?.userID,
+                ownerPairingIdentity: owner, items: adapter.isReachable ? vm.conversation.watchItems : [],
                 question: vm.questionCard, errands: vm.errands,
-                care: vm.careCheckinIdentity == vm.ownerProjectionIdentity ? vm.careCheckins.last : nil,
+                care: vm.careCheckinIdentity == owner ? vm.careCheckins.last : nil,
                 payments: vm.payment.cards,
-                serverReachable: vm.sessionState.isActive, ride: vm.watchRideFeedback, rideMetrics: vm.watchRideMetrics)
+                serverReachable: vm.sessionState.isActive, ride: vm.watchRideFeedback, rideMetrics: vm.watchRideMetrics,
+                historyEpoch: vm.terminalState.historyEpoch)
         }, currentOwner: { principal, ownerPairing in
             guard let pairing = try? pairedBody?.pairing() else { return false }
             return principal == pairing.userID
@@ -281,7 +283,7 @@ final class AssistantComposition: ObservableObject {
            refreshCredential: {
                guard let lifecycle else { throw WatchCredentialError.staleAuthority }
                await lifecycle.refresh()
-           })
+           }, isReachable: { adapter.isReachable })
         WatchAppearanceRelay.shared.attach(adapter)
         self.watchRelay = relay
         adapter.setActionHandler { [weak relay] in await relay?.handle($0) ?? false }
@@ -296,8 +298,20 @@ final class AssistantComposition: ObservableObject {
             await MainActor.run { self?.refreshWatch(force: true) }
             await lifecycle?.synchronize()
         }
-        watchObservation = vm.objectWillChange.merge(with: vm.conversation.objectWillChange)
-            .receive(on: RunLoop.main).sink { [weak self] _ in self?.refreshWatch() }
+        adapter.setReachabilityHandler { [weak self] in
+            await MainActor.run { self?.refreshWatch(force: true) }
+        }
+        watchObservation = relay.observe([
+            vm.conversation.watchChanges,
+            vm.watchSessionChanges,
+            vm.$ownerProjectionIdentity.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            vm.$questionCard.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            vm.$errands.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            vm.$careCheckins.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            vm.$careCheckinIdentity.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            vm.payment.$cards.map { $0.filter { $0.state.canDecide }.count }
+                .removeDuplicates().map { _ in () }.eraseToAnyPublisher()
+        ]) { [weak self] _ in self?.degradedReason = "watch_state_publication_failed" }
         watchIdentityObservation = NotificationCenter.default.publisher(for: RealtimePairingSessionIdentity.didChange)
             .receive(on: RunLoop.main).sink { [weak lifecycle] notification in
                 guard let change = notification.userInfo?[RealtimePairingSessionIdentity.snapshotKey]

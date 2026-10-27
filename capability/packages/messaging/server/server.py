@@ -18,8 +18,9 @@ def prepare_call(name, args):
     if name != 'send_message':
         return {'args': args}
     pinned, effect = prepare(args)
+    from integrations.hermes.personal_aios.send_recipients import message_kind
     return {'args': {**pinned, 'owner_requested': args.get('owner_requested') is True},
-            'consent': {'target': effect['recipient'], 'task_type': effect['task_type'],
+            'consent': {'target': pinned['target'], 'message_kind': message_kind(pinned),
                         'summary': effect['summary']} if effect else {}}
 
 

@@ -4,7 +4,7 @@ import {promises as fs, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
-import {CapabilityGateway, aggregateReceipts, type GatewayCall, type GatewayConsent} from '../src/capability/gateway.ts';
+import {CapabilityGateway, structuredResult, aggregateReceipts, type GatewayCall, type GatewayConsent} from '../src/capability/gateway.ts';
 import {packageCatalog} from '../src/capability/packages.ts';
 import {receiptFacts, recordFacts, renderFacts, activitySentence} from '../src/capability/renderer.ts';
 import {checkReport, factCarried} from '../src/capability/checker.ts';
@@ -14,12 +14,13 @@ import {UnifiedIngress} from '../src/ingress.ts';
 import {OutputAuthority} from '../src/output.ts';
 import {inspectWav} from '../src/tts.ts';
 import {createPersonalAIOSServer} from '../src/server.ts';
-import {RunAdmission, PersonalAIOSRuntime, type NativeRun, type NativeClient} from './native-source-fixture.ts';
+import {RunAdmission, PersonalAIOSRuntime, nativeSubmission, type NativeRun, type NativeClient} from './native-source-fixture.ts';
 import {sha256, digest} from '../src/contracts.ts';
 import {receipt, succeeded, unknown, value, effect} from '../../../../../capability/sdk/ts/receipt.ts';
 import {ActivityProjection} from '../src/activity.ts';
+import {fileURLToPath} from 'node:url';
 
-const root=new URL('../../../../../',import.meta.url).pathname.replace(/\/$/u,'');
+const root=fileURLToPath(new URL('../../../../../',import.meta.url)).replace(/\/$/u,'');
 const internal='synthetic-capability-internal-token', token='synthetic-capability-device-token';
 const binding={principal_id:'owner',run_id:'run:fixture',scope:'owner',invocation:'interactive' as const};
 // Records what the gateway hands the platform consent authority; the authority itself is tested in capability-consent.
@@ -202,7 +203,7 @@ for(const scenario of scenarios)test(`fake package → plugin → authenticated 
   assert.ok(admission.find(runId,session));
   const key=join(folder,'internal.key');await fs.writeFile(key,internal,{mode:0o600});
   if('native' in scenario)assert.ok(process.env.PAIOS_CAPABILITY_TEST_KEY_FILE,'Set PAIOS_CAPABILITY_TEST_KEY_FILE to the test-model key file');
-  const request=join(folder,'probe.json');await fs.writeFile(request,JSON.stringify({root,home:folder,run:runId,session,
+  const request=join(folder,'probe.json');await fs.writeFile(request,JSON.stringify({root,home:folder,run:runId,session,input:nativeSubmission(native,runId).input,
     outcome:scenario.outcome??scenario.name,tool:scenario.tool,args:scenario.args,
     ...('native' in scenario?{model_key_file:process.env.PAIOS_CAPABILITY_TEST_KEY_FILE}:{}),
     config:{internal_base_url:base,internal_key_file:key,capability_tools:runtime.capabilityGateway.catalog().tools}}));
@@ -214,11 +215,11 @@ for(const scenario of scenarios)test(`fake package → plugin → authenticated 
     child.on('error',reject);child.on('exit',code=>code===0?resolve(JSON.parse(output)):reject(new Error(errors)));
   });
   assert.equal(result.receipt.status.state,scenario.state);
-  if(!('native' in scenario))assert.ok(result.view.includes('"receipt":1'));
+  if(!('native' in scenario))assert.equal((structuredResult(result.view) as {receipt:number}).receipt,1);
   if('native' in scenario && process.env.PAIOS_CAPABILITY_PROBE_EVIDENCE)await fs.writeFile(process.env.PAIOS_CAPABILITY_PROBE_EVIDENCE,JSON.stringify(result,null,2));
   const records=await runtime.capabilityGateway.ledger.records({principal_id:'owner',run_id:runId});
   if('native' in scenario)assert.ok(records.length>=2&&records.every(record=>record.task_id!=='session'));
-  else {assert.equal(records.length,1);assert.equal(records[0]!.task_id,'fixture-grandchild');}
+  else {assert.equal(records.length,1);assert.equal(records[0]!.task_id,'fixture-grandchild:'+runId);}
   const finalText=scenario.bad+'你可以继续休息。';
   run={...run,status:'completed',output:finalText,native_final_response:{schema:'hermes.final-response.v1',run_id:runId,session_id:session,
     turn_id:'turn-final',message_id:1,sha256:sha256(finalText),phase:'final_buffer',after_tool_call_id:null,after_tool_name:null,

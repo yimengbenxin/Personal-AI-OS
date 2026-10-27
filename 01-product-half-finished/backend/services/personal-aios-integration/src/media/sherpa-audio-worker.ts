@@ -1,3 +1,4 @@
+import {meetingUtterance} from './speech-purpose.ts';
 import {check,ContractError} from '../contracts.ts';
 import {embedSpeech,speechQuality,speakerLabel,TURN_WINDOW_MAX_MS,wakeCarriesRequest,type KeywordSpotterFactory,type SpeakerIdentifier,type SpeechEngine} from '../voiceprint/contracts.ts';
 import type {Capability,WorkerPort,WorkerRequest} from './processing.ts';
@@ -82,8 +83,8 @@ export class SherpaAudioWorker implements WorkerPort {
     return {schema:'paios.media.audio-sample-result.v1',kind:'transcription',input_id,scope_sha256,pcm_sha256,sample_rate,sample_count,
       model:{id:turn?LOCAL_SHERPA_TURN:LOCAL_SHERPA_AUDIO,version:engine.version,device:'cpu',dtype:'int8',native_metadata:{asr_sha256:engine.asr_model.sha256,
         vad_onnx_sha256:engine.vad_model.native_metadata.onnx_sha256,vad_utterances:utterances.length,speaker_scope:this.mode,
-        wake_spotting:!identityOnly&&engine.keywords!==undefined,...(identityOnly?{identity_only:true}:{}),analysis_total_ms:Math.round(performance.now()-started),...stages,...('evidence' in analysed?{speaker_evidence:analysed.evidence}:{}),
-        ...(this.speakers?{speaker_sha256:engine.speaker_model.sha256}:{}),...(engine.tagging_model?{tagging_sha256:engine.tagging_model.sha256,
+        wake_spotting:!request.speech_purpose&&!identityOnly&&engine.keywords!==undefined,...(identityOnly?{identity_only:true}:{}),analysis_total_ms:Math.round(performance.now()-started),...stages,...('evidence' in analysed?{speaker_evidence:analysed.evidence}:{}),
+        ...(this.speakers?{speaker_sha256:engine.speaker_model.sha256}:{}),...(!request.speech_purpose&&engine.tagging_model?{tagging_sha256:engine.tagging_model.sha256,
           tagging_labels_sha256:engine.tagging_model.labels_sha256}:{})}},
       raw_text:joinText(segments.map(segment=>segment.text!)),segments};
   }
@@ -97,6 +98,11 @@ export class SherpaAudioWorker implements WorkerPort {
     for(const [index,span] of spans.entries()) {
       check(!c.signal.aborted,'MEDIA_CANCELLED',409);
       const utterance=c.samples.subarray(span.start_sample,span.end_sample_exclusive);
+      if(c.request.speech_purpose){
+        if(c.request.speech_purpose==='meeting_paused'){segments.push({...span,text:''});continue;}
+        const speech=voiced[index]?c.samples.subarray(voiced[index]!.start_sample,voiced[index]!.end_sample_exclusive):new Float32Array();
+        segments.push({...span,...await meetingUtterance(c.engine,this.speakers,speech,c.request,c.signal)});continue;
+      }
       const transcript=c.request.sound_only||!voiced[index]&&c.engine.tagging_model?{text:''}:
         await timed(c,'asr_ms',()=>c.engine.transcribe(utterance,c.signal));
       const sound=c.engine.tagging_model&&(c.request.sound_only||!voiced[index]||utterance.length<24000||!transcript.text.trim())?

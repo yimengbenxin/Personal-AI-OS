@@ -11,6 +11,33 @@ const state=(f:Fixture,id:string)=>f.authority.store.getPayment(id)!.state;
 async function cancel(f:Fixture,id:string){const receipt=await f.authority.input(phone,{operation:'payment_decide',control_id:`cancel-${id}`,payment_id:id,decision:'cancel'});assert.ok(receipt);return receipt;}
 async function ready(t:test.TestContext,auto=false){const f=await paymentFixture(t);await f.known();await f.locks();f.policy(true,auto);return f;}
 
+test('speaker model retirement clears cached voice approval and pending auto payment while signed card still pays',async t=>{
+  const f=await ready(t,true),c=await f.open({initiating:f.initiating('voice')});
+  assert.equal(state(f,c.payment_id),'auto_pending');
+  assert.equal(f.authority.store.getIntent(c.intent_id)!.initiating.verdict?.verdict,'pass');
+  const dormant={...f.authority.store.policy('owner'),principal_id:'disconnected-owner'};
+  f.authority.store.setPolicy(dormant);
+  await f.authority.cascadeVoice('VOICEPRINT_MODEL_CHANGED');
+  assert.equal(state(f,c.payment_id),'awaiting_owner');
+  assert.equal(f.authority.store.getIntent(c.intent_id)!.initiating.verdict,undefined);
+  assert.equal(f.authority.store.policy('owner').voice_enabled,false);
+  assert.equal(f.authority.store.policy('disconnected-owner').voice_enabled,false);
+  await f.advance(f.config.auto.undo_s*1000+1);
+  assert.equal(f.authority.store.getGrant(c.payment_id),undefined);
+  await f.pay(c.payment_id);
+  assert.equal(f.authority.store.getGrant(c.payment_id)!.method,'card');
+});
+
+test('retired initiating verification cannot refill the cleared cache after model approval',async t=>{
+  const f=await ready(t);let finish!:(value:typeof passing)=>void;
+  f.deferInitiating(new Promise(resolve=>{finish=resolve;}));
+  const c=await f.open({initiating:f.initiating('voice')});
+  await f.authority.cascadeVoice('VOICEPRINT_MODEL_CHANGED');
+  finish(passing);await new Promise(setImmediate);
+  assert.equal(f.authority.store.getIntent(c.intent_id)!.initiating.verdict,undefined);
+  assert.equal(f.authority.store.getGrant(c.payment_id),undefined);
+});
+
 for(const lock of ['missing','disabled'] as const)test(`strict card admission: ${lock} phone lock cannot authorize a signed payment`,async t=>{
   const f=await paymentFixture(t,{},false);
   if(lock==='disabled'){

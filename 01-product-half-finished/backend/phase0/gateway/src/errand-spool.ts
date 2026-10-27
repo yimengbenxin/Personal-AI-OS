@@ -288,6 +288,10 @@ export function createErrandSpool(dir: string, onError: (error: unknown) => void
       await sweeping;
     },
     sweep,
-    async refresh():Promise<void> {await sweep();await Promise.all([...publications.values()].map(state=>state.work));},
+    async refresh():Promise<void> {
+      await sweep();await Promise.all([...publications.values()].map(state=>state.work));
+      if([...publications.values()].some(state=>state.busy||state.latest))
+        throw new ContractError('ERRAND_PROGRESS_PUBLICATION_PENDING',503);
+    },
   };
 }

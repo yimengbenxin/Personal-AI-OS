@@ -104,6 +104,42 @@ PHONE_PROVIDERS = {'agentbay': agentbay_phone, 'mac-android': mac_android_phone,
                    'off': lambda home, integration, provider: None}
 
 
+def payment_environment():
+    return {'PAIOS_PAYMENT_URL': f"http://127.0.0.1:{os.environ['PAIOS_INTEGRATION_PORT']}",
+            'PAIOS_PAYMENT_KEY_FILE': str(SECRETS / 'payment-executor.key')}
+
+
+def phone_runtime(home, integration, provider, *, time_zone, packaged=True):
+    """The existing provider and settings authorities own executor deployment values."""
+    phone = PHONE_PROVIDERS[provider](home, integration, provider)
+    if phone is None:
+        return None
+    phone['env'].update(payment_environment(), PAIOS_TIME_ZONE=time_zone)
+    if packaged:
+        phone['env']['PAIOS_INTEGRATION_PORT'] = os.environ['PAIOS_INTEGRATION_PORT']
+    if os.environ.get('PAIOS_DEPLOYMENT') == 'single-host' and os.environ.get('PAIOS_STAGE') != 'staging':
+        roles = json.loads(EXECUTOR_MODELS.read_text())
+        for role in ('executor_fast', 'executor_thorough'):
+            if role not in roles:
+                raise ValueError('Phone requires ' + ', '.join(f'PAIOS_{role.upper()}_{field}' for field in ('MODEL', 'BASE_URL', 'API_KEY')))
+        phone_config = yaml.safe_load((integration.parents[1] / 'connectors/phone_executor/mobilerun-config.example.yaml').read_text())
+        phone_env = phone['env']
+        for name, profile in phone_config['llm_profiles'].items():
+            role = 'executor_thorough' if name == 'thorough' else 'executor_fast'
+            route = roles[role]
+            variable = f'PAIOS_{role.upper()}_KEY_FILE'
+            profile.update(provider='OpenAILike', model=route['model'], base_url=route['base_url'],
+                kwargs={'is_chat_model': True, 'is_function_calling_model': True, 'api_key_file_env': variable})
+            phone_env[variable] = route['key_file']
+        path = home / 'mobilerun-config.yaml'
+        path.touch(mode=0o600, exist_ok=True)
+        path.write_text(yaml.safe_dump(phone_config, sort_keys=False))
+        path.chmod(0o600)
+        os.chown(path, 10000, 10000)
+        phone_env['PAIOS_MOBILERUN_CONFIG'] = str(path)
+    return phone
+
+
 def initialize(home, integration, product_config):
     single_host = os.environ.get('PAIOS_DEPLOYMENT') == 'single-host'
     # Authority bootstraps independently of the model and publishes both generations before inference starts.
@@ -166,12 +202,19 @@ def initialize(home, integration, product_config):
         internal_key_file='/run/secrets/hermes-internal.key')
     shared_skills = str(integration / 'shared-skills')
     product = json.loads(Path(os.environ['PAIOS_PRODUCT_CONFIG']).read_text())
+    config['timezone'] = product['time_zone']
     spec = importlib.util.spec_from_file_location('capability_packages', integration.parents[2] / 'capability/packages/load.py')
     packages = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(packages)
+    provider = os.environ.get('PAIOS_PHONE_PROVIDER', 'off' if single_host else 'agentbay')
+    phone = None if os.environ.get('PAIOS_STAGE') == 'staging' else phone_runtime(home, integration, provider,
+        time_zone=product['time_zone'], packaged='phone' in product.get('capability_packages', {}).get('gateway', []))
     package_servers, package_skills, package_tools = packages.load_packages(integration.parents[2], product, home,
-        staging=os.environ.get('PAIOS_STAGE') == 'staging', single_host=single_host, environ=os.environ)
+        staging=os.environ.get('PAIOS_STAGE') == 'staging', single_host=single_host, environ=os.environ,
+        runtime_bindings={'phone': phone} if phone else {})
     config['personal_aios']['capability_tools'] = package_tools
+    config['plugins'].setdefault('entries', {}).setdefault('yimi-gateway', {})['settings'] = {
+        key: config['personal_aios'][key] for key in ('internal_base_url', 'internal_key_file', 'capability_tools')}
     selection = product.get('capability_packages', {})
     config['personal_aios']['capability_registry'] = 'yimi' in selection.get('enabled', []) and 'yimi' in selection.get('gateway', [])
     config['skills']['external_dirs'] = [str(integration / 'errands'), shared_skills, *package_skills]
@@ -203,8 +246,6 @@ def initialize(home, integration, product_config):
     growth = policy.GROWTH_TOOLSETS
     # Replace imported Mac commands with image-owned MCP servers.
     config['mcp_servers'] = package_servers
-    provider = os.environ.get('PAIOS_PHONE_PROVIDER', 'off' if single_host else 'agentbay')
-    phone_factory = PHONE_PROVIDERS[provider]
     if os.environ.get('PAIOS_STAGE') == 'staging':
         if provider != 'off':
             legacy_fake = {'command': '/opt/hermes/.venv/bin/python',
@@ -228,7 +269,6 @@ def initialize(home, integration, product_config):
         config['platform_toolsets']['cron'] = list(policy.staging_toolsets())
         config.setdefault('agent', {})['disabled_toolsets'] = ['browser', 'computer_use', 'connections', 'homeassistant', 'discord', 'discord_admin', 'yuanbao', 'feishu_drive', 'spotify', 'tts', 'messaging']
     else:
-        phone = phone_factory(home, integration, provider)
         if phone is not None:
             from capability.packages.phone.server.registration import select_transport
             config['mcp_servers']['phone'] = select_transport(product.get('capability_packages', {}), phone,
@@ -288,30 +328,8 @@ def initialize(home, integration, product_config):
         execution.update(config['platform_toolsets'].get(platform, []))
         config['platform_toolsets'][platform] = list(conversation)
     config['personal_aios']['delegated_toolsets'] = sorted(execution)
-    if single_host and 'phone' in config['mcp_servers'] and os.environ.get('PAIOS_STAGE') != 'staging':
-        roles = json.loads(EXECUTOR_MODELS.read_text())
-        for role in ('executor_fast', 'executor_thorough'):
-            if role not in roles:
-                raise ValueError('Phone requires ' + ', '.join(f'PAIOS_{role.upper()}_{field}' for field in ('MODEL', 'BASE_URL', 'API_KEY')))
-        phone_config = yaml.safe_load((integration.parents[1] / 'connectors/phone_executor/mobilerun-config.example.yaml').read_text())
-        phone_env = config['mcp_servers']['phone']['env']
-        for name, profile in phone_config['llm_profiles'].items():
-            role = 'executor_thorough' if name == 'thorough' else 'executor_fast'
-            route = roles[role]
-            variable = f'PAIOS_{role.upper()}_KEY_FILE'
-            profile.update(provider='OpenAILike', model=route['model'], base_url=route['base_url'],
-                kwargs={'is_chat_model': True, 'is_function_calling_model': True, 'api_key_file_env': variable})
-            phone_env[variable] = route['key_file']
-        path = home / 'mobilerun-config.yaml'
-        path.touch(mode=0o600, exist_ok=True)
-        path.write_text(yaml.safe_dump(phone_config, sort_keys=False))
-        path.chmod(0o600)
-        os.chown(path, 10000, 10000)
-        phone_env['PAIOS_MOBILERUN_CONFIG'] = str(path)
     if 'phone' in config['mcp_servers']:
-        config['mcp_servers']['phone']['env'].update(
-            PAIOS_PAYMENT_URL=f"http://127.0.0.1:{os.environ['PAIOS_INTEGRATION_PORT']}",
-            PAIOS_PAYMENT_KEY_FILE=str(SECRETS / 'payment-executor.key'))
+        config['mcp_servers']['phone']['env'].update(payment_environment())
     for server in config['mcp_servers'].values():
         server.setdefault('tools', {}).update(resources=False, prompts=False)
     # A native profile is the data boundary: only model transport and build machinery cross.
@@ -322,6 +340,7 @@ def initialize(home, integration, product_config):
     build['terminal']['ssh_key'] = str(home / 'workshop-ssh/id_ed25519')
     build['agent'] = {key: native['agent'][key] for key in ('max_tool_calls', 'tool_call_milestone_interval')}
     build = transport(build, os.environ['PAIOS_MODEL_SETTINGS_BUILD_PROJECTION'])
+    build['timezone'] = product['time_zone']
     build['plugins'] = {'enabled': ['personal_aios'], 'entries': {'personal_aios': {'allow_tool_override': True}}}
     build['personal_aios'] = {key: config['personal_aios'][key] for key in ('internal_base_url', 'internal_key_file', 'capability_registry')}
     build['personal_aios']['grantable_toolsets'] = []
@@ -360,6 +379,11 @@ def initialize(home, integration, product_config):
     config_file.write_bytes(rendered)
     # The upstream s6 hook initializes permissions before this hook.
     for path in [home / 'plugins', config_file]:
+        os.chown(path, 10000, 10000)
+    # Native config imports in this root hook also write last-good backups.
+    backups = home / 'backups/config'
+    backups.mkdir(parents=True, exist_ok=True)
+    for path in [backups.parent, backups, *backups.iterdir()]:
         os.chown(path, 10000, 10000)
 
 

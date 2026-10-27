@@ -31,7 +31,7 @@ node 01-product-half-finished/backend/phase0/gateway/tools/mac-product-sim-clien
 
 To test an attachment, first put a synthetic file inside `$scratch`, then add `--desktop-attachment "$scratch/sample.txt"`. The optional `--desktop-via drag|paste` selects the simulated grant method (`drag` by default); `--desktop-revoke-after SECONDS` can expire the grant after acceptance.
 
-PDF text extraction requires `pdftotext` on the simulator process's `PATH`. Image and Word extraction are unsupported by this synthetic host.
+PDF text extraction requires `pdftotext` on the simulator process's `PATH`. Like the Mac host, `pages` returns each selected page in the requested order and omits the others; a page outside the document returns `GUARD_TYPE_UNSUPPORTED`. Image and Word extraction are unsupported by this synthetic host.
 
 ## Clean up
 

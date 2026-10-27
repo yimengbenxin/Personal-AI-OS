@@ -13,7 +13,7 @@ import regression
 
 
 def test_standard_renderer_passes_payment_isolation_without_private_overrides(tmp_path, monkeypatch):
-    for name in ('prepare-build.py', 'staging_config.py', 'cloud.json', 'front.conf.in', 'paios_roaming_guard.js.in'):
+    for name in ('prepare-build.py', 'staging_config.py', 'cloud.json', 'front.conf.in', 'paios_roaming_guard.js.in', 'paios-staging-snapshot.timer'):
         target = tmp_path / 'deploy/cloud' / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / 'deploy/cloud' / name, target)

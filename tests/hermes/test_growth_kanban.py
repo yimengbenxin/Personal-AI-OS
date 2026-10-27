@@ -10,6 +10,8 @@ from test_cloud_init import cloud, home, INTEGRATION, PRODUCT_CONFIG, load
 @pytest.fixture
 def native_board(home, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(home))
+    # Native boards are shared across profiles; pin this fixture's board to its own temporary home.
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(home))
     monkeypatch.setenv('HERMES_PROFILE', 'default')
     for name in ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_RUN_ID', 'HERMES_KANBAN_DB',
                  'HERMES_KANBAN_BOARD', 'HERMES_DELEGATED_CHILD_CONTEXT'):

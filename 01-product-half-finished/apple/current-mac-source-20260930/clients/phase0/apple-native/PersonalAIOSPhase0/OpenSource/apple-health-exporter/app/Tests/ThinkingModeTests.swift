@@ -7,7 +7,7 @@ final class ThinkingModeTests: XCTestCase {
         #if SWIFT_PACKAGE
         let url = Bundle.module.url(forResource: "control", withExtension: "json", subdirectory: "Fixtures/ThinkingMode")
         #else
-        let url = Bundle(for: Self.self).url(forResource: "control", withExtension: "json")
+        let url = Bundle(for: Self.self).url(forResource: "control", withExtension: "json", subdirectory: "Fixtures/ThinkingMode")
         #endif
         let all = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: XCTUnwrap(url))) as? [String: Any])
         var fields = try XCTUnwrap(all[name] as? [String: Any])

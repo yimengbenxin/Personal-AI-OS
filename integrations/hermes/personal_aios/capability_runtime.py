@@ -33,6 +33,9 @@ def package_tool(identity):
 def prepare(body):
     cap, name, definition, _, _ = package_tool(body['tool_name'])
     args = body['args']
+    if cap['runtime']['server'] == 'phone' and name == 'phone_task' and args.get('task_type') in {'send_message', 'wechat_message', 'send_file'}:
+        from .send_recipients import prepare_phone
+        return prepare_phone(args)
     if definition.get('args', [])[:2] == ['-m', 'capability.hosts.python']:
         module = importlib.import_module(definition['args'][2])
         if hasattr(module, 'prepare_call'):
@@ -57,7 +60,7 @@ def execute(body):
         with runtime_scope('owner', ()):
             return registry.dispatch(transport, body['args'], task_id=body['task_id'],
                                      session_id=context['session_id'], tool_call_id=context['tool_call_id'],
-                                     api_request_id=context['run_id'])
+                                     api_request_id='')
     finally:
         reset_api_run_conversation(policy)
 

@@ -272,8 +272,6 @@ export class ContinuousMediaSource {
       detection:{model:structuredClone(state.detector!.model),progress:structuredClone(progress),start_evidence:structuredClone(speech.evidence)}};
     delete state.idle;
     const key=digest(candidate);await this.publish('media-continuous-candidates',key,candidate);
-    try{emitRuntimeEvent({ambient_stage:'candidate_ready',candidate:key.slice(-8),at:Date.now(),reason,
-      ...(reason==='acoustic_pause'?{endpoint_ms:Math.round((state.origin+progress.processed_samples-end)/16)}:{})});}catch{}
     state.previous=[`l5-continuous:${key}`];
     // Deferred analysis keeps its bounded slots. Let detection yield at the pinned candidate,
     // so overload reaches the existing chunk admission budget without poisoning the detector.
@@ -283,7 +281,10 @@ export class ContinuousMediaSource {
       signal.throwIfAborted();await delay(250,undefined,{signal});
     }
     signal.throwIfAborted();
-    await this.queueCandidate(key,candidate);
+    if(await this.queueCandidate(key,candidate)){
+      try{emitRuntimeEvent({ambient_stage:'candidate_ready',candidate:key.slice(-8),at:Date.now(),reason,
+        ...(reason==='acoustic_pause'?{endpoint_ms:Math.round((state.origin+progress.processed_samples-end)/16)}:{})});}catch{}
+    }
   }
   private silence(state:StreamState,exhausted=false) {
     const idle=this.options.idle,last=state.last;if(!idle||!last)return;
@@ -313,9 +314,9 @@ export class ContinuousMediaSource {
     check(!this.jobs.has(key),'CONTINUOUS_CANDIDATE_ACTIVE',409);
     // Call-owned PCM has no ambient work: settle it before the serial lane and its candidate budget.
     if(this.options.disposition?.(candidate)==='call_owned'){
-      await this.callOwned(key,candidate.event.raw_ref);this.options.release?.(candidate.event.raw_ref);return;
+      await this.callOwned(key,candidate.event.raw_ref);this.options.release?.(candidate.event.raw_ref);return false;
     }
-    this.enqueue(key,candidate.event.raw_ref);
+    this.enqueue(key,candidate.event.raw_ref);return true;
   }
   private callOwned(key:string,rawRef:string){
     return this.publish('media-continuous-dispositions',key,{candidate_ref:`l5-continuous:${key}`,state:'call_owned',raw_status:'durable'},rawRef);

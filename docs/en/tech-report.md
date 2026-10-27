@@ -8,7 +8,7 @@ Yimi is a first step in that direction. She is a personal AI living in an iPhone
 
 The report has four parts. Part one is the skeleton: aiming not to modify the upstream kernel (in progress), capabilities in one format, "capability packages", and a structured receipt left by every call. Part two is always-on operation: recognising who is speaking, acting while talking, correctable memory, truthful reporting, and bounded data. Part three is self-growth: building her own tools, repairing herself, and learning from experience. The last part is what comes next. Each section starts with a scene, then goes into mechanisms, formulas and measured numbers.
 
-What follows is based on the public 0.0.2 code. Historical numbers are all labelled as early measurements; code that is wired up is not the same as accepted in production.
+What follows is based on the public 0.1.5 code. Historical numbers are all labelled as early measurements; code that is wired up is not the same as accepted in production.
 
 ## 1. A day with Yimi
 
@@ -42,11 +42,11 @@ We split the structure into three layers (Figure 1).
 
 **The kernel is the kernel.** Hermes is based on the pinned upstream v0.22.5 commit `bf0203a` and still carries a temporary residual patch. Capability packages and memory connect to the platform mainly through three attachments:
 
-1. The thin plugin `yimi-gateway`, 125 lines, which registers only three documented hooks: `pre_tool_call`, `transform_tool_result` and `post_tool_call`;
+1. The thin plugin `yimi-gateway` (133 lines), which registers three documented tool hooks (`pre_tool_call`, `transform_tool_result` and `post_tool_call`) plus nine lifecycle hooks;
 2. The memory provider `personal_aios`, an upstream `MemoryProvider`, with platform memory as the single authority;
 3. Package loading: at deploy time, each package's manifest is turned into Hermes MCP server configuration.
 
-The residual patch for the transition is marked temporary, and the goal is to remove it entirely (in progress); it still contains product logic such as run scopes and the main-agent division of labour. The patch is now 12,030 lines (actual changes +6,445/−1,007 lines, touching 151 files), 1,811 lines fewer than the 13,841 in the early record. The `personal_aios` attachment also still keeps some tool and middleware registrations that have not yet all moved into the thin plugin.
+The transitional residual patch is marked temporary, and the goal is to remove it entirely (in progress); it still contains product logic such as run scopes and the main-agent division of labour. The patch is now 11,972 lines (actual changes +6,437/−964 lines across 151 files), 1,869 lines fewer than the 13,841 in the early record. The `personal_aios` attachment also still holds some tool and middleware registrations that have not all moved into the thin plugin yet.
 
 **The platform services are the single authority.** Identity and admission, consent and payment, timeline and memory, delivery, voice and activity cards all live in the platform services. The new "capability gateway" lives there too, handling call decisions, the receipt ledger, fact sentences and report checking.
 
@@ -147,7 +147,7 @@ Figure 5 shows the trunk of the user decision, omitting branches such as matchin
 
 *Figure 5 | Speaker decision for one sentence. The dashed line is the anchor re-check valid only within the call.*
 
-**Results.** We deliberately avoid the closed-set rule "whoever scores highest is the speaker": there are always guests, the TV and echo around, and admitting "I don't recognise this" is safer than forcing a voice onto someone. Per-device verified thresholds that only rise and never fall below 0.65 (in progress) will further reduce misrecognition as samples accumulate.
+**Results.** We deliberately avoid the closed-set rule "whoever scores highest is the speaker": there are always guests, the TV and echo around, and admitting "I don't recognise this" is safer than forcing a voice onto someone. Voiceprint verification thresholds are persisted per capture channel, never decrease and have a floor of 0.65. Automatic gradual increases require enough confirmed samples from the same channel; restarting or lowering the configured value does not lower a saved threshold. This describes the threshold-update rule, not accepted misrecognition or recall performance.
 
 ### 3.2 Talking while getting things done
 
@@ -359,6 +359,12 @@ Engineering rules are also written as a skill, `engineering-handbook`: build and
 
 Always-on operation and self-growth come down to the same thing: every day she spends with the user leaves something that makes the next day better. A confirmed voice becomes a channel sample, a detour becomes a step in a skill, a complaint becomes a fix that goes live, and a missing capability becomes a new capability package.
 
-Several things are in progress: removing the residual kernel patch; per-device voiceprint thresholds that only rise; aligning with production before going through staging when Yimi changes the kernel; a personality-preferences area Yimi can edit herself; a meeting assistant that edits the slides directly based on what the meeting decides; and switching local models in settings.
+Version 0.1.5 provides local-model switching, per-capture-channel voiceprint verification thresholds that never decrease, and a speaking-preferences area, and adds optional meeting-assistant server orchestration and a protocol. Once a local catalog is configured, settings can switch speech recognition, voice activity detection, voiceprint, wake-word and embedding models after a device-signed approval, and show the selected and effective versions, the previous version, progress and errors. The deployer must configure `local_catalog_file` and supply model files, absolute paths and trusted digests; this entry point does not download models. Changing a speech model requires a service restart; changing the voiceprint model also requires re-enrollment and calibration for each capture channel in use. Embedding models need their own runtime environment and take effect only after derived indexes are rebuilt. Face models are listed, but switching them goes through the face-enrollment flow.
+
+**Speaking preferences.** Yimi can choose preset tone, expression and habit preferences in the platform preference area, up to 1,500 characters, and restore the previous version. The platform stores the versions and projects them into a read-only `memories/PERSONALITY.md`; preferences cannot change her identity, locked personality or protected rules.
+
+**Optional meeting assistant (end-to-end work in progress).** This version provides optional meeting-assistant server orchestration and a presentation protocol, covering slide reads, locating text from the discussion, edit previews, first-edit consent and reconciliation of unknown results. Actual Keynote reads and writes require a Mac executor that implements this protocol and returns edit-readback evidence. The included Mac source does not yet implement these tools, so enabling the package alone does not make the assistant usable. Connecting such an executor also requires a configured platform port and internal service credentials, an authorized local file, and the specified Mac and one pair of glasses online. The protocol limits edits to replacing text and appending paragraphs; the default deployment does not enable the package.
+
+Still in progress: removing the residual kernel patch; when Yimi changes her own kernel, aligning staging with production first and then completing a full-system staging regression; and implementing the meeting assistant's Mac executor to complete Keynote reads and writes.
 
 Further out: A2A integration between assistants is still in progress, and the current public version has no complete integration. Capability packages backed by another agent are also a later direction. When that day comes, Yimi can negotiate something directly with someone else's Yimi (another person's agent that comes to her is always treated as a guest first; her going to another person's agent counts as an external send and goes through first-time confirmation), and the two people only need to nod at the end.

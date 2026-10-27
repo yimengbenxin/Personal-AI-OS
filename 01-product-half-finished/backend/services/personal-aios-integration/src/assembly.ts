@@ -10,12 +10,13 @@ import type { ActionAuthority } from './actions/authority.ts';
 import type { MediaService } from './media/service.ts';
 
 export interface PersonalAIOSAssemblyResources {
+  time_zone?:string;
   model_settings?:{attach:(runtime:PersonalAIOSRuntime)=>void};
   storage: StoragePort; native: NativeClient; admission: AdmissionPolicy; skill: string;
   max_event_bytes: number; max_read_bytes: number; archive?: RawArchive;
   session_folding?:boolean;
   realtime_busy?:()=>boolean;
-  archive_tiering?:{hot_days:number;max_upload_kbps?:number};
+  archive_tiering?:{hot_days:number;max_upload_kbps?:number;paused?:boolean};
   sourceAuthority?: SourceDeviceAuthority; devices?: FixtureRegisteredDevice[];
   l3?: L3Service; actions?: ActionAuthority; media?: MediaService;
   quarantine_admission?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['quarantine_admission'];
@@ -28,6 +29,7 @@ export interface PersonalAIOSAssemblyResources {
   payment_devices?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['payment_devices'];
   payment_clock_map?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['payment_clock_map'];
   speech_detector?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['speech_detector'];
+  voice_model_current?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['voice_model_current'];
   voiceprint?: ConstructorParameters<typeof PersonalAIOSRuntime>[0]['voiceprint'];
   owner_override?: ConstructorParameters<typeof PersonalAIOSRuntime>[0]['owner_override'];
   capability_grants?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['capability_grants'];
@@ -61,7 +63,7 @@ export function createPersonalAIOSAssembly(resources: PersonalAIOSAssemblyResour
     authorizeEvidence: (ref, context) => runtime.authorizeEvidence(ref, context),
     listRunReceipts: context => runtime.runReceipts(context)});
   runtime = new PersonalAIOSRuntime({storage: resources.storage, native: resources.native, admission, output,
-    archive,
+    archive,...(resources.time_zone?{time_zone:resources.time_zone}:{}),
     automatic_output:{onError:error=>console.error('AUTOMATIC_OUTPUT_FAILED',error instanceof Error ? error.message : 'unknown')},
     skill: resources.skill, max_read_bytes: resources.max_read_bytes,
     ...(resources.realtime_busy?{realtime_busy:resources.realtime_busy}:{}),
@@ -77,6 +79,7 @@ export function createPersonalAIOSAssembly(resources: PersonalAIOSAssemblyResour
     ...(resources.payment?{payment:resources.payment}:{}),...(resources.payment_ports?{payment_ports:resources.payment_ports}:{}),...(resources.payment_devices?{payment_devices:resources.payment_devices}:{}),
     ...(resources.payment_clock_map?{payment_clock_map:resources.payment_clock_map}:{}),
     ...(resources.speech_detector?{speech_detector:resources.speech_detector}:{}),
+    ...(resources.voice_model_current?{voice_model_current:resources.voice_model_current}:{}),
     ...(resources.voiceprint ? {voiceprint:resources.voiceprint} : {}),
     ...(resources.owner_override ? {owner_override:resources.owner_override} : {}),
     ...(resources.capability_grants?{capability_grants:resources.capability_grants}:{}),
@@ -95,25 +98,47 @@ export function createPersonalAIOSAssembly(resources: PersonalAIOSAssemblyResour
     ...(resources.notify ? {notify:resources.notify} : {})});
   resources.model_settings?.attach(runtime);
   const server = createPersonalAIOSServer(runtime, resources.http);
-  let tierTimer:ReturnType<typeof setInterval>|undefined,tierWork=Promise.resolve(),tierRunning=false;
-  const tier=()=>{if(tierRunning)return;tierRunning=true;
+  // Recovery shares the maintenance lifecycle. Listening/health must let Hermes bootstrap first.
+  const recover=async()=>{
+    await resources.http.capability_ready;
+    if(closing)return;
+    admission.setNativeReady(false);
+    if(!await resources.native.ready(resources.http.max_request_bytes)||closing)return;
+    admission.setNativeReady(true);
+    const results=await Promise.allSettled([admission.recover(),runtime.capabilityConsent!.recover(),runtime.reconcileActivities()]);
+    results.forEach((result,index)=>{if(result.status==='rejected')console.error(
+      ['ADMISSION_RECOVERY_FAILED','CAPABILITY_RECOVERY_FAILED','ACTIVITY_RECOVERY_FAILED'][index],result.reason instanceof Error?result.reason.message:'unknown');});
+  };
+  let tierTimer:ReturnType<typeof setTimeout>|undefined,tierWork=Promise.resolve(),tierRunning=false;
+  let capabilityMonitorWork:Promise<void>|undefined;
+  let recoveryWork:Promise<void>|undefined;
+  const tier=()=>{if(tierRunning||closing)return;tierRunning=true;const started=performance.now();
     tierWork=(async()=>{
       try{
-        if(resources.realtime_busy?.())return;
+        if(resources.realtime_busy?.()){console.info('L5_TIERING_PAUSED','realtime_busy');return;}
+        recoveryWork??=recover().catch(error=>console.error('HERMES_RECOVERY_DEFERRED',error instanceof Error?error.message:'unknown'))
+          .finally(()=>{recoveryWork=undefined;});
         await runtime.applyModelSettings();
         await runtime.recoverModelUsage();
-        await runtime.monitorCapabilities();
+        // Package probes share this clock, but cannot hold storage maintenance or overlap each other.
+        if(!capabilityMonitorWork)capabilityMonitorWork=runtime.monitorCapabilities()
+          .catch(()=>console.error('CAPABILITY_MONITOR_UNAVAILABLE'))
+          .finally(()=>{capabilityMonitorWork=undefined;});
         if(resources.storage instanceof PosixStorage)await resources.storage.monitorReserve();
         if(closing)return;
         if(!resources.archive_tiering)await runtime.archiveAlert('L5_TIERING_NOT_CONFIGURED');
         if(resources.archive_tiering||resources.session_folding!==false)await archive.maintenance(resources.archive_tiering?.hot_days??2,Date.now(),
           {...(resources.realtime_busy?{busy:resources.realtime_busy}:{}),
+            paused:resources.archive_tiering?.paused??false,
             ...(resources.archive_tiering?.max_upload_kbps!==undefined?{max_upload_kbps:resources.archive_tiering.max_upload_kbps}:{})});
       }catch(error){console.error('L5_TIERING_UNAVAILABLE',error);}
-    })().catch(error=>console.error('L5_OWNER_ALERT_UNDELIVERED',error)).finally(()=>{tierRunning=false;});};
+    })().catch(error=>console.error('L5_OWNER_ALERT_UNDELIVERED',error)).finally(()=>{
+      tierRunning=false;
+      if(!closing){tierTimer=setTimeout(tier,Math.max(0,60000-(performance.now()-started)));tierTimer.unref();}
+    });};
   let closing: Promise<void> | undefined;
   const close = () => closing ??= Promise.resolve().then(async () => {
-    clearInterval(tierTimer);
+    clearTimeout(tierTimer);
     // Register both owners before invocation; a rejected or throwing sibling cannot skip the other join.
     const settled = await Promise.allSettled([
       Promise.resolve().then(() => archive.close()),
@@ -121,19 +146,18 @@ export function createPersonalAIOSAssembly(resources: PersonalAIOSAssemblyResour
       Promise.resolve().then(() => runtime.close())
     ]);
     await tierWork;
+    await recoveryWork;
+    await capabilityMonitorWork;
     const errors = settled.filter(result => result.status === 'rejected').map(result => result.reason);
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, 'ASSEMBLY_CLOSE_FAILED');
   });
   server.once('listening', () => {
+    admission.setNativeReady(false);
     resources.http.capability_ready=runtime.wireCapabilities();
+    void resources.http.capability_ready.catch(error=>console.error('CAPABILITY_WIRING_FAILED',error instanceof Error?error.message:'unknown'));
     void archive.recover().catch(error=>console.error('L5_INGRESS_RECOVERY_UNAVAILABLE',error instanceof Error?error.message:'unknown'));
-    tierTimer=setInterval(tier,60000);tierTimer.unref();tier();
-    // Restore calls after their HTTP ports are ready; recovery may invoke these same ports.
-    void Promise.all([admission.recover(),resources.http.capability_ready.then(()=>runtime.capabilityConsent!.recover())]).catch(async error => {
-      console.error('ADMISSION_RECOVERY_FAILED', error instanceof Error ? error.message : 'unknown');
-      await close();
-    }).catch(error => console.error('ADMISSION_RECOVERY_CLOSE_FAILED', error instanceof Error ? error.message : 'unknown'));
+    tier();
   });
   return Object.freeze({runtime, server, close});
 }

@@ -20,16 +20,28 @@
       },
       "secrets": [
         {
-          "name": "HERMES_INTERNAL_KEY"
+          "name": "PAIOS_DEEPSEEK_KEY_FILE"
         },
         {
-          "name": "PHONE_FAST_MODEL_KEY"
+          "name": "PAIOS_SILICONFLOW_KEY_FILE"
         },
         {
-          "name": "PHONE_VISION_MODEL_KEY"
+          "name": "PAIOS_PAYMENT_KEY_FILE"
         },
         {
-          "name": "AGENTBAY_API_KEY"
+          "name": "PAIOS_AGENTBAY_KEY_FILE"
+        },
+        {
+          "name": "PAIOS_AGENTBAY_ADBKEY"
+        },
+        {
+          "name": "PAIOS_EXECUTOR_FAST_KEY_FILE"
+        },
+        {
+          "name": "PAIOS_EXECUTOR_THOROUGH_KEY_FILE"
+        },
+        {
+          "name": "PAIOS_PHONE_UNLOCK_FILE"
         }
       ],
       "network": {
@@ -64,28 +76,31 @@
           "target": "$.recipient",
           "long_running": true,
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id",
             "job_id",
             "origin_processed_event_id",
             "self_check_of",
             "context"
-          ]
+          ],
+          "send_consent": {
+            "recipient": "channel",
+            "kinds": {
+              "text": "message.text",
+              "file": "message.file"
+            }
+          }
         },
         "phone_status": {
           "effect": "observe",
           "target": "$.job_id",
-          "retry": "after_check",
+          "retry": "allowed",
           "check_with": "phone_status",
           "context_inject": [
             "principal_id",
-            "context",
-            "check_job_id",
-            "origin_processed_event_id",
-            "self_check_of"
-          ],
-          "long_running": true
+            "context"
+          ]
         },
         "phone_control_link": {
           "effect": "observe",
@@ -101,7 +116,7 @@
           "task_type": "phone_start",
           "long_running": true,
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id",
             "job_id",
@@ -116,7 +131,7 @@
           "task_type": "phone_restore_apps",
           "long_running": true,
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id",
             "job_id",
@@ -130,7 +145,7 @@
           "task_type": "phone_save_apps",
           "long_running": true,
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id",
             "job_id",
@@ -143,7 +158,7 @@
           "task_type": "phone_close",
           "long_running": true,
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id",
             "job_id",
@@ -156,10 +171,24 @@
           "target": "$.job_id",
           "task_type": "phone_cancel",
           "retry": "after_check",
-          "check_with": "phone_status",
+          "check_with": "phone_check",
           "context_inject": [
             "principal_id"
           ]
+        },
+        "phone_check": {
+          "effect": "observe",
+          "target": "$.job_id",
+          "retry": "after_check",
+          "check_with": "phone_status",
+          "context_inject": [
+            "principal_id",
+            "context",
+            "check_job_id",
+            "origin_processed_event_id",
+            "self_check_of"
+          ],
+          "long_running": true
         }
       },
       "staging": {

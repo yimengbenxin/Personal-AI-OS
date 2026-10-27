@@ -2,8 +2,15 @@
 import shlex
 from pathlib import Path
 
-from capability.sdk.python.yimi_receipt import receipt, unknown_fact
+from capability.sdk.python.yimi_receipt import receipt, effect, unknown_fact
 from capability.packages.messaging.server.delivery import Delivery
+
+
+def prepare_call(name, args):
+    if name in {'wechat_send_text', 'wechat_send_file', 'wechat_reply'}:
+        from integrations.hermes.personal_aios.send_recipients import prepare_wechat
+        return prepare_wechat(args)
+    return {'args': args}
 
 
 def execute(args):
@@ -33,6 +40,7 @@ def register(host, transport=execute, directory=None):
                                  context=context, device_id=device_id)
         if result['status']['state'] == 'unknown':
             result['next']['check_with'] = 'wechat_read_recent'
+            result['effects'] = [effect('send', recipient, 'send', 'unknown', '', idempotency_key)]
         return result
 
     params = {'type': 'object', 'required': ['command', 'recipient', 'context'], 'additionalProperties': False,
@@ -42,7 +50,7 @@ def register(host, transport=execute, directory=None):
     for name in ('wechat_send_text', 'wechat_send_file', 'wechat_reply'):
         host.add(name, send, params, '执行已准备的 Mac 微信发送批次；沿用现有原语、稳定身份核验和现场恢复。')
 
-    def read(recipient, context, device_id=''):
+    def read(recipient, context, device_id='', check_for=''):
         try:
             result = transport({'read_recent': True, 'target': recipient, 'context': context, 'device_id': device_id})
         except Exception:
@@ -51,8 +59,9 @@ def register(host, transport=execute, directory=None):
                 next={'retry':'after_check','check_with':'wechat_read_recent'})
         if result['returncode']:
             return receipt('failed', status={'reason_code': 'WECHAT_READ_UNAVAILABLE'})
-        return receipt('succeeded', content=[{'key': 'visible_chat', 'text': result['output'], 'provenance': 'observed'}])
+        return receipt('succeeded', content=[{'key': 'visible_chat', 'text': result['output'], 'provenance': 'observed'}],
+            effects=[effect('observe', recipient, 'read_recent', 'service_ack', 'ax-read completed', check_for)] if check_for else [])
     host.add('wechat_read_recent', read, {'type': 'object', 'required': ['recipient', 'context'],
         'properties': {'recipient': {'type': 'string'}, 'context': {'type': 'object'},
-                       'device_id': {'type': 'string'}, 'owner_requested': {'type': 'boolean'}},
+                       'device_id': {'type': 'string'}, 'check_for': {'type': 'string'}, 'owner_requested': {'type': 'boolean'}},
         'additionalProperties': False}, '用已有 ax-read 原语只读核对当前微信聊天；AX 不可见时沿用截图和 vision。')

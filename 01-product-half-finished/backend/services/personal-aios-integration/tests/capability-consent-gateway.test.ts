@@ -12,9 +12,10 @@ import {OutputAuthority} from '../src/output.ts';
 import {StaticFixtureDeviceAuthority} from '../src/source-authority.ts';
 import {createPersonalAIOSServer} from '../src/server.ts';
 import {EVENT_SCHEMA, sha256} from '../src/contracts.ts';
-import {RunAdmission, PersonalAIOSRuntime, type NativeRun, type NativeClient} from './native-source-fixture.ts';
+import {RunAdmission, PersonalAIOSRuntime, nativeSubmission, type NativeRun, type NativeClient} from './native-source-fixture.ts';
+import {fileURLToPath} from 'node:url';
 
-const root=new URL('../../../../../',import.meta.url).pathname.replace(/\/$/u,'');
+const root=fileURLToPath(new URL('../../../../../',import.meta.url)).replace(/\/$/u,'');
 const internal='synthetic-consent-internal-token';
 function python(script:string,request:object,folder:string,name:string):Promise<string> {
   return fs.writeFile(join(folder,name),JSON.stringify(request)).then(()=>new Promise((resolve,reject)=>{
@@ -53,7 +54,7 @@ async function platform(t:import('node:test').TestContext){
   };
   let calls=0;
   const decide=async(run:string,session:string,tool:string,args:object)=>JSON.parse(await python('capability_probe.py',
-    {root,home:folder,run,session,tool,args,call:`call-${++calls}`,decide_only:true,outcome:'succeeded',config},folder,`decide-${calls}.json`)).decision;
+    {root,home:folder,run,session,input:nativeSubmission(native,run).input,tool,args,call:`call-${++calls}`,decide_only:true,outcome:'succeeded',config},folder,`decide-${calls}.json`)).decision;
 
   const phone=await runtime.authenticate('text');
   const ownerAsks=async(text:string,session:string)=>{
@@ -71,7 +72,7 @@ async function platform(t:import('node:test').TestContext){
     const fired=await runtime.scheduledTask(delivery);
     return {job,delivery,fired,session:fired.admission.session_id as string,run:await bound(fired.admission.session_id,fired.processed_event.processed_event_id)};
   };
-  return {runtime,folder,config,decide,bound,ownerAsks,cron};
+  return {runtime,native,folder,config,decide,bound,ownerAsks,cron};
 }
 
 test('package consent: owner request allowed, self-started action asks, real cron job allowed or blocked by origin and request',
@@ -79,19 +80,21 @@ test('package consent: owner request allowed, self-started action asks, real cro
   const {runtime,decide,bound,ownerAsks,cron}=await platform(t);
   const {event:owner,run:ownerRun}=await ownerAsks('以后每天早上八点帮我打开客厅灯','owner-session');
   const light={device:'客厅灯',service:'light',property:'on',value:true};
-  assert.equal(await decide(ownerRun,'owner-session','control_device',{...light,owner_requested:true}),null);
+  const requested=await decide(ownerRun,'owner-session','control_device',{...light,owner_requested:true});
+  assert.equal(requested.action,'modify');assert.match(requested.args.idempotency_key,/^[a-f0-9]{64}$/u);
   const asked=await decide(ownerRun,'owner-session','control_device',{...light,owner_requested:false});
   assert.equal(asked.action,'approve');assert.match(asked.message,/现实操作/u);assert.match(asked.message,/客厅灯/u);
   assert.equal((await decide(ownerRun,'owner-session','prepare_login',{owner_requested:false})).action,'approve');
-  assert.equal(await decide(ownerRun,'owner-session','read_device',{device:'客厅灯'}),null);
+  assert.equal((await decide(ownerRun,'owner-session','read_device',{device:'客厅灯'})).args.check_for,'');
 
   const {job,delivery,fired,session:cronSession,run:cronRun}=await cron(ownerRun,'owner-session','主人确认过的每日自动化：打开客厅灯。','daily');
   assert.equal(job.script,'personal-aios-task.py');assert.equal(delivery.origin_processed_event_id,owner.processed_event.processed_event_id);
   assert.equal((fired.processed_event.content.app_event as {kind:string}).kind,'scheduled_task');
-  assert.equal(await decide(cronRun,cronSession,'control_device',{...light,owner_requested:true}),null);
+  const scheduled=await decide(cronRun,cronSession,'control_device',{...light,owner_requested:true});
+  assert.equal(scheduled.action,'modify');assert.match(scheduled.args.idempotency_key,/^[a-f0-9]{64}$/u);
   assert.deepEqual(await decide(cronRun,cronSession,'control_device',{...light,owner_requested:false}),
     {action:'block',message:'EFFECT_CONFIRMATION_REQUIRES_OWNER_PHONE'});
-  assert.equal(await decide(cronRun,cronSession,'read_device',{device:'客厅灯'}),null);
+  assert.equal((await decide(cronRun,cronSession,'read_device',{device:'客厅灯'})).args.check_for,'');
 
   // The same job delivered without an owner origin cannot act, even when it claims the owner asked.
   const {origin_processed_event_id:_,...orphan}=delivery;
@@ -105,9 +108,9 @@ test('package consent: owner request allowed, self-started action asks, real cro
 // Opt-in: the same gate with a real model choosing the calls (PAIOS_CAPABILITY_REAL_MODEL=1, PAIOS_CAPABILITY_TEST_KEY_FILE).
 test('real model: asked control runs, self-started control raises an approval card, cron runs the confirmed job and blocks its own idea',
   {timeout:900000,skip:process.env.PAIOS_CAPABILITY_REAL_MODEL==='1'&&process.env.PAIOS_HERMES_PYTHON?false:'opt-in real model'},async t=>{
-  const {folder,config,ownerAsks,cron}=await platform(t);
+  const {folder,native,config,ownerAsks,cron}=await platform(t);
   const turn=async(name:string,run:string,session:string,prompt:string)=>{
-    const result=JSON.parse((await python('capability_consent_model_probe.py',{root,home:folder,name,run,session,prompt,config,approval:'deny',
+    const result=JSON.parse((await python('capability_consent_model_probe.py',{root,home:folder,name,run,session,prompt,input:nativeSubmission(native,run).input,config,approval:'deny',
       model_key_file:process.env.PAIOS_CAPABILITY_TEST_KEY_FILE},folder,`model-${name}.json`)).trim().split('\n').at(-1)!);
     t.diagnostic(JSON.stringify({name,...result}));
     return result as {calls:{tool:string;args:{owner_requested?:boolean};result:string}[];cards:{description:string}[];executed:{tool:string}[]};

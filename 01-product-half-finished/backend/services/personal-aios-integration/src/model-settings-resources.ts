@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {request as httpsRequest} from 'node:https';
 import {check} from './contracts.ts';
+import {loadLocalModelCatalog} from './model-settings-local-catalog.ts';
 import {ModelSettingsAuthority} from './model-settings.ts';
 import {ModelUsage} from './model-usage.ts';
 import {projectModelSettings,writeModelSettingsProjection} from './model-settings-projection.ts';
@@ -9,7 +10,7 @@ import type {PersonalAIOSRuntime} from './runtime.ts';
 
 export interface ModelSettingsConfiguration {
   environment_id:string;master_key_file:string;service_key_file:string;projection_dir:string;import_file?:string;
-  build_profile?:string;build_activation_url?:string;build_ca_file?:string;
+  local_catalog_file?:string;build_profile?:string;build_activation_url?:string;build_ca_file?:string;
 }
 async function activateNative(url:string,token:string,body:object,caFile?:string):Promise<{status:number;body:{status:string;revision:number}}> {
   const bytes=JSON.stringify(body);
@@ -31,6 +32,7 @@ export function openModelSettingsResources(directory:string,config:ModelSettings
   const profileFor=(group:'brain'|'build')=>group==='brain'?'owner':config.build_profile??'workshop';
   const authority=ModelSettingsAuthority.open(join(directory,'model-settings'),{
     environment_id:config.environment_id,master_key_file:config.master_key_file,
+    ...(config.local_catalog_file?{local_catalog:()=>loadLocalModelCatalog(config.local_catalog_file!)}:{}),
     probeUsage:()=>{check(usage,'MODEL_SETTINGS_USAGE_UNAVAILABLE',503);return usage;},
     onEffective:(group,revision,owner)=>writeModelSettingsProjection(owner,config.projection_dir,profileFor(group),revision,group,true),
     onAction:draft=>{
@@ -41,7 +43,8 @@ export function openModelSettingsResources(directory:string,config:ModelSettings
     },
     activate:async(group,revision,owner)=>{
       const profile=profileFor(group),projection=projectModelSettings(owner,profile,revision,group);
-      check(projection.configured,'MODEL_SETTINGS_KEY_REENTRY_REQUIRED',409);
+      check(projection.configured||(projection.config.model as {enabled?:boolean}).enabled===false,
+        'MODEL_SETTINGS_KEY_REENTRY_REQUIRED',409);
       writeModelSettingsProjection(owner,config.projection_dir,profile,revision,group,false);
       const base=group==='build'&&config.build_activation_url?config.build_activation_url:nativeUrl;
       const response=await activateNative(base.replace(/\/$/u,'')+'/api/model-settings/activate',serviceToken,{revision,projections:[projection]},group==='build'?config.build_ca_file:undefined);
@@ -59,8 +62,8 @@ export function openModelSettingsResources(directory:string,config:ModelSettings
     }
     return {authority,attach(runtime:PersonalAIOSRuntime){
       runtime.installModelSettings(authority);
-      usage=new ModelUsage(authority.db,{notify:notice=>runtime.modelUsageNotice(notice),resumeWork:()=>queueMicrotask(()=>runtime.resumeModelUsageWork())});
+      usage=new ModelUsage(authority.db,{time_zone:runtime.time_zone,notify:notice=>runtime.modelUsageNotice(notice),resumeWork:()=>queueMicrotask(()=>runtime.resumeModelUsageWork())});
       runtime.installModelUsage(usage,config.environment_id);
-    },close:()=>authority.close()};
+    },close:async()=>{await authority.stopLocalActivations();authority.close();}};
   }catch(error){authority.close();throw error;}
 }

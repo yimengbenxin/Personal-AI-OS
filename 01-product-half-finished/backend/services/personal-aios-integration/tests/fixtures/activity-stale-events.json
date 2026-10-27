@@ -1,0 +1,10 @@
+{
+  "description": "81c8 shape from the brief: running delegate at card start, later failed child, parent terminal, delayed delegate end. IDs are fixture aliases; delayed ordering is the reproduced loss window, not a production event log.",
+  "events": [
+    {"event":"subagent.start","subagent_id":"delegate","child_session_id":"delegate-session","goal":"还在办","timestamp":1792921675.085},
+    {"event":"subagent.start","subagent_id":"selfcheck","child_session_id":"20261025_094926_fixture","goal":"检查失败任务","timestamp":1792921766.260},
+    {"event":"subagent.complete","subagent_id":"selfcheck","child_session_id":"20261025_094926_fixture","status":"failed","timestamp":1792921801.250},
+    {"event":"run.completed","timestamp":1792921801.250}
+  ],
+  "ended_at":1792921801.250
+}

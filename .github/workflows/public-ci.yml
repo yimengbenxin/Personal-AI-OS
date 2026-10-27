@@ -33,7 +33,7 @@ jobs:
           SUITE: ${{ matrix.suite }}
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ffmpeg fonts-wqy-zenhei age
+          sudo apt-get install --yes ffmpeg fonts-wqy-zenhei age poppler-utils
           bash ci/install.sh "$SUITE"
       # Ubuntu 24.04 restricts unprivileged user namespaces by default.
       # This disposable runner has read-only repository permissions and no product secrets.

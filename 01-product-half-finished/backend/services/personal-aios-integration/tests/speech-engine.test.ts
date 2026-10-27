@@ -33,6 +33,8 @@ test('config parsing fills keyword defaults and rejects malformed pins, paths an
   const base={num_threads:2,timeout_ms:30000,vad:{model:file},asr:{model:file,tokens:file},speaker:{model:file}};
   const parsed=parseLocalSpeechConfig({...base,kws:{encoder:file,decoder:file,joiner:file,tokens:file}});
   assert.deepEqual(parsed.kws!.keywords,[{label:'依米',tokens:'y ī m ǐ'}]);assert.equal(parsed.kws!.score,2);assert.equal(parsed.kws!.threshold,0.15);
+  const call_keywords=[{label:'停',tokens:'model-specific'}];
+  assert.deepEqual(parseLocalSpeechConfig({...base,kws:{...parsed.kws,call_keywords}}).kws!.call_keywords,call_keywords);
   assert.equal(parseLocalSpeechConfig(base).kws,undefined);
   for(const bad of [{...base,num_threads:0},{...base,num_threads:5},{...base,timeout_ms:0},{...base,extra:true},
     {...base,vad:{model:{path:'relative.onnx',sha256:'a'.repeat(64)}}},{...base,asr:{model:file,tokens:{path:'/t',sha256:'A'.repeat(64)}}},
@@ -285,4 +287,14 @@ test('minutes of enrollment VAD use bounded worker writes and preserve speech cr
   const writes=f.seen.filter(e=>e.kind==='dispatched'&&e.op==='vad_write');
   assert.ok(writes.length>1&&writes.every(e=>e.length!<=NATIVE_WINDOW_SAMPLES));
   assert.equal(f.seen.filter(e=>e.kind==='dispatched'&&e.op==='vad_open').length,2,'one refused stream and one complete long-recording stream');
+});
+
+// The target package supplies both ambient and call tokenizer output.
+test('call keyword worker receives selected package tokens instead of legacy tokens',async t=>{
+  const f=await fixture(t,5000,true);
+  f.config.kws!.call_keywords=[{label:'依米',tokens:'selected-call-token'},{label:'停',tokens:'selected-stop-token'}];
+  const engine=await LocalSpeechEngine.open(f.config,{thread});t.after(()=>engine.close());
+  const stream=await engine.openCallKeywords(new AbortController().signal);await stream.close();
+  await f.until(()=>f.seen.some(event=>event.kind==='call_started'));
+  assert.equal(f.seen.find(event=>event.kind==='call_started')!.keywords,'selected-call-token @依米\nselected-stop-token @停\n');
 });

@@ -11,6 +11,7 @@ test('actual process shutdown aborts in-flight create; durable unknown acceptanc
   const folder=await fs.mkdtemp(join(tmpdir(),'paios-shutdown-main-'));
   const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>(),disconnected=Promise.withResolvers<void>();let creates=0,statuses=0;
   const native=createServer(async(request,response)=>{
+    if(request.url==='/health/detailed'){response.setHeader('Content-Type','application/json');response.end(JSON.stringify({platform:'hermes-agent',readiness:{checks:{session_store:{status:'ok'},model:{status:'ok'}}}}));return;}
     if(request.method==='GET'&&request.url?.startsWith('/api/sessions')){response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify({data:[]}));return;}
     if(request.method==='POST'&&request.url==='/v1/runs') {
       creates++;response.once('close',()=>disconnected.resolve());for await(const _chunk of request){}entered.resolve();await release.promise;

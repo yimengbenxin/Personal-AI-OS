@@ -327,8 +327,8 @@ struct YimiHomeView: View {
     private var preview: String {
         guard let last = conversation.last else { return "按住下面的按钮，或者点这里打字" }
         switch last.kind {
-        case .me: return "你：" + last.text
-        case .her: return "依米：" + last.text
+        case .me: return "你：" + (YimiLongText.preview(last.text) ?? last.text)
+        case .her: return "依米：" + (YimiLongText.preview(last.text) ?? last.text)
         case .call: return "通话"
         }
     }

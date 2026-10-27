@@ -37,6 +37,7 @@ final class WatchConnectivityPhoneAdapter: NSObject, AssistantWatchControlSendin
     private var actionHandler: ActionHandler
     private var workoutSnapshotHandler: @Sendable (WatchCyclingWorkoutSnapshot) async -> Void = { _ in }
     private var activationHandler: @Sendable () async -> Void = {}
+    private var reachabilityHandler: @Sendable () async -> Void = {}
     private let contextLock = NSLock()
     private var context: [String: Any]
 #if os(iOS)
@@ -83,6 +84,10 @@ final class WatchConnectivityPhoneAdapter: NSObject, AssistantWatchControlSendin
     }
     func setActionHandler(_ handler: @escaping ActionHandler) { handlerLock.withLock { actionHandler = handler } }
     func setActivationHandler(_ handler: @escaping @Sendable () async -> Void) { handlerLock.withLock { activationHandler = handler } }
+    var isReachable: Bool { sender.isActivated && sender.isReachable }
+    func setReachabilityHandler(_ handler: @escaping @Sendable () async -> Void) {
+        handlerLock.withLock { reachabilityHandler = handler }
+    }
     func setAppearanceReceiptHandler(_ handler: @escaping @Sendable (Data) async -> Void) {
         handlerLock.withLock { appearanceReceiptHandler = handler }
     }
@@ -147,7 +152,11 @@ final class WatchConnectivityPhoneAdapter: NSObject, AssistantWatchControlSendin
         identity.reachabilityChanged()
 #endif
         if !sender.isReachable { deliveries.enqueue { [unreachableHandler] in await unreachableHandler() } }
-        else { receiveWorkoutSnapshot(sender.receivedApplicationContext) }
+        else {
+            receiveWorkoutSnapshot(sender.receivedApplicationContext)
+            let handler = handlerLock.withLock { reachabilityHandler }
+            deliveries.enqueue { await handler() }
+        }
     }
     func receiveMessage(_ message: [String: Any], replyHandler: (([String: Any]) -> Void)? = nil) {
         receiveAppearanceReceipt(message)

@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import {ContractError,check,canonical,sha256,digest} from '../../../../../capability/contracts/json.ts';
+export {ContractError,check,canonical,sha256,digest} from '../../../../../capability/contracts/json.ts';
 import type { TerminalCapability } from './source-authority.ts';
 import {validateVoiceprintSpeakers,voiceEvidence,principalAttribution} from './owner-authority.ts';
 export {voiceEvidence,directedVoice,runScope,guestKey,principalAttribution,isBuildTask,ownerActionGrant} from './owner-authority.ts';
@@ -8,29 +9,11 @@ export const EVENT_SCHEMA = 'paios.event.v1' as const;
 export type DeviceType = 'glasses' | 'phone' | 'watch' | 'mac';
 export type MediaType = 'text' | 'app_event' | 'audio' | 'visual' | 'file' | 'muxed_av' | 'livekit_tracks';
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export class ContractError extends Error {
-  readonly code: string; readonly status: number;
-  constructor(code: string, status = 400) { super(code); this.code = code; this.status = status; }
-}
 /** A delivery that failed at a known stage; the stage and reason travel with its durable failure record. */
 export class DeliveryStageError extends ContractError {
   readonly stage: string; readonly reason: string;
   constructor(code: string, status: number, stage: string, reason: string) { super(code, status); this.stage = stage; this.reason = reason; }
 }
-export function check(condition: unknown, code: string, status = 400): asserts condition {
-  if (!condition) throw new ContractError(code, status);
-}
-export function canonical(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  check(typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype,
-    'INVALID_JSON');
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map(k => `${JSON.stringify(k)}:${canonical(record[k])}`).join(',')}}`;
-}
-export const sha256 = (bytes: Uint8Array | string): string => createHash('sha256').update(bytes).digest('hex');
-export const digest = (value: unknown): string => sha256(canonical(value));
 /** The one identifier rule: public tool schemas declare this pattern and every server boundary enforces it. */
 export const IDENTIFIER_PATTERN = '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$';
 const identifierRule = new RegExp(IDENTIFIER_PATTERN, 'u');

@@ -3921,6 +3921,14 @@ actor AssistantSessionCoordinator {
                 }
                 if operation == "ready" {
                     guard try packet.fields.value("session_id", as: String.self) == centralConsumer.binding?.sessionID else { throw CentralTextError.contextChanged() }
+                    let epoch = try packet.fields.value("history_epoch", as: String.self)
+                    if let epoch, epoch != terminalState.historyEpoch {
+                        try localDatabase?.discardProductHistory(epoch: epoch)
+                        careDelivery?.cancel(); careDelivery = nil; pendingCareSafe = nil
+                        moveEventQueue = []; moveSession = MoveSession()
+                        centralConsumer.discardProductHistory()
+                    }
+                    terminalState.applyHistoryEpoch(epoch)
                     acknowledgedAppearanceVersion = nil; appearanceAcknowledgementID = nil
                     terminalState.attach()
                     try await publishCentralRequest(AssistantCentralTextWire.encode("avatar_sync", fields: [:]))

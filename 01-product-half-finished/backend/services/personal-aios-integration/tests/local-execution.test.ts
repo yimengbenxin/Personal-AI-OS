@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { LocalMediaExecution, type LocalMediaCommand } from '../src/media/local-execution.ts';
+import {childPid} from './child-pid-fixture.ts';
+import {timeoutClock} from './timeout-clock-fixture.ts';
 
 const exec = promisify(execFile);
 const signal = () => new AbortController().signal;
@@ -169,19 +171,21 @@ test('close reports owned cleanup failure only after every reserved child joins'
     const root=await fs.mkdtemp(join(tmpdir(),'media-owner-cleanup-'));
     t.after(()=>fs.rm(root,{recursive:true,force:true}));
     const owner=await LocalMediaExecution.create({runtime:root,slots:2});
+    timeoutClock(t);t.mock.method(performance,'now',()=>0);
     const audio=await owner.reserve('audio',signal(),3000);
     await fs.writeFile(join(root,'media','.local-audio-lease','controlled-blocker'),'fixture');
     const decode=await owner.reserve('decode',signal(),3000);
-    const marker=join(root,'cleanup-child.pid');
-    const running=decode.run(command(`require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000);`,root));
+    const child=childPid(t,root,'cleanup-child.pid');
+    const running=decode.run(command(child.source+'setInterval(()=>{},1000);',root));
     const rejected=assert.rejects(running,/DEMUX_CLOSED/);
-    for(let i=0;i<100&&!(await fs.stat(marker).catch(()=>null));i++)await new Promise(resolve=>setTimeout(resolve,5));
-    const pid=Number(await fs.readFile(marker,'utf8'));
+    const pid=await child.ready;
     // Delay the second release's observable join; close must not reject at the first failed cleanup.
     const release=decode.release.bind(decode);
-    let joined=false;
-    decode.release=async()=>{await release();await new Promise(resolve=>setTimeout(resolve,30));joined=true;};
+    let joined=false,settled=false;const joining=Promise.withResolvers<void>(),joinGate=Promise.withResolvers<void>();t.after(()=>joinGate.resolve());
+    decode.release=async()=>{await release();joining.resolve();await joinGate.promise;joined=true;};
     const closing=owner.close();
+    void closing.then(()=>{settled=true;},()=>{settled=true;});
+    await joining.promise;assert.equal(settled,false);joinGate.resolve();
     await assert.rejects(closing,{code:'ENOTEMPTY'});
     assert.equal(joined,true);
     await rejected;

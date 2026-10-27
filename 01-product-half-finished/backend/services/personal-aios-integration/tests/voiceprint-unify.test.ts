@@ -49,7 +49,7 @@ test('channel calibration and AS-norm are explicit, payment retains raw enrolled
   const {storage}=await setup(t);
   const registry=new VoiceprintRegistry(storage,model,{scoring:{calibration:{call:{verified:.5,uncertain:.4}}}});
   t.after(()=>registry.close());
-  assert.equal((await registry.identify(axis(.55),{mode:'call',channel:'call',speech_ms:2000,observed_at:at(0)}) as {band?:string}).band,'verified');
+  assert.equal((await registry.identify(axis(.55),{mode:'call',channel:'call',speech_ms:2000,observed_at:at(0)}) as {band?:string}).band,'uncertain');
   assert.equal((await registry.identify(axis(.55),{mode:'payment',channel:'call',speech_ms:2000,observed_at:at(0)}) as {band?:string}).band,'uncertain');
   assert.deepEqual((await registry.status() as {learned_samples:object}).learned_samples,{},'calibrated-only matches are not independent learning evidence');
   assert.throws(()=>configuredScoring({cohort:{model_sha256:'d'.repeat(64),embeddings_base64:[]}},model),/VOICEPRINT_COHORT_MODEL_MISMATCH/);

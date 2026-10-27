@@ -121,7 +121,9 @@ test('bounded backlog ticks resume across archive restart without stranding orig
   const storage=new PosixStorage(join(root,'hot'),{cold:dav.config}),archive=new RawArchive(storage,10*1024*1024);
   stores.push(storage);archives.push(archive);const events:ArchivedEvent[]=[];
   for(let n=0;n<3;n++)events.push(await archive.archive(file(Buffer.alloc(9*1024*1024,n+1),`backlog-${n}`),trusted));
-  const first=await archive.moveCold();assert.ok(first.segments>=1&&first.segments<=2);assert.ok(first.hot_bytes<=32*1024*1024);
+  let busy=false;const move=storage.moveCold.bind(storage);
+  storage.moveCold=async(...args)=>{const receipt=await move(...args);busy=true;return receipt;};
+  const first=await archive.moveCold(2,Date.now(),{busy:()=>busy});assert.equal(first.segments,1);assert.ok(first.hot_bytes<=16*1024*1024);
   assert.ok((await storage.cold!.locations()).filter(r=>r.namespace==='objects').length<3,'one tick must leave backlog for a later tick');
   // Old metadata may leave hot storage in the same bounded tick; its original must already be durable in cold.
   await archive.close();await storage.close();

@@ -7,7 +7,7 @@ import {promises as fs} from 'node:fs';
 import {join,basename} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ReadableStream, type ReadableStreamDefaultController} from 'node:stream/web';
-import {AudioSource,DataPacketKind,RoomEvent,TrackKind,TrackSource,VideoBufferType,VideoFrame,dispose,type VideoFrameEvent} from '@livekit/rtc-node';
+import {AudioSource,LocalAudioTrack,DataPacketKind,RoomEvent,TrackKind,TrackSource,VideoBufferType,VideoFrame,dispose,type VideoFrameEvent} from '@livekit/rtc-node';
 import {createPersistentPublicExecutionOwner} from '../src/persistent-public-execution-owner.ts';
 import {AvatarProfileService} from '../src/avatar-profile.ts';
 import {PHONE_CAPABILITIES,MAC_CAPABILITIES} from '../../../services/personal-aios-integration/src/source-authority.ts';
@@ -47,6 +47,7 @@ import {RealtimePublicControlRuntime} from '../src/realtime-public-control-runti
 import {createRuntimeCredentialFenceAdmission} from '../src/realtime-public-control-pg-composition.ts';
 import {SourceMediaAdmissionError} from '../src/source-media-admission.ts';
 import {createCredentialFencePgFixture} from './credential-fence-pg-fixture.ts';
+import {RuntimeEventStore,installRuntimeEventStore} from '../../../services/personal-aios-integration/src/self-events.ts';
 after(()=>dispose());
 
 // Session/signing/RTC ports are controlled; refresh admission and the production execution owner are real.
@@ -1674,6 +1675,41 @@ test('microphone-only glasses archive PCM without opening a speaker call front',
   assert.equal(ScriptedQwenSocket.sockets.length,before);
 });
 
+test('live phone non-speech candidates retain exact L5 PCM and settle call-owned without ambient analysis',async t=>{
+  const f=await fixture(t,{voice:true,continuous:true,budget:{max_samples:32768}});
+  const events=new RuntimeEventStore({directory:join(f.storage.root,'runtime-events')});
+  const detachEvents=installRuntimeEventStore(events);t.after(async()=>{detachEvents();await events.close();});
+  const detector=f.pcm.ports!.detector as ReturnType<typeof controlledDetector>;
+  Object.assign(detector.vad.vad_model.native_metadata,{sound_window_samples:512});
+  t.mock.method(LocalSpeechEngine,'open',async()=>({openCallVad:async()=>({write:async()=>[],close:async()=>{}}),close:async()=>{}} as unknown as LocalSpeechEngine));
+  Object.assign(f.options.participant.roomPort!.localParticipant!,{publishTrack:async()=>({sid:'ambient-priority-track',waitForSubscription:async()=>{}}),unpublishTrack:async()=>{}});
+  const voice={...f.options.central.voice!,createFront:()=>({connect:async()=>{},appendAudio:()=>{},appendImage:()=>{},close:()=>{},context:async()=>{},respond:async()=>({completed:true})})};
+  await f.create({central:{...f.options.central,voice}});f.addExisting();await f.owner.bridge.onBootstrapConnected!(f.input);
+  const state=(value:string)=>f.published.some((p:any)=>p.operation==='call_state'&&p.call_id==='ambient-priority'&&p.state===value);
+  f.sendText({operation:'call_open',call_id:'ambient-priority'});await eventually(()=>state('live'));
+  const runtime=f.owner.assembly.runtime,continuous=runtime.continuousMedia();
+  const frames=Array.from({length:3},()=>continuousMarker(512,false));
+  for(let n=0;n<frames.length;n++){
+    f.feed(frames[n]!);const archived=await latest(f,n);
+    const original=await runtime.existingArchive().readExactChunk(archived.event,archived.chunk,4096);
+    assert.deepEqual(Buffer.from(original.bytes),pcmBytes(frames[n]!));
+  }
+  await continuous.drain();
+  const candidates=await Promise.all((await f.storage.list('media-continuous-candidates')).map(async key=>
+    JSON.parse(Buffer.from(await f.storage.read('media-continuous-candidates',key)).toString())));
+  assert.equal(candidates.length,3);assert.ok(candidates.every(candidate=>candidate.reason==='non_speech'));
+  const dispositions=await Promise.all((await f.storage.list('media-continuous-dispositions')).map(async key=>
+    JSON.parse(Buffer.from(await f.storage.read('media-continuous-dispositions',key)).toString())));
+  assert.equal(dispositions.length,3);assert.ok(dispositions.every(value=>value.state==='call_owned'&&value.raw_status==='durable'));
+  assert.equal(continuous.snapshot().pending_candidates,0);
+  assert.deepEqual(f.requests,[]);assert.deepEqual(f.nativeInputs,[]);
+  assert.equal((await events.read()).filter(event=>event.ambient_stage==='candidate_ready').length,0,
+    'call-owned candidates are durable dispositions, not ambient work ready for analysis');
+  f.sendText({operation:'call_close',call_id:'ambient-priority'});await eventually(()=>state('closed'));
+  await continuous.drain();
+  assert.deepEqual(f.requests,[]);assert.deepEqual(f.nativeInputs,[]);assert.deepEqual(f.errors,[]);
+});
+
 test('a closing call releases realtime priority so deferred capture can finalize and the next call opens',async t=>{
   const f=await fixture(t,{voice:true,continuous:true,budget:{max_samples:32768}});
   t.mock.method(LocalSpeechEngine,'open',async()=>({openCallVad:async()=>({write:async()=>[],close:async()=>{}}),close:async()=>{}} as unknown as LocalSpeechEngine));
@@ -2237,6 +2273,8 @@ test('queued formal-owner call media keeps source receipt time and durably archi
   f.pcm.clock={...receipt,resolve:async(binding,chunk)=>{const map=await receipt.resolve(binding,chunk);if(chunk.track_id==='call_camera')cameraClock.resolve();return map;}};
   t.mock.method(LocalSpeechEngine,'open',async()=>({openCallVad:async()=>({write:async()=>[],close:async()=>{}}),close:async()=>{}} as unknown as LocalSpeechEngine));
   const played:Int16Array[]=[];t.mock.method(AudioSource.prototype,'captureFrame',async(frame:{data:Int16Array})=>{played.push(frame.data.slice());});
+  // The room and played frames are controlled here; creating a native WebRTC track only probes host devices.
+  t.mock.method(LocalAudioTrack,'createAudioTrack',()=>({sid:'archive-track',close:async()=>{}} as unknown as LocalAudioTrack));
   Object.assign(f.options.participant.roomPort!.localParticipant!,{publishTrack:async()=>({sid:'archive-track',waitForSubscription:async()=>{}}),unpublishTrack:async()=>{}});
   let emit!:(event:Record<string,unknown>)=>void,video!:ReadableStreamDefaultController<VideoFrameEvent>;
   f.pcm.cameraEncoderFactory=syntheticCameraEncoder(f.base);
@@ -2249,8 +2287,10 @@ test('queued formal-owner call media keeps source receipt time and durably archi
   f.feed(waveform());await latest(f);const mic=f.owner.pcmIngress!.snapshot().latest!;
   f.sendText({operation:'call_open',call_id:'archive-call'});await eventually(()=>f.published.some((p:any)=>p.operation==='call_state'&&p.state==='live'));
   f.feed(waveform(6));await eventually(()=>f.owner.pcmIngress!.snapshot().latest?.event.event_id!==mic.event.event_id);const inbound=f.owner.pcmIngress!.snapshot().latest!;
-  const barrier=latch(),runtime=f.owner.assembly.runtime,admit=runtime.admitMedia.bind(runtime);let blocked=false;
-  t.mock.method(runtime,'admitMedia',async(...args:Parameters<typeof runtime.admitMedia>)=>{const admitted=await admit(...args);if(args[2].track_id!=='assistant_reply')return admitted;blocked=true;
+  const barrier=latch(),runtime=f.owner.assembly.runtime,admit=runtime.admitMedia.bind(runtime),published=Promise.withResolvers<void>();let blocked=false,committed=0;
+  t.mock.method(runtime,'admitMedia',async(...args:Parameters<typeof runtime.admitMedia>)=>{const admitted=await admit(...args);
+    void admitted.commit.then(()=>{if(++committed===4)published.resolve();},published.reject);
+    if(args[2].track_id!=='assistant_reply')return admitted;blocked=true;
     return {...admitted,commit:admitted.commit.then(async published=>{await barrier.promise;return published;})};});
   emit({type:'response.created',response:{id:'actual'}});
   const reply=new Int16Array(480).fill(2048);emit({type:'response.audio.delta',response_id:'actual',delta:Buffer.from(reply.buffer).toString('base64')});
@@ -2258,7 +2298,7 @@ test('queued formal-owner call media keeps source receipt time and durably archi
   const w=64,h=36,pixels=new Uint8Array(w*h*3/2).fill(128);pixels.fill(70,0,w*h);
   for(let frame=0;frame<3;frame++)video.enqueue({frame:new VideoFrame(pixels,w,h,VideoBufferType.I420),rotation:0,timestampUs:BigInt(frame)} as never);
   try{await cameraClock.promise;receivedAt+=5000;}finally{barrier.release();}
-  await eventually(async()=>{if(f.errors.length)throw f.errors[0];return await committedCount(f.storage)===6;});
+  await published.promise;assert.deepEqual(f.errors,[]);assert.equal(await committedCount(f.storage),6);
   // Archive and preview finish independently. Verify the image reached the live call before closing its sink.
   await imageReady.promise;f.sendText({operation:'call_close',call_id:'archive-call'});await eventually(()=>f.published.some((p:any)=>p.operation==='call_state'&&p.state==='closed'));await f.owner.bridge.close?.();
   const archive=f.owner.assembly.runtime.existingArchive(),tracks=new Map<string,{event:any;chunk:any;revision:number}>();
@@ -2271,7 +2311,9 @@ test('queued formal-owner call media keeps source receipt time and durably archi
   await assertSessionEnded(f.storage,inbound.event.raw_ref,'call_hangup');
   await assertSessionEnded(f.storage,out.event.raw_ref,'call_hangup');
   assert.equal((await f.storage.list('session-finals')).length,0);
-  await archive.maintenance(1,Date.now(),{budget_ms:5000});
+  // This test checks folded content, not the maintenance scheduler's real-time slice under shared I/O.
+  const maintenanceClock=t.mock.method(performance,'now',()=>0);
+  try{await archive.maintenance(1,Date.now(),{budget_ms:5000});}finally{maintenanceClock.mock.restore();}
   assert.equal((await f.storage.readFinal(mic.event.raw_ref))?.ended_by,'call_start');
   assert.equal((await f.storage.readFinal(inbound.event.raw_ref))?.ended_by,'call_hangup');
   assert.equal((await f.storage.readFinal(out.event.raw_ref))?.ended_by,'call_hangup');
@@ -2291,11 +2333,16 @@ test('video-only capture archives compressed segments under its source credentia
   const f=await fixture(t,{camera:true,receiptClock:true});let video!:ReadableStreamDefaultController<VideoFrameEvent>;
   f.pcm.cameraStreamFactory=()=>new ReadableStream<VideoFrameEvent>({start:controller=>{video=controller;}});f.pcm.cameraEncoderFactory=syntheticCameraEncoder(f.base);
   await f.create();f.addExisting();const peer=f.options.participant.roomPort!.remoteParticipants!.get('terminal')!;
+  const published=Promise.withResolvers<void>(),runtime=f.owner.assembly.runtime,admit=runtime.admitMedia.bind(runtime);
+  t.mock.method(runtime,'admitMedia',async(...args:Parameters<typeof admit>)=>{
+    const admitted=await admit(...args);void admitted.commit.then(()=>published.resolve(),published.reject);return admitted;
+  });
   peer.trackPublications.set('camera',{kind:TrackKind.KIND_VIDEO,source:TrackSource.SOURCE_CAMERA,track:{camera:true,sid:'video-only-track'}} as never);
   f.owner.bridge.assertBootstrapRequest!({requested_media:{data:true,audio:false,video:true},start:{modalities:['data','video']}});
   await f.owner.bridge.onBootstrapConnected!({...f.input,enabledMedia:{data:true,audio:false,video:true}});assert.equal(f.streams,0);
   const pixels=new Uint8Array(64*36*3/2).fill(90);video.enqueue({frame:new VideoFrame(pixels,64,36,VideoBufferType.I420),rotation:1,timestampUs:0n} as never);
-  await eventually(async()=>await committedCount(f.storage)===1);
+  // The producer ACK precedes publication. Join the real archive commit before inspecting its records.
+  await published.promise;assert.equal(await committedCount(f.storage),1);
   const rows=await Promise.all((await f.storage.list('stream-revisions')).map(async key=>JSON.parse(Buffer.from(await f.storage.read('stream-revisions',key)).toString())));
   const record=rows.find(row=>row.chunk?.track_id==='call_camera'),archive=f.owner.assembly.runtime.existingArchive();
   const event=await archive.locate(record.raw_ref,'owner');assert.equal(record.chunk.source_video.track_id,'video-only-track');assert.equal(record.chunk.source_video.rotation,90);

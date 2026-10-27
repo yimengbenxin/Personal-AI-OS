@@ -1,3 +1,4 @@
+import {DEFAULT_TIME_ZONE} from './deployment-time.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {inTransaction} from './owner-db.ts';
@@ -14,12 +15,14 @@ const goInputBilling=new Set([...deepseekInputBilling,'glm-5.3-flash','glm-5.3',
   'hy4-preview','hy3','grok-4.7','gemini-4-argon']);
 /** Billing defaults, not model routing. Unknown providers/models require reported writes or an explicit price policy.
  * https://api-docs.deepseek.com/quick_start/pricing/ (input cache hit/miss; no separate write charge)
- * https://opencode.ai/docs/go/ (only models whose Cached Write column is "-") */
+ * https://opencode.ai/docs/go/ (only models whose Cached Write column is "-")
+ * https://cloud-rd.siliconflow.cn/pricing (GLM-5.3-Flash: input/cache-hit/output; no separate write charge) */
 export function defaultCacheWriteBilling(provider:Pick<ModelProvider,'base_url'|'wire_protocol'>,model:string):CacheWriteBilling {
   if(provider.wire_protocol==='local_onnx')return 'separate';
   const host=new URL(provider.base_url).hostname;
   if((host==='api.deepseek.com'||host==='amr-link.open-design.ai')&&deepseekInputBilling.has(model)||
-      host==='opencode.ai'&&goInputBilling.has(model))return 'input';
+      host==='opencode.ai'&&goInputBilling.has(model)||
+      host==='api.siliconflow.cn'&&model==='zai-org/GLM-5.3-Flash')return 'input';
   return 'separate';
 }
 
@@ -54,7 +57,6 @@ export interface ModelWireAttempt extends Omit<UsageAttempt,'owner'|'owner_chat'
   revision:number;profile:string;run_id:string;session_id:string;base_url:string;
 }
 interface Policy {enabled:number;paused_at:string|null;resumed_day:string|null;reserve_start_seq:number;reserve_micros:number}
-const day=(at:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(at);
 const micro=(amount:number)=>Math.round(amount*1_000_000);
 
 /** Attempt facts and budget decisions share the model settings authority's database. */
@@ -63,7 +65,10 @@ export class ModelUsage {
   private readonly now:()=>number;
   private readonly notify:(notice:BudgetNotice)=>Promise<void>;
   private readonly resumeWork:()=>void;
-  constructor(db:DatabaseSync,options:{now?:()=>number;notify:(notice:BudgetNotice)=>Promise<void>;resumeWork?:()=>void}) {
+  private readonly day:(at:number)=>string;
+  constructor(db:DatabaseSync,options:{time_zone?:string;now?:()=>number;notify:(notice:BudgetNotice)=>Promise<void>;resumeWork?:()=>void}) {
+    const clock=new Intl.DateTimeFormat('en-CA',{timeZone:options.time_zone??DEFAULT_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit'});
+    this.day=at=>clock.format(at);
     this.db=db;this.now=options.now??Date.now;this.notify=options.notify;this.resumeWork=options.resumeWork??(()=>{});
     db.exec(`CREATE TABLE IF NOT EXISTS model_usage_attempts (
       environment TEXT NOT NULL,owner TEXT NOT NULL,attempt_id TEXT NOT NULL,local_date TEXT NOT NULL,
@@ -146,7 +151,7 @@ export class ModelUsage {
       const price=attempt.status==='started'?this.price(attempt):undefined;
       const fact=attempt.status==='started'?{...attempt,...(price?{price_version:price.price_version}:{})}:this.priced(attempt,undefined,billing);
       this.db.prepare('INSERT INTO model_usage_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(fact.environment,fact.owner,
-        fact.attempt_id,day(Date.parse(fact.captured_at)),fact.captured_at,Number(fact.owner_chat),fact.cost.kind,fact.cost.currency,
+        fact.attempt_id,this.day(Date.parse(fact.captured_at)),fact.captured_at,Number(fact.owner_chat),fact.cost.kind,fact.cost.currency,
         fact.cost.amount===null?null:micro(fact.cost.amount),canonical(fact),sourceBody);
     }
     if(attempt.status!=='started')await this.checkBudget(attempt.environment,attempt.owner);
@@ -156,7 +161,7 @@ export class ModelUsage {
     return row?JSON.parse(row.body) as UsageAttempt:undefined;
   }
   summary(environment:string,owner:string) {
-    const local_date=day(this.now());
+    const local_date=this.day(this.now());
     const totals=this.db.prepare(`SELECT COUNT(*) attempts,
       COALESCE(SUM(CASE WHEN cost_kind='known' AND currency='CNY' THEN amount_micros ELSE 0 END),0) known,
       COALESCE(SUM(CASE WHEN cost_kind='estimated' AND currency='CNY' THEN amount_micros ELSE 0 END),0) estimated,
@@ -182,7 +187,7 @@ export class ModelUsage {
   private policy(environment:string,owner:string):Policy {
     const policy=this.db.prepare('SELECT enabled,paused_at,resumed_day,reserve_start_seq,reserve_micros FROM model_usage_policy WHERE environment=? AND owner=?')
       .get(environment,owner) as unknown as Policy??{enabled:0,paused_at:null,resumed_day:null,reserve_start_seq:0,reserve_micros:1_000_000};
-    if(policy.paused_at&&day(Date.parse(policy.paused_at))!==day(this.now())){
+    if(policy.paused_at&&this.day(Date.parse(policy.paused_at))!==this.day(this.now())){
       this.db.prepare('UPDATE model_usage_policy SET paused_at=NULL WHERE environment=? AND owner=?').run(environment,owner);
       policy.paused_at=null;this.resumeWork();
     }
@@ -194,7 +199,7 @@ export class ModelUsage {
       ON CONFLICT(environment,owner) DO UPDATE SET enabled=excluded.enabled,reserve_micros=excluded.reserve_micros`).run(environment,owner,Number(enabled),micro(reserve));
     if(!enabled){
       this.db.prepare('UPDATE model_usage_policy SET paused_at=NULL WHERE environment=? AND owner=?').run(environment,owner);this.resumeWork();
-    }else if(this.policy(environment,owner).resumed_day!==day(this.now())&&this.summary(environment,owner).known_cny>10)this.pause(environment,owner);
+    }else if(this.policy(environment,owner).resumed_day!==this.day(this.now())&&this.summary(environment,owner).known_cny>10)this.pause(environment,owner);
   }
   pause(environment:string,owner:string):void {
     const {seq}=this.db.prepare('SELECT COALESCE(MAX(rowid),0) seq FROM model_usage_attempts').get() as {seq:number};
@@ -207,7 +212,7 @@ export class ModelUsage {
   resume(environment:string,owner:string):void {
     this.db.prepare(`INSERT INTO model_usage_policy(environment,owner,resumed_day) VALUES (?,?,?)
       ON CONFLICT(environment,owner) DO UPDATE SET paused_at=NULL,resumed_day=excluded.resumed_day`)
-      .run(environment,owner,day(this.now()));
+      .run(environment,owner,this.day(this.now()));
     this.resumeWork();
   }
   admission(environment:string,owner:string,ownerChat:boolean):{allowed:boolean;reserve_remaining_cny:number;reason?:'budget_paused'|'owner_reserve_exhausted'} {
@@ -215,7 +220,7 @@ export class ModelUsage {
     if(!policy.paused_at)return {allowed:true,reserve_remaining_cny:policy.reserve_micros/1_000_000};
     const {spent}=this.db.prepare(`SELECT COALESCE(SUM(amount_micros),0) spent FROM model_usage_attempts
       WHERE environment=? AND owner=? AND local_date=? AND owner_chat=1 AND rowid>?
-      AND currency='CNY' AND cost_kind!='unknown'`).get(environment,owner,day(this.now()),policy.reserve_start_seq) as {spent:number};
+      AND currency='CNY' AND cost_kind!='unknown'`).get(environment,owner,this.day(this.now()),policy.reserve_start_seq) as {spent:number};
     const remaining=Math.max(0,(policy.reserve_micros-spent)/1_000_000);
     return {allowed:ownerChat&&remaining>0,reserve_remaining_cny:remaining,
       ...(!ownerChat?{reason:'budget_paused' as const}:remaining===0?{reason:'owner_reserve_exhausted' as const}:{})};

@@ -1,0 +1,135 @@
+{
+  "provenance": {
+    "deepseek": "DeepSeek published chat response shape; production-count fixture 29960/210/8704. https://api-docs.deepseek.com/api/create-chat-completion/",
+    "go": "Recorded Open Design Go deepseek-v4.1-flash usage from usage-observer real-model-priced.json, 2026-10-24T21:53:50.765Z; replayed on the OpenCode Go compatible route, no new live call.",
+    "glm": "SiliconFlow published chat/vision response usage shape (15/1540, cached 0, reasoning 1190), replayed with the configured GLM model. https://docs.siliconflow.cn/docs/api/chat-completions-post",
+    "variants": "Zero, missing, conflicting aliases and protocol variants are deterministic mutations of the response shapes, not additional production captures. Prices are configured fixture rates, not bills."
+  },
+  "cases": [
+    {
+      "id": "deepseek-flat",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 29960, "completion_tokens": 210, "prompt_cache_hit_tokens": 8704, "prompt_cache_miss_tokens": 21256, "reasoning_tokens": 7}},
+      "expected_usage": {"prompt_tokens": 29960, "completion_tokens": 210, "cached_tokens": 8704, "reasoning_tokens": 7},
+      "contract": {"provider": "deepseek-paios", "cost": 0.044540}
+    },
+    {
+      "id": "deepseek-zero-wins-flat-cache",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "prompt_cache_hit_tokens": 0, "cached_tokens": 14}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 0},
+      "contract": {"provider": "deepseek-paios", "cost": 0.000360}
+    },
+    {
+      "id": "go-recorded",
+      "route": "chat/completions",
+      "response": {"usage": {"completion_tokens": 1, "prompt_tokens": 854, "total_tokens": 855, "prompt_tokens_details": {"cached_tokens": 640, "cached_read_tokens": 640}}},
+      "expected_usage": {"prompt_tokens": 854, "completion_tokens": 1, "cached_tokens": 640},
+      "contract": {"provider": "opencode-paios", "cost": 0.000462}
+    },
+    {
+      "id": "glm-vision-shape",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 15, "completion_tokens": 1540, "total_tokens": 1555, "completion_tokens_details": {"reasoning_tokens": 1190}, "prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 15}},
+      "expected_usage": {"prompt_tokens": 15, "completion_tokens": 1540, "cached_tokens": 0, "reasoning_tokens": 1190},
+      "contract": {"provider": "siliconflow-paios", "cost": 0.004324}
+    },
+    {
+      "id": "chat-flat-zero",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 0, "reasoning_tokens": 0, "prompt_tokens_details": null}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 0, "reasoning_tokens": 0},
+      "contract": {"provider": "opencode-paios", "cost": 0.000360}
+    },
+    {
+      "id": "chat-nested-zero-wins",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 0}, "cache_read_input_tokens": 12, "prompt_cache_hit_tokens": 13, "cached_tokens": 14, "reasoning_tokens": 15}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 0, "reasoning_tokens": 0},
+      "contract": {"provider": "opencode-paios", "cost": 0.000360}
+    },
+    {
+      "id": "chat-proxy-alias-order",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "cache_read_input_tokens": 12, "prompt_cache_hit_tokens": 13, "cached_tokens": 14, "cache_write_tokens": 5}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5},
+      "contract": {"provider": "chat-fixture", "cost": 0.000346}
+    },
+    {
+      "id": "chat-write-nested-zero-wins",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 12, "cache_write_tokens": 0, "cache_creation_input_tokens": 5}, "cache_creation_input_tokens": 6, "cache_write_tokens": 7}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 0},
+      "contract": {"provider": "chat-fixture", "cost": 0.000336}
+    },
+    {
+      "id": "responses-details",
+      "route": "responses",
+      "response": {"type": "response.completed", "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 12, "cache_write_tokens": 5, "cache_creation_tokens": 9}, "output_tokens_details": {"reasoning_tokens": 7}, "cached_tokens": 30, "cache_creation_input_tokens": 31, "reasoning_tokens": 32}}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5, "reasoning_tokens": 7},
+      "contract": {"provider": "responses-fixture", "cost": 0.000346}
+    },
+    {
+      "id": "responses-details-zero-wins",
+      "route": "responses",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0, "cache_creation_tokens": 5}, "output_tokens_details": {"reasoning_tokens": 0}, "cache_read_input_tokens": 29, "cached_tokens": 30, "cache_creation_input_tokens": 31, "reasoning_tokens": 32}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 0, "cache_creation_input_tokens": 0, "reasoning_tokens": 0},
+      "contract": {"provider": "responses-fixture", "cost": 0.000360}
+    },
+    {
+      "id": "responses-flat-fallback",
+      "route": "responses",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5, "reasoning_tokens": 7}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5, "reasoning_tokens": 7},
+      "contract": {"provider": "responses-fixture", "cost": 0.000346}
+    },
+    {
+      "id": "responses-legacy-read-alias",
+      "route": "responses",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 12, "cached_tokens": 14, "cache_creation_input_tokens": 5}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5},
+      "contract": {"provider": "responses-fixture", "cost": 0.000346}
+    },
+    {
+      "id": "responses-legacy-read-zero-wins",
+      "route": "responses",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cached_tokens": 14, "cache_creation_input_tokens": 0}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 0, "cache_creation_input_tokens": 0},
+      "contract": {"provider": "responses-fixture", "cost": 0.000360}
+    },
+    {
+      "id": "responses-legacy-write-alias",
+      "route": "responses",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 12, "cache_creation_tokens": 5}, "reasoning_tokens": 7}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 12, "cache_creation_input_tokens": 5, "reasoning_tokens": 7},
+      "contract": {"provider": "responses-fixture", "cost": 0.000346}
+    },
+    {
+      "id": "messages-aggregate",
+      "route": "messages",
+      "response": {"type": "message_start", "message": {"usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 12, "cache_creation_input_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 3}, "cached_tokens": 99}}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 12, "cache_creation_input_tokens": 5},
+      "contract": {"provider": "messages-fixture", "cost": 0.000380}
+    },
+    {
+      "id": "messages-aggregate-zero-wins",
+      "route": "messages",
+      "response": {"usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 3}, "cached_tokens": 99}},
+      "expected_usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+      "contract": {"provider": "messages-fixture", "cost": 0.000360}
+    },
+    {
+      "id": "cache-unreported",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20},
+      "contract": {"provider": "siliconflow-paios", "cost": null}
+    },
+    {
+      "id": "invalid-nested-falls-back-to-valid-zero",
+      "route": "chat/completions",
+      "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": true}, "completion_tokens_details": {"reasoning_tokens": -1}, "cached_tokens": 0, "reasoning_tokens": 0}},
+      "expected_usage": {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 0, "reasoning_tokens": 0}
+    }
+  ]
+}

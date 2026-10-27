@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// A snapshot of the existing phone owners, never a second conversation or action authority.
@@ -12,6 +13,7 @@ struct WatchRelaySources {
     let serverReachable: Bool
     var ride: CentralRideFeedback? = nil
     var rideMetrics: WatchYimiRideMetrics? = nil
+    var historyEpoch: String? = nil
 
     func state(revision: UInt64, scope: WatchBindingScope?, currentOwner: (String?, String?) -> Bool) -> WatchYimiState {
         let link: WatchYimiLink = scope == nil ? .watch_unregistered : serverReachable ? .ok : .server_unreachable
@@ -42,7 +44,8 @@ struct WatchRelaySources {
             payment_pending: WatchYimiPaymentPending(count: count,
                 summary: count == 0 ? "" : "有\(count)笔付款等你确认。" + AssistantNotificationCenter.watchPaymentReadOnlyBody),
             ride: current && (ride != nil || rideMetrics != nil) ? WatchYimiRide(
-                hr_zone: ride?.hr_zone, text: ride?.text, max_hr_bpm: ride?.max_hr_bpm, metrics: rideMetrics, feedback_at: ride?.at) : nil)
+                hr_zone: ride?.hr_zone, text: ride?.text, max_hr_bpm: ride?.max_hr_bpm, metrics: rideMetrics, feedback_at: ride?.at) : nil,
+            history_epoch: historyEpoch)
     }
 
     private static func timestamp(_ date: Date) -> String {
@@ -56,6 +59,7 @@ struct WatchRelaySources {
 @MainActor
 final class WatchRelay {
     private let sources: () -> WatchRelaySources
+    private let isReachable: () -> Bool
     private let currentOwner: (String?, String?) -> Bool
     private let publish: (Data?, Data?) throws -> Void
     private let answerQuestion: (String, String) async -> Bool
@@ -78,10 +82,18 @@ final class WatchRelay {
          cancelErrand: @escaping (String, String) async -> Bool,
          careSafe: @escaping (String) async -> Bool,
          refreshCredential: @escaping () async throws -> Void,
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard, isReachable: @escaping () -> Bool = { true }) {
         self.sources = sources; self.currentOwner = currentOwner; self.publish = publish
+        self.isReachable = isReachable
         self.answerQuestion = answerQuestion; self.cancelErrand = cancelErrand; self.careSafe = careSafe
         self.refreshCredential = refreshCredential; self.defaults = defaults
+    }
+
+    func observe(_ inputs: [AnyPublisher<Void, Never>], onFailure: @escaping (Error) -> Void) -> AnyCancellable {
+        Publishers.MergeMany(inputs)
+            .throttle(for: .milliseconds(250), scheduler: RunLoop.main, latest: true).sink { [weak self] in
+            do { try self?.synchronize() } catch { onFailure(error) }
+        }
     }
 
     func acceptsWorkoutSnapshot(_ scope: WatchBindingScope) -> Bool {
@@ -105,7 +117,7 @@ final class WatchRelay {
     }
 
     func synchronize(force: Bool = false) throws {
-        guard bindingResolved else { return }
+        guard bindingResolved, force || isReachable() else { return }
         let source = sources()
         let bindingOwner = bindingOwner, bindingPairing = bindingPairing
         let eligible: (String?, String?) -> Bool = { [currentOwner] principal, pairing in

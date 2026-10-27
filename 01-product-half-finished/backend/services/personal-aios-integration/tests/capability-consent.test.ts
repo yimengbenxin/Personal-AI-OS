@@ -175,6 +175,18 @@ test('restart recovers an approval and an interrupted execution becomes unknown 
   assert.equal(body.next.retry,'after_check');assert.equal(body.next.check_with,'message_status');
 });
 
+test('a started execution stays uncertain when its original authorization is gone during recovery',async t=>{
+  const f=await deferred(t);await f.service.decide(f.frozen);const card=await f.card();
+  await f.cards.decide(card.confirmation_id,{principal_id:'owner',device_id:'phone',device_type:'phone'},'approve');
+  await f.storage.publish('capability-call-executions',card.confirmation_id,Buffer.from('{"token":"interrupted"}'));
+  const restored=new CapabilityConfirmations(f.storage,f.cards,{...f.ports,
+    gates:()=>({...f.gates,effectConsent:async()=>{throw new ContractError('SCHEDULE_OWNER_REQUIRED',403);}}),
+    followUp:async()=>{throw new ContractError('SCHEDULE_DEVICE_REQUIRED',403);}});t.after(()=>restored.close());
+  await restored.recover();assert.equal(f.executed.length,0);
+  const result=f.receipts.at(-1)!;assert.equal(result.status.state,'unknown');
+  assert.equal(result.status.reason_code,'EXECUTION_RECOVERY_CHECK_REQUIRED');assert.equal(result.next.retry,'after_check');
+});
+
 test('a transport timeout never becomes failed or authorizes a blind retry',async t=>{
   const f=await deferred(t,{execute:async()=>{throw new Error('timeout secret');}});
   await f.service.decide(f.frozen);const card=await f.card();
@@ -199,6 +211,29 @@ test('delivery recovery replays the result to a new run without executing again'
   assert.equal(f.executed.length,1);
   const restored=new CapabilityConfirmations(f.storage,f.cards,f.ports);t.after(()=>restored.close());
   await restored.recover();assert.equal(f.executed.length,1);assert.equal(f.followups.size,1);
+  let repeated=0;
+  const again=new CapabilityConfirmations(f.storage,f.cards,{...f.ports,followUp:async()=>{repeated++;}});t.after(()=>again.close());
+  await again.recover();assert.equal(repeated,0);assert.equal(f.executed.length,1);
+  assert.deepEqual(JSON.parse(Buffer.from(await f.storage.read('capability-call-notifications',card.confirmation_id)).toString()),{state:'admitted'});
+});
+
+for(const reason of ['SCHEDULE_DEVICE_REQUIRED','SCHEDULE_OWNER_REQUIRED','SOURCE_T03_CONSENT_REQUIRED'])
+test(`notification authorization ${reason} is terminal per record and later recovery continues`,async t=>{
+  const f=await deferred(t);await f.service.decide(f.frozen);const first=await f.card();
+  await f.cards.decide(first.confirmation_id,{principal_id:'owner',device_id:'phone',device_type:'phone'},'deny');
+  const next={...f.frozen,idempotency_key:'second',consent:{...f.consent,context:{...f.context,tool_call_id:'second'}}};
+  await f.service.decide(next);const second=f.cards.list('owner').find(row=>row.confirmation_id!==first.confirmation_id)!;
+  await f.cards.decide(second.confirmation_id,{principal_id:'owner',device_id:'phone',device_type:'phone'},'deny');
+  let notifications=0;
+  const restored=new CapabilityConfirmations(f.storage,f.cards,{...f.ports,followUp:async(call,body,id)=>{
+    notifications++;
+    if(call.idempotency_key==='frozen-key')throw new ContractError(reason,403);
+    await f.ports.followUp(call,body,id);
+  }});t.after(()=>restored.close());
+  await restored.recover();await restored.recover();
+  assert.equal(notifications,2);assert.equal(f.followups.size,1);assert.equal(f.executed.length,0);
+  assert.deepEqual(JSON.parse(Buffer.from(await f.storage.read('capability-call-notifications',first.confirmation_id)).toString()),
+    {state:'undeliverable',reason});
 });
 
 test('a decide retry replays the frozen result after the originating admission changes state',async t=>{

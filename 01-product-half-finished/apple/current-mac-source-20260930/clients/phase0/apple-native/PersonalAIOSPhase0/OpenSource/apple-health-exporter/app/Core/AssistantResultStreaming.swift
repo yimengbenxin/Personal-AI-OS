@@ -634,6 +634,12 @@ enum CentralSubmissionDelivery: Equatable, Sendable {
 }
 
 struct AssistantCentralTextConsumer: Sendable {
+    mutating func discardProductHistory() {
+        let source = binding, owner = ownerPairingIdentity, current = generation, next = revision &+ 1
+        releaseQueuedVoice()
+        self = AssistantCentralTextConsumer()
+        binding = source; ownerPairingIdentity = owner; generation = current; revision = next
+    }
     private(set) var generation: UInt64 = 0
     private(set) var revision: UInt64 = 0
     private(set) var binding: CentralTransportBinding?

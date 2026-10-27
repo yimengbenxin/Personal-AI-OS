@@ -2049,7 +2049,11 @@ final class RealtimePublicControlAdapterTests: XCTestCase {
             XCTAssertEqual(request.absoluteURL, pairedOrigin + RealtimePublicControlOperation.bootstrap.path)
             XCTAssertEqual(request.authorization, "Bearer " + (try RealtimeDevicePairing.decode(saved)).token)
             XCTAssertEqual(RealtimeURLProtocolSpy.requestCount, 1)
-            XCTAssertEqual(store.data, saved, "Connecting never resets or re-pairs the installed owner")
+            var expectedPairing = try RealtimeDevicePairing.decode(saved)
+            expectedPairing.canonicalSuccesses = 2
+            XCTAssertEqual(try RealtimeDevicePairing.decode(XCTUnwrap(store.data)), expectedPairing,
+                "Authenticated bootstrap confirms the route without changing the installed pairing")
+            if successes == 2 { XCTAssertEqual(store.data, saved, "An already confirmed route is not rewritten") }
         }
     }
 

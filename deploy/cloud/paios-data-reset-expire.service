@@ -1,0 +1,11 @@
+[Unit]
+Description=Release-owned seven-day RQ-102 quarantine expiry
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=PAIOS_RELEASE_CONFIG=/etc/paios/release-production.json
+EnvironmentFile=/etc/paios/data-reset-retention.env
+ExecStart=/usr/bin/python3 ${PAIOS_RELEASE_ENTRYPOINT} --config ${PAIOS_RELEASE_CONFIG} data-reset expire
+SuccessExitStatus=75
+UMask=0077

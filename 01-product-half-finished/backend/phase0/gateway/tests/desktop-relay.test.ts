@@ -26,13 +26,15 @@ import {EVENT_SCHEMA,type RawEvent} from '../../../services/personal-aios-integr
 import type {RealtimeBootstrapConnectedInput} from '../src/realtime-public-control-runtime.ts';
 import type {WireAttachment} from '../src/personal-aios-terminal-wire.ts';
 import {createDesktopSimulator} from '../tools/mac-product-sim-client.ts';
+import {presentationTools,textPlanHash} from '../src/presentation-validate.ts';
+import {succeeded,to_mcp_result,accepted} from '../../../../../capability/sdk/ts/receipt.ts';
 const manifest=JSON.parse(readFileSync(new URL('../../../../../integrations/contracts/desktop-tools.v1.json',import.meta.url),'utf8'));
 const ok={content:[{type:'text' as const,text:'ok'}]},token='desktop-relay-internal-test-token',at='2026-10-14T00:00:00.000Z';
 const errorCode=(result:unknown)=>(result as {structuredContent?:{error?:{code?:string}}}).structuredContent?.error?.code;
 const settle=async()=>{for(let n=0;n<20;n++)await new Promise<void>(resolve=>setImmediate(resolve));};
 async function eventually(check:()=>boolean){for(let n=0;n<400;n++){if(check())return;await new Promise<void>(resolve=>setTimeout(resolve,5));}assert.fail('desktop condition did not arrive');}
 type MacHandler=(request:CallToolRequest,extra:{requestId:string|number;signal:AbortSignal},server:Server)=>Promise<CallToolResult>;
-async function fixture(t:test.TestContext,settings:{analyzeVision?:HermesClient['analyzeVision'];owner?:boolean;onManifest?:()=>void;runtime?:Pick<PersonalAIOSRuntime,'terminals'|'desktopReady'>;mismatch?:boolean;config?:unknown;capability?:boolean;handler?:MacHandler;prepareDownload?:Awaited<ReturnType<typeof createDesktopFiles>>['prepareDownload']}={}) {
+async function fixture(t:test.TestContext,settings:{time_zone?:string;analyzeVision?:HermesClient['analyzeVision'];owner?:boolean;onManifest?:()=>void;runtime?:Pick<PersonalAIOSRuntime,'terminals'|'desktopReady'|'time_zone'>;mismatch?:boolean;config?:unknown;capability?:boolean;handler?:MacHandler;prepareDownload?:Awaited<ReturnType<typeof createDesktopFiles>>['prepareDownload']}={}) {
   const root=await fs.mkdtemp(join(tmpdir(),'desktop-relay-')),errors:unknown[]=[],clients:Client[]=[],stops:(()=>void)[]=[],macServers:Server[]=[];
   const rows=['phone','mac','mac-two'].map(id=>({device_id:id,user_id:'owner',device_class:id==='phone'?'iphone':'mac',status:'active',paired_at:at,label:id,
     recipient_public_key:'pk',device_credential_ref:{},media:['data'],governance:{terminal_capabilities:id==='phone'?PHONE_CAPABILITIES:MAC_CAPABILITIES}}));
@@ -41,7 +43,7 @@ async function fixture(t:test.TestContext,settings:{analyzeVision?:HermesClient[
   const pool={query:async(sql:string,args:unknown[]=[])=>{if(sql.startsWith('WITH revoked AS')){const row=rows.find(row=>row.device_id===args[0]&&row.user_id===args[1]);if(row)row.status='revoked';return {rows:row?[row]:[]};}
     assert.match(sql,/FROM paired_devices WHERE status = 'active'/);return {rows:rows.filter(row=>row.status==='active')};}};
   const desktopInitialized=Promise.withResolvers<void>();
-  const config=desktopConfiguration(settings.config??{})!,runtime=settings.runtime??{terminals:()=>[source('mac'),source('mac-two')],desktopReady:async()=>{desktopInitialized.resolve();}},http={internal_token:token,max_request_bytes:1048576,request_timeout_ms:10000,resource_snapshot:()=>({turn:{fixture:'desktop-owner'}})};
+  const config=desktopConfiguration(settings.config??{})!,runtime=settings.runtime??{time_zone:settings.time_zone??'Asia/Taipei',terminals:()=>[source('mac'),source('mac-two')],desktopReady:async()=>{desktopInitialized.resolve();}},http={internal_token:token,max_request_bytes:1048576,request_timeout_ms:10000,resource_snapshot:()=>({turn:{fixture:'desktop-owner'}})};
   if(settings.owner)await fs.mkdir(join(root,'central'));
   const owner=settings.owner?await createPersistentPublicExecutionOwner({executionOwner:'hermes_text',central:{
     storage:new PosixStorage(join(root,'central')),native:new HermesClient('http://127.0.0.1:1',token,10000,1048576),
@@ -58,7 +60,7 @@ async function fixture(t:test.TestContext,settings:{analyzeVision?:HermesClient[
     clients.push(client);client.onerror=error=>errors.push(error);await client.connect(transport);return {client,transport};};
   t.after(async()=>{for(const client of clients)await client.close();for(const stop of stops)stop();for(const server of macServers)await server.close();await relay.close();if(owner)await owner.bridge.close!();else await listener.closeAndDrain();await fs.rm(root,{recursive:true,force:true});});
   const {client,transport}=await connect();let streamNo=0;
-  const attachMac=async(id='mac',handler:MacHandler=settings.handler??(async()=>ok),mismatch=settings.mismatch??false)=>{
+  const attachMac=async(id='mac',handler:MacHandler=settings.handler??(async()=>ok),mismatch=settings.mismatch??false,presentation=false)=>{
     const room=new Room() as any,messages:JSONRPCMessage[]=[],calls:{request:CallToolRequest;id:string|number;signal:AbortSignal}[]=[],frames:unknown[]=[];
     let current=true,listed=false,disconnects=0;room.disconnect=async()=>{disconnects++;};const ready=Promise.withResolvers<void>(),unwatch=relay.watch(()=>{if(listed)ready.resolve();});
     const receive=(message:JSONRPCMessage,identity=`credential-${id}`,declared?:number)=>{const bytes=Buffer.from(JSON.stringify(message)),streamId=`${id}-${++streamNo}`;
@@ -66,7 +68,7 @@ async function fixture(t:test.TestContext,settings:{analyzeVision?:HermesClient[
       if(declared===undefined){room.handleStreamChunk({streamId,content:bytes,chunkIndex:0n});room.handleStreamTrailer({streamId});}return streamId;};
     const macTransport:Transport={start:async()=>{},close:async()=>{},send:async message=>{if('id' in message&&'result' in message&&Array.isArray(message.result.tools))listed=true;receive(message);if('id' in message&&'result' in message&&Array.isArray(message.result.tools))settings.onManifest?.();}};
     const server=new Server({name:'fake-mac',version:'1'},{capabilities:{tools:{listChanged:false}}});macServers.push(server);
-    server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:mismatch?manifest.tools.map((tool:any,index:number)=>index===0?{...tool,description:'wrong version'}:tool):manifest.tools}));
+    server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:mismatch?manifest.tools.map((tool:any,index:number)=>index===0?{...tool,description:'wrong version'}:tool):presentation?[...manifest.tools,...presentationTools]:manifest.tools}));
     server.setRequestHandler(CallToolRequestSchema,async(request,extra)=>{calls.push({request,id:extra.requestId,signal:extra.signal});return handler(request,extra,server);});
     await server.connect(macTransport);
     // Fixture models departure dropping undelivered streams; this is not an SDK close guarantee.
@@ -570,7 +572,7 @@ test('A4.5 manifest-ready attach and reconnect admit one durable queued run thro
 
 test('A4.5 revalidates source after manifest handshake before notifying runtime',{timeout:10000},async t=>{
   let f!:Awaited<ReturnType<typeof fixture>>,ready=0;
-  f=await fixture(t,{runtime:{terminals:()=>[],desktopReady:async()=>{ready++;}},onManifest:()=>{f.rows.find(row=>row.device_id==='mac')!.status='revoked';}});
+  f=await fixture(t,{runtime:{time_zone:'UTC',terminals:()=>[],desktopReady:async()=>{ready++;}},onManifest:()=>{f.rows.find(row=>row.device_id==='mac')!.status='revoked';}});
   await f.attachMac();await settle();assert.equal(ready,0);assert.ok(f.errors.some(error=>(error as Error).message==='PAIRED_DEVICE_REVOKED'));
 });
 
@@ -618,4 +620,67 @@ test('window capture reports vision failure in Chinese without publishing provid
   assert.equal(result.isError,true);assert.equal(errorCode(result),'DESKTOP_VISION_FAILED');
   assert.deepEqual(result.content,[{type:'text',text:'暂时无法分析共享窗口，请稍后再试'}]);
   assert.equal(JSON.stringify(result).includes('secret'),false);
+});
+
+for(const [zone,clock] of [['America/Los_Angeles','17:30'],['UTC','00:30'],['Asia/Taipei','08:30']] as const)
+test(`desktop last-online text follows deployment ${zone}`,async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-10T00:30:00Z')});
+  const f=await fixture(t,{time_zone:zone}),mac=await f.attachMac();mac.stop();
+  const result=await f.client.callTool({name:'list_allowed_directories',arguments:{}});
+  assert.equal(errorCode(result),'DESKTOP_OFFLINE');
+  assert.ok(JSON.stringify(result.content).includes(`最后在线 ${clock}`),JSON.stringify(result));
+});
+
+function presentationFixture(device='mac-two') {
+  const demo=JSON.parse(readFileSync(new URL('../../../../../capability/packages/meeting-assistant/tests/demo.json',import.meta.url),'utf8'));
+  const target={...demo.plan.target,target_device_id:device};demo.plan.target=target;demo.plan.plan_sha256=textPlanHash(demo.plan);
+  const binding={principal_id:'owner',target_device_id:device},plan=demo.plan;
+  const apply={target,plan,idempotency_key:'demo-call',execution:{...binding,target_id:target.target_id,grant_id:'grant:demo',
+    confirmation_id:'confirmation:demo',scope_session_id:plan.scope_session_id,operation_kind:'document.text.update' as const,
+    valid_until:new Date(Date.now()+60000).toISOString(),plan_sha256:plan.plan_sha256}};
+  const handler:MacHandler=async request=>{
+    if(request.params.name==='presentation_snapshot')return to_mcp_result(succeeded({content:[{key:'slide_snapshot',provenance:'observed',
+      text:JSON.stringify({...demo.snapshot,target,image:null})}]})) as unknown as CallToolResult;
+    const state={version:1,operation_id:'op:demo',target,plan_sha256:plan.plan_sha256,revision:1,
+      items:[{id:plan.edits[0].work_item_id,label:'第 2 页',state:'accepted',effect_refs:[]}],checks:[],review_status:'awaiting_owner'};
+    return to_mcp_result(accepted({content:[{key:'edit_result',text:JSON.stringify(state),provenance:'observed'}]})) as unknown as CallToolResult;
+  };
+  return {target,binding,apply,handler};
+}
+
+test('presentation port routes all three actions to exact paired Mac and stays absent from public catalog',{timeout:10000},async t=>{
+  const f=await fixture(t),p=presentationFixture();
+  const active=await f.attachMac(),target=await f.attachMac('mac-two',p.handler,false,true);
+  for(const [name,args] of [['presentation_snapshot',{target:p.target,shared_window_id:null}],
+    ['presentation_apply_text',p.apply],['presentation_edit_status',{target:p.target,operation_id:'op:demo'}]] as const){
+    const result=await f.relay.invokePresentation(p.binding,name,args as any);
+    assert.equal((result.structuredContent as any).receipt,1);assert.notEqual((result.structuredContent as any).status.state,'unknown');
+  }
+  assert.equal(active.calls.length,0);assert.deepEqual(target.calls.map(row=>row.request.params.name),presentationTools.map((tool:any)=>tool.name));
+  const listed=await f.client.listTools();assert.equal(listed.tools.some(tool=>tool.name.startsWith('presentation_')),false);
+  await assert.rejects(f.client.callTool({name:'presentation_apply_text',arguments:p.apply}),/platform target binding/);
+  assert.equal(target.calls.length,3);assert.deepEqual(f.errors,[]);
+});
+
+test('bound presentation never falls back for offline, wrong principal, old version, paused or revoked Mac',{timeout:10000},async t=>{
+  const f=await fixture(t),p=presentationFixture(),active=await f.attachMac();
+  const snapshot=()=>f.relay.invokePresentation(p.binding,'presentation_snapshot',{target:p.target,shared_window_id:null});
+  assert.equal((await snapshot()).structuredContent!.status && ((await snapshot()).structuredContent as any).status.reason_code,'DESKTOP_OFFLINE');
+  const wrong=await f.relay.invokePresentation({...p.binding,principal_id:'intruder'},'presentation_snapshot',{target:p.target,shared_window_id:null});
+  assert.equal((wrong.structuredContent as any).status.reason_code,'DESKTOP_REVOKED');
+  const old=await f.attachMac('mac-two');assert.equal(((await snapshot()).structuredContent as any).status.reason_code,'DESKTOP_VERSION_MISMATCH');
+  assert.equal(old.calls.length,0);old.stop();
+  const target=await f.attachMac('mac-two',p.handler,false,true);
+  await f.relay.pause('owner','mac-two',true);assert.equal(((await snapshot()).structuredContent as any).status.reason_code,'DESKTOP_PAUSED');
+  await f.relay.pause('owner','mac-two',false);f.rows.find(row=>row.device_id==='mac-two')!.status='revoked';
+  assert.equal(((await snapshot()).structuredContent as any).status.reason_code,'DESKTOP_REVOKED');
+  assert.equal(active.calls.length,0);assert.equal(target.calls.length,0);assert.deepEqual(f.errors,[]);
+});
+
+test('invalid execution binding and cancelled requests deliver zero bytes to either Mac',{timeout:10000},async t=>{
+  const f=await fixture(t),p=presentationFixture(),active=await f.attachMac(),target=await f.attachMac('mac-two',p.handler,false,true);
+  await assert.rejects(f.relay.invokePresentation({...p.binding,target_device_id:'mac'},'presentation_apply_text',p.apply),/DEVICE_MISMATCH/);
+  const abort=new AbortController();abort.abort();const result=await f.relay.invokePresentation(p.binding,'presentation_apply_text',p.apply,abort.signal);
+  assert.equal((result.structuredContent as any).status.reason_code,'DESKTOP_CANCELLED');
+  assert.equal(active.calls.length,0);assert.equal(target.calls.length,0);assert.deepEqual(f.errors,[]);
 });

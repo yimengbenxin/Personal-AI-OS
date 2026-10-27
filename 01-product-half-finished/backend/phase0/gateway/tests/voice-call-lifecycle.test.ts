@@ -582,6 +582,32 @@ test('a completed standalone stop cuts the protected reply without waiting for c
   }
 });
 
+test('unrecognised complete stops interrupt but guests, echo and partial stops stay blocked',async t=>{
+  for(const verdict of ['unknown','guest','assistant'] as const){
+    for(const text of ['依米，别说了。','别说','停，是哪个汉字？']){
+      let classifications=0;
+      const h=turnHarness({ownerInitiated:true,identify:async()=>({verdict}),confirm:async()=>{assert.fail('a complete stop never waits for Face ID');},
+        classify:async()=>{classifications++;return {stop:true,guests:'allow',directed:false};}});
+      t.after(()=>h.manager.close());h.text(text);h.manager.replyStarted();h.manager.firstAudio();h.manager.playedCharacters(0);h.manager.start();
+      await h.speech(.5,1500);assert.equal(h.cuts(),verdict==='unknown'&&text==='依米，别说了。'?1:0,`${verdict}: ${text}`);
+      assert.equal(classifications,verdict==='unknown'&&text!=='依米，别说了。'?1:0,'bootstrap classification confers no semantic stop or guest authority');
+      assert.equal(h.manager.guestsAllowed(),false);assert.deepEqual(h.commits,[]);assert.deepEqual(h.errors,[]);
+    }
+  }
+});
+
+test('unrecognised stops require a completed utterance and cannot borrow authority across guest or echo evidence',async t=>{
+  for(const other of ['unknown','guest','assistant'] as const){
+    let verdict:'unknown'|'guest'|'assistant'='unknown';
+    const h=turnHarness({identify:async()=>({verdict})});t.after(()=>h.manager.close());
+    h.text('停');h.manager.replyStarted();h.manager.firstAudio();h.manager.playedCharacters(0);h.manager.start();
+    await h.speech(.5,1500,'keyword');assert.equal(h.cuts(),0,'a keyword checkpoint is not a complete stop');
+    verdict=other;await h.speech(.5,1500,'verify');
+    verdict='unknown';await h.speech(.5,1500);
+    assert.equal(h.cuts(),other==='unknown'?1:0,other);assert.deepEqual(h.commits,[]);
+  }
+});
+
 test('turn rules: guest keyword stays context-only and cannot interrupt or grant guest permission',async t=>{
   t.mock.timers.enable({apis:['Date','setTimeout'],now:1000000});let classifications=0;
   const h=turnHarness({classify:async()=>{classifications++;return {stop:true,guests:'allow'};}});t.after(()=>h.manager.close());

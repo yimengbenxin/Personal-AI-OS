@@ -6,6 +6,8 @@ import java.util.Locale
 /** A read-only optical band. It has no action, nonce, grant or payment command. */
 data class PaymentNotice(val paymentId: String, val state: String, val amountFen: Long?, val payee: String?,
     val line: String?, val voiceHint: Boolean, val reason: String?, val until: Long) {
+    fun capturesVoice(now: Long) = state == "awaiting_owner" && voiceHint && until != Long.MAX_VALUE && until > now
+    val terminal get() = state in setOf("paid", "cancelled", "expired", "superseded", "failed", "outcome_unknown")
     val title get() = when (state) {
         "verifying" -> "付款确认 · 核对中"
         "granted", "paying" -> "付款中"

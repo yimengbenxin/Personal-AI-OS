@@ -11,7 +11,13 @@ final class YimiConversation: ObservableObject {
     @Published private var timeline = YimiConversationTimeline()
     var items: [YimiItem] { timeline.items }
     var watchItems: [YimiItem] {
-        items.filter { $0.ownerIdentity == vm.ownerProjectionIdentity && $0.ownerIdentity != nil }
+        let owner = vm.ownerProjectionIdentity
+        return timeline.latestAssistantItem(ownerIdentity: owner).map { [$0] } ?? []
+    }
+    var watchChanges: AnyPublisher<Void, Never> {
+        $timeline.combineLatest(vm.$ownerProjectionIdentity)
+            .map { $0.latestAssistantItem(ownerIdentity: $1) }
+            .removeDuplicates().map { _ in () }.eraseToAnyPublisher()
     }
     var chatItems: [YimiItem] { timeline.chatItems }
     func callLines(_ callID: String?) -> [YimiItem] { timeline.callLines(callID) }
@@ -27,6 +33,7 @@ final class YimiConversation: ObservableObject {
 #if DEBUG
     private var activityFixturePackets: [Data] = []
     var hasActivityFixture: Bool { !activityFixturePackets.isEmpty }
+    private(set) var hasChatFixture = false
 #endif
     private var autoSendVoice = false
     /// The spoken request whose delivery the current voice turn reports.
@@ -40,25 +47,63 @@ final class YimiConversation: ObservableObject {
     /// False while the file exists but cannot be read (device locked since boot, I/O error): nothing is written
     /// over history that was never loaded; the load is retried when protected data becomes available.
     private var storeReadable = true
+    private var historyEpoch: String?
+    private var historyGeneration: UInt64 = 0
 
     init(vm: AssistantViewModel) {
         self.vm = vm
         let folder = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                    appropriateFor: nil, create: true)) ?? FileManager.default.temporaryDirectory
         store = YimiConversationStore(folder: folder, pairing: try? PairedRealtimeRequestBodyProvider().pairing())
+        historyEpoch = store?.historyEpoch()
 #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"),
+           let json = ProcessInfo.processInfo.environment["YIMI_CHAT_FIXTURES"] {
+            do {
+                struct Fixture: Decodable { let count: Int; let hugeHistory: Bool; let oldCompanion: Bool? }
+                let fixture = try JSONDecoder().decode(Fixture.self, from: Data(json.utf8))
+                let now = Date()
+                let longRows = [fixture.count - 100: 72_256, fixture.count - 50: 29_165]
+                let rows = (0..<fixture.count).map { index in
+                    let companion = fixture.oldCompanion == true && index == 0
+                    let text: String
+                    if companion { text = "10-18 随身回复" }
+                    else if fixture.hugeHistory, let length = longRows[index] {
+                        text = String(String(repeating: "历史中的完整长回复。", count: length / 10 + 1).prefix(length))
+                    } else { text = index == fixture.count - 1 ? "最近一条历史" : "历史 \(index)：这是一条完整保留的历史消息，用于验证聊天窗口。" }
+                    return YimiItem(id: "fixture-history-\(index)", kind: .her, text: text,
+                                    date: now.addingTimeInterval(companion ? -8 * 86_400 : Double(index - fixture.count) * 60),
+                                    via: companion ? "ambient" : nil)
+                }
+                timeline = YimiConversationTimeline(items: rows)
+                hasChatFixture = true
+            } catch { fatalError("Invalid chat UI fixture: \(error)") }
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"),
            let json = ProcessInfo.processInfo.environment["YIMI_ACTIVITY_FIXTURES"] {
             do {
                 let packets = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [[String: Any]]
                 activityFixturePackets = try packets.map { try JSONSerialization.data(withJSONObject: $0) }
-                let update = try vm.receiveActivityFixture(activityFixturePackets[0])
-                timeline.upsert(YimiItem(id: "me-activity-fixture", kind: .me, text: "打开云手机，顺便把这几件事一起办。",
-                    date: Date(), submissionProcessedID: update.processed_event_id))
+                if hasChatFixture {
+                    for packet in activityFixturePackets { _ = try vm.receiveActivityFixture(packet) }
+                } else {
+                    let update = try vm.receiveActivityFixture(activityFixturePackets[0])
+                    timeline.upsert(YimiItem(id: "me-activity-fixture", kind: .me, text: "打开云手机，顺便把这几件事一起办。",
+                        date: Date(), submissionProcessedID: update.processed_event_id))
+                }
             } catch { fatalError("Invalid activity UI fixture: \(error)") }
-        } else { loadStore() }
+        } else if !hasChatFixture { loadStore() }
 #else
         loadStore()
+#endif
+#if DEBUG
+        // A UI-test reply of this many characters, shaped like the N13 receipt-fact flood (one fact per line).
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"),
+           let count = ProcessInfo.processInfo.environment["YIMI_LONG_REPLY_CHARACTERS"].flatMap(Int.init) {
+            let line = "directories[0].path：/Users/fixture/Desktop，来源 desktop relay。\n"
+            timeline.upsert(YimiItem(id: "her-long-fixture", kind: .her,
+                text: String(repeating: line, count: count / line.count + 1), date: Date()))
+        }
 #endif
         vm.$centralPresentation.compactMap { $0 }.map { [unowned vm] in ($0, vm.ownerProjectionIdentity) }
             .receive(on: RunLoop.main)
@@ -66,10 +111,18 @@ final class YimiConversation: ObservableObject {
         // Synchronous, in projection order: a row is never settled by a snapshot older than its own send.
         vm.$centralSnapshot.compactMap { $0 }
             .sink { [weak self] in self?.settleTypedSends($0) }.store(in: &bag)
-        vm.$terminalState.removeDuplicates { $0.ownerIdentity == $1.ownerIdentity && $0.timeline.revision == $1.timeline.revision }
+        vm.$terminalState.removeDuplicates { $0.ownerIdentity == $1.ownerIdentity && $0.timeline.revision == $1.timeline.revision && $0.historyEpochConfirmed == $1.historyEpochConfirmed && $0.historyResetID == $1.historyResetID }
             .receive(on: RunLoop.main)
             .sink { [weak self] state in
                 guard let self else { return }
+                guard state.historyGeneration >= self.historyGeneration else { return }
+                if state.historyEpochConfirmed { self.historyGeneration = state.historyGeneration }
+                if state.historyEpochConfirmed, let epoch = state.historyEpoch, epoch != self.historyEpoch {
+                    self.historyEpoch = epoch
+                    self.timeline = YimiConversationTimeline()
+                    self.storeReadable = true
+                    self.scheduleSave()
+                }
                 if self.timeline.merge(state.timeline, ownerIdentity: state.ownerIdentity) { self.scheduleSave() }
             }.store(in: &bag)
         vm.$call.map { [unowned vm] in ($0, vm.ownerProjectionIdentity) }
@@ -104,6 +157,16 @@ final class YimiConversation: ObservableObject {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .unavailable }
 #if DEBUG
+        if hasChatFixture {
+            let id = UUID().uuidString
+            timeline.upsert(YimiItem(id: "me-" + id, kind: .me, text: text, date: Date()))
+            sendRevision &+= 1
+            Task { @MainActor [weak self] in
+                try await Task.sleep(for: .seconds(2))
+                self?.timeline.upsert(YimiItem(id: "her-" + id, kind: .her, text: "回复：" + text, date: Date()))
+            }
+            return .submitted
+        }
         if hasActivityFixture {
             do {
                 let update = try vm.receiveActivityFixture(activityFixturePackets.last!)
@@ -303,11 +366,11 @@ final class YimiConversation: ObservableObject {
         guard let store, storeReadable else { return }
         saveTask?.cancel()
         saveVersion &+= 1
-        let snapshot = items, version = saveVersion, writer = writer
+        let snapshot = items, version = saveVersion, writer = writer, epoch = historyEpoch, generation = historyGeneration
         saveTask = Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
-            _ = await writer.write(snapshot, version: version, to: store)
+            _ = await writer.write(snapshot, version: version, to: store, historyEpoch: epoch, historyGeneration: generation)
         }
     }
 
@@ -320,7 +383,7 @@ final class YimiConversation: ObservableObject {
         guard let store, storeReadable else { return false }
         saveTask?.cancel()
         saveVersion &+= 1
-        return await writer.write(items, version: saveVersion, to: store)
+        return await writer.write(items, version: saveVersion, to: store, historyEpoch: historyEpoch, historyGeneration: historyGeneration)
     }
 }
 
@@ -328,10 +391,12 @@ final class YimiConversation: ObservableObject {
 private actor YimiTimelineWriter {
     private var written: UInt64 = 0
 
-    func write(_ items: [YimiItem], version: UInt64, to store: YimiConversationStore) -> Bool {
+    func write(_ items: [YimiItem], version: UInt64, to store: YimiConversationStore, historyEpoch: String? = nil, historyGeneration: UInt64 = 0) -> Bool {
         guard version > written else { return true }
-        guard (try? store.write(items)) != nil
-        else { return false }
+        do {
+            if let historyEpoch { try store.retireHistory(for: historyEpoch, generation: historyGeneration) }
+            try store.write(items, historyEpoch: historyEpoch)
+        } catch { return false }
         written = version
         return true
     }

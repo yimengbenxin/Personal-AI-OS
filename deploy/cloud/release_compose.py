@@ -14,8 +14,14 @@ def command(release, project, profiles, executable=('docker', 'compose')):
     return result
 
 
-def stop_writers(host, run, *, stop_transport=True):
+def stop_writers(host, run, *, stop_transport=True, stop_watchdog=False):
+    watchdog = 'release-watchdog' + host.suffix
+    stopped_watchdog = stop_watchdog and watchdog in host.definition(host.release('current'))['services']
+    running_watchdog = stopped_watchdog and watchdog in run(['ps','--status','running','--services'],capture_output=True,text=True).stdout.split()
+    if stopped_watchdog:
+        run(['stop', watchdog], capture_output=True)
     if stop_transport and 'edge-forward' in host.config['profiles']:
         run(['stop', 'frpc'], capture_output=True)
     suffix = host.suffix
     run(['stop', '-t', '120', *[name + suffix for name in ('gateway', 'hermes', 'workshop', 'workshop-link')]], capture_output=True)
+    return {'watchdog_stopped': stopped_watchdog,'watchdog_was_running':running_watchdog}

@@ -4,6 +4,7 @@ import {emitRuntimeEvent} from './self-events.ts';
 import type {VoiceConfirmation} from './voiceprint/confirmation.ts';
 import { HermesClient, NATIVE_TERMINAL_STATUSES, NativeNotAcceptedError, type NativeClient, type NativeRun, type NativeRunEvent } from './hermes-client.ts';
 import {errandExecutionFacts,errandReportRequired} from './output.ts';
+import {AdmissionHooks,type PublicCall} from './admission-hooks.ts';
 
 export type AdmissionState = 'pending' | 'submitting' | 'accepted' | 'running' | 'reconcile_required' |
   'retryable' | 'completed' | 'cancelled' | 'expired' | 'failed';
@@ -88,19 +89,41 @@ export class RunAdmission {
   }
   private arrival = 0;
   private closed = false;
+  private nativeReady = true;
+  private nativeGate:Promise<void> = Promise.resolve();
+  private releaseNative:()=>void = ()=>{};
+  /** The listening assembly supplies Hermes readiness on its existing maintenance lifecycle. */
+  setNativeReady(ready:boolean):void {
+    if(this.nativeReady===ready)return;
+    this.nativeReady=ready;
+    if(ready)this.releaseNative();
+    else this.nativeGate=new Promise<void>(resolve=>{this.releaseNative=resolve;});
+  }
   private closing: Promise<void> | undefined;
   private readonly owned = new Set<Promise<unknown>>();
   private readonly createAbort = new AbortController();
   private readonly pollWakeups = new Set<() => void>();
   private readonly eventStreams=new Map<string,{abort:AbortController;work:Promise<void>}>();
-  drainEvents(run:string):Promise<void> {return (this.eventStreams.get(run)?.work??Promise.resolve()).then(()=>{this.eventStreams.delete(run);});}
+  private readonly eventPublications=new Map<string,Promise<void>>();
+  async drainEvents(run:string):Promise<void> {
+    await this.eventStreams.get(run)?.work;this.eventStreams.delete(run);await this.eventPublications.get(run);
+  }
   private eventOwner:((entry:AdmissionEntry,event:NativeRunEvent)=>void|Promise<void>)|undefined;
   private eventError:((error:unknown)=>void)|undefined;
   private eventEnd:((entry:AdmissionEntry)=>void)|undefined;
   setEventOwner(owner:(entry:AdmissionEntry,event:NativeRunEvent)=>void|Promise<void>,onError:(error:unknown)=>void,onEnd:(entry:AdmissionEntry)=>void):void {
     this.eventOwner=owner;this.eventError=onError;this.eventEnd=onEnd;
   }
+  private emitEvent(entry:AdmissionEntry,event?:NativeRunEvent):void {
+    const run=entry.record.run_id!,snapshot=structuredClone(entry),fact=event?structuredClone(event):undefined;
+    // Preserve observer order without making presentation a dependency of native progress or terminal delivery.
+    const work=(this.eventPublications.get(run)??Promise.resolve()).then(()=>fact?
+      this.eventOwner?.(snapshot,fact):this.eventEnd?.(snapshot)).catch(error=>this.eventError?.(error));
+    this.eventPublications.set(run,work);this.owned.add(work);
+    void work.then(()=>{this.owned.delete(work);if(this.eventPublications.get(run)===work)this.eventPublications.delete(run);});
+  }
   private ready: Promise<void> | undefined;
+  private readonly restored = new Set<string>();
   private runOwner: ((entry: AdmissionEntry) => Promise<void>) | undefined;
   private catalogGrants:(d:ProcessedEvent)=>string[]=()=>[];
   setCatalogGrants(provider:(d:ProcessedEvent)=>string[]):void{this.catalogGrants=provider;}
@@ -108,8 +131,11 @@ export class RunAdmission {
     check(!this.runOwner, 'ADMISSION_RUN_OWNER_CONFLICT'); this.runOwner=owner;
   }
   private terminalOwner: ((entry: AdmissionEntry, native: NativeRun | undefined) => Promise<void>) | undefined;
-  setTerminalOwner(owner: (entry: AdmissionEntry, native: NativeRun | undefined) => Promise<void>): void {
+  private terminalRetryReady: ((entry:AdmissionEntry,error:unknown)=>Promise<void>|undefined) | undefined;
+  setTerminalOwner(owner: (entry: AdmissionEntry, native: NativeRun | undefined) => Promise<void>,
+    retryReady?: (entry:AdmissionEntry,error:unknown)=>Promise<void>|undefined): void {
     check(!this.terminalOwner, 'ADMISSION_TERMINAL_OWNER_CONFLICT'); this.terminalOwner=owner;
+    this.terminalRetryReady=retryReady;
   }
   private stateOwner: ((entry:AdmissionEntry,native?:NativeRun)=>Promise<void>)|undefined;
   private workOwner:((principal:string)=>void)|undefined;
@@ -125,7 +151,7 @@ export class RunAdmission {
   private emitState(entry:AdmissionEntry,native?:NativeRun):Promise<void> {
     // Existing owned/drain boundary joins publication; native progress never awaits transport.
     const snapshot=structuredClone(entry),observation=native?structuredClone(native):undefined;
-    const work=Promise.resolve().then(()=>{this.workOwner?.(entry.d.principal_id);return this.stateOwner?.(snapshot,observation);}).catch(()=>undefined);
+    const work=Promise.resolve().then(()=>{this.workOwner?.(entry.d.principal_id);return this.stateOwner?.(snapshot,observation);}).catch(error=>this.eventError?.(error));
     this.owned.add(work);void work.then(()=>this.owned.delete(work));
     return work;
   }
@@ -143,9 +169,24 @@ export class RunAdmission {
   private readonly storage: StoragePort;
   private readonly native: NativeClient;
   private readonly policy: AdmissionPolicy;
+  private readonly hooks:AdmissionHooks;
+  private async hookEntry(key:string):Promise<AdmissionEntry|undefined>{
+    const active=this.entries.get(key);if(active)return structuredClone(active);
+    const record=await this.loadRecord(key),input=await this.read<PendingInput>('admission-inputs',key);
+    return record&&input?{record,d:input.d,skill:input.skill,bytes:Buffer.byteLength(canonical(input))}:undefined;
+  }
+  async observeHook(body:unknown):Promise<Admission|undefined>{
+    await this.initialize();const key=await this.hooks.event(body);
+    return key?structuredClone(this.entries.get(key)?.record??await this.loadRecord(key)):undefined;
+  }
+  async hookBinding(call:PublicCall,execution=false):Promise<AdmissionEntry>{
+    await this.initialize();const entry=await this.hookEntry(await this.hooks.resolve(call,execution));
+    check(entry?.record.run_id,'CAPABILITY_RUN_BINDING_REQUIRED',403);return entry;
+  }
   constructor(storage: StoragePort, native: NativeClient, policy: AdmissionPolicy) {
     check(native instanceof HermesClient, 'NATIVE_CLIENT_AUTHORITY_REQUIRED');
     this.storage = storage; this.native = native; this.policy = Object.freeze({...policy, ...(policy.native_retry ? {native_retry: Object.freeze({...policy.native_retry})} : {})});
+    this.hooks=new AdmissionHooks(storage,native.hookProfile);
     for (const [key, value] of Object.entries(policy)) {
       if (key !== 'policy_version' && key !== 'native_retry') check(Number.isSafeInteger(value) && (value as number) > 0, 'INVALID_ADMISSION_BUDGET');
     }
@@ -232,7 +273,6 @@ export class RunAdmission {
     check(d.principal_id === record.principal_id && d.processed_event_id === record.processed_event_id &&
       record.payload_sha256 === this.hash(d, record.session_id, skill), 'ADMISSION_RECORD_INTEGRITY_FAILURE', 503);
     const entry={record, d, skill, voice_confirmation:input.voice_confirmation, bytes: Buffer.byteLength(canonical(input))};
-    if(record.run_id)await this.runOwner?.(entry);
     return entry;
   }
   private attemptKey(key: string, count: number): string {
@@ -265,42 +305,62 @@ export class RunAdmission {
       last = {...attempt, count, first_at_ms: last?.first_at_ms ?? attempt.at_ms, uncertain, ...(rejection ? {rejection} : {}), ...(unsent ? {unsent} : {})};
     }
   }
-  private async pause(ms: number): Promise<void> {
+  private async pause(until: number|Promise<void>): Promise<void> {
     if (this.closed) return;
     await new Promise<void>(resolve => {
       const wake = () => {clearTimeout(timer); this.pollWakeups.delete(wake); resolve();};
-      const timer = setTimeout(wake, Math.min(ms, 2147483647)); this.pollWakeups.add(wake);
+      let timer:ReturnType<typeof setTimeout>|undefined;this.pollWakeups.add(wake);
+      if(typeof until==='number')timer=setTimeout(wake,Math.min(until,2147483647));
+      else void until.then(wake);
     });
   }
   // Called by the owning server listen lifecycle. Inspection remains passive.
-  recover(): Promise<void> {return this.own(() => this.initialize());}
+  recover(): Promise<void> {return this.own(async()=>{try{await this.initialize();}finally{await this.resume();}});}
   private initialize(): Promise<void> {
-    this.ready ??= this.restore();
+    this.ready ??= this.restore().catch(error=>{this.ready=undefined;throw error;});
     return this.ready;
   }
   private async restore(): Promise<void> {
+    const errors:unknown[]=[];
     // Scan every durable identity before admitting another D; never truncate unresolved barriers.
     for (const key of await this.storage.list('admissions')) {
+      if(this.closed)return;
+      if(this.restored.has(key))continue;
+      try {
       const record = await this.loadRecord(key);
       check(record, 'ADMISSION_RECOVERY_DATA_MISSING', 503);
       this.arrival = Math.max(this.arrival, record.arrival_seq, record.run_order ?? 0);
       if (terminal.has(record.state)) {
         if (await this.read<PendingInput>('admission-inputs',key)) {
           const ended=await this.read<Terminal>('run-terminals',key);
-          await this.finalize(key,await this.loadEntry(key,record),ended?.native);
+          const entry=await this.loadEntry(key,record);
+          await this.nativeGate;
+          if(this.closed)return;
+          if(record.run_id)await this.runOwner?.(entry);
+          await this.finalize(key,entry,ended?.native);
         }
+        this.restored.add(key);
         continue;
       }
       const entry = await this.loadEntry(key, record);
       this.reserve(entry.bytes, 503);
-      this.entries.set(key, entry);
       if (!record.conversation_released&&(['reconcile_required', 'retryable'].includes(entry.record.state) || entry.record.run_id)) {
         const owner = this.sessions.get(executionLane(entry));
         check(owner === undefined || owner === key, 'ADMISSION_MULTIPLE_SESSION_BARRIERS', 503);
         this.sessions.set(executionLane(entry), key);
       }
+      this.entries.set(key, entry);this.restored.add(key);
+      }catch(error){errors.push(error);}
     }
+    await this.resume();
+    // Ingress still fails closed until all durable barriers are known; healthy records can recover independently.
+    if(errors.length===1)throw errors[0];
+    if(errors.length>1)throw new AggregateError(errors,'ADMISSION_RECOVERY_INCOMPLETE');
+    this.restored.clear();
+  }
+  private async resume():Promise<void> {
     for (const [key, entry] of this.entries) {
+      if(this.executing.has(key))continue;
       // Bound D re-issue native stop from their poll loop; durable-unsent D finish cancelled locally.
       if (entry.record.run_id) this.start(key, entry);
       // A failed terminal write keeps it start-guarded; a repeated cancel or restart finishes it.
@@ -403,7 +463,7 @@ export class RunAdmission {
       ['pending', 'retryable'].includes(entry.record.state);
   }
   private start(key: string, entry: AdmissionEntry): void {
-    if (this.closed || !this.executing.has(key) && this.unsentCancel(entry)) return;
+    if (this.closed || !this.nativeReady || !this.executing.has(key) && this.unsentCancel(entry)) return;
     if (this.executing.has(key)) {
       if (['retryable', 'reconcile_required'].includes(entry.record.state)) this.reentries.add(key);
       return;
@@ -491,6 +551,7 @@ export class RunAdmission {
           ...(handoff ? {model_options: {reasoning: {enabled: handoff.thinking === 'enabled'}}} : {}),
           ...(careDecision(d) ? {care_decision: true as const, model_options: {reasoning: {enabled: false as const}}} : {})};
         const count = (progress?.count ?? 0) + 1;
+        await this.hooks.reserve(key,body.session_id,body.input);
         const attemptKey = this.attemptKey(key, count);
         await this.publish('run-attempts', attemptKey, {at_ms: Date.now(), idempotency_key: record.idempotency_key,
           ...(count > 1 ? {prior_uncertain: progress!.uncertain} : {})});
@@ -546,6 +607,7 @@ export class RunAdmission {
       const bound = existing ?? await this.publish('run-bindings', key,
         {run_id: native.run_id, session_id: record.session_id, run_order: ++this.arrival});
       if (bound.run_order !== undefined) record.run_order = bound.run_order;
+      await this.hooks.accepted(key,native.session_id);
       record.run_id = bound.run_id; record.state = 'accepted';
       await this.runOwner?.(entry);
       this.emitState(entry);
@@ -564,7 +626,7 @@ export class RunAdmission {
         if(this.sessions.get(executionLane(entry))===key)this.sessions.delete(executionLane(entry));this.pump(record.session_id);
       }
       const next=canonical([native.approval??null,native.approval_results??[],native.turn_exit_reason==='delegation_waiting'?native.output??null:null]);
-      if(next!==approvalState||released){await this.emitState(entry,native);approvalState=next;}
+      if(next!==approvalState||released){this.emitState(entry,native);approvalState=next;}
       if(NATIVE_TERMINAL_STATUSES.has(native.status)){
         await this.finish(key,entry,['interrupted','canceled'].includes(native.status)?'cancelled':native.status as Terminal['status'],native);
       }else if(record.state!=='running'){record.state='running';this.emitState(entry);}
@@ -575,24 +637,24 @@ export class RunAdmission {
       const abort=new AbortController();
       const stream=this.native.events(record.run_id!,async event=>{
         seq=event.seq!;
-        await this.eventOwner?.(entry,event);
         if(event.run)await applyRun(event.run,true);
+        this.emitEvent(entry,event);
       },abort.signal,seq,{conversation_session_id:record.session_id});
       this.eventStreams.set(record.run_id!,{abort,work:stream});
       try {await stream;} catch(error){if(!this.closed&&!abort.signal.aborted)this.eventError?.(error);}
       this.eventStreams.delete(record.run_id!);
       if(this.closed||terminal.has(record.state))break;
       // EOF is a transport observation. Only the same native authority can settle the run.
-      record.state='reconcile_required';await this.emitState(entry);
+      record.state='reconcile_required';this.emitState(entry);
       try {
         const recovered=await this.native.status(record.run_id!,{conversation_session_id:record.session_id});
-        if(recovered.activity_events)await this.eventOwner?.(entry,{event:'run.snapshot',run_id:record.run_id!,timestamp:Date.now()/1000,activity_events:recovered.activity_events});
         await applyRun(recovered);
+        if(recovered.activity_events)this.emitEvent(entry,{event:'run.snapshot',run_id:record.run_id!,timestamp:Date.now()/1000,run:recovered,activity_events:recovered.activity_events});
       }
       catch(error){if(!this.closed)this.eventError?.(error);}
       if(!this.closed&&!terminal.has(record.state))await this.pause(Math.max(NATIVE_STREAM_RECONNECT_MIN_MS,this.policy.poll_interval_ms));
     }
-    if(terminal.has(record.state))this.eventEnd?.(entry);
+    if(terminal.has(record.state))this.emitEvent(entry);
   }
 
   private async finish(key: string, entry: AdmissionEntry, status: Terminal['status'], native?:NativeRun): Promise<void> {
@@ -611,15 +673,19 @@ export class RunAdmission {
     const first=Promise.withResolvers<void>();
     const output=(async()=>{
       for(let attempt=0;;attempt++){
+        let ready:Promise<void>|undefined;
         try {
+          await this.nativeGate;
+          if(this.closed)return;
           await this.terminalOwner?.(structuredClone(entry),native?structuredClone(native):undefined);
           await this.storage.removePending(key);
           return;
         } catch(error) {
-          if(this.closed||!(error instanceof ContractError)||error.status!==503)return;
+          if(this.closed)return;
+          ready=this.terminalRetryReady?.(entry,error);
         } finally {first.resolve();}
         // Delivery recovery keeps the same retained input, but releases native execution after the first attempt.
-        await this.pause(Math.min(30000,Math.max(NATIVE_STREAM_RECONNECT_MIN_MS,this.policy.poll_interval_ms)*2**Math.min(attempt,5)));
+        await this.pause(ready??Math.min(30000,Math.max(NATIVE_STREAM_RECONNECT_MIN_MS,this.policy.poll_interval_ms)*2**Math.min(attempt,5)));
         if(this.closed)return;
       }
     })();
@@ -773,7 +839,7 @@ export class RunAdmission {
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
-    this.closed = true; this.createAbort.abort();
+    this.closed = true; this.releaseNative(); this.createAbort.abort();
     for(const stream of this.eventStreams.values())stream.abort.abort();
     for (const wake of this.pollWakeups) wake();
     // Already owned requests/storage finish; accepted native runs continue remotely.

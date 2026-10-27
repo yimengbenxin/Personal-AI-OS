@@ -6,6 +6,8 @@ export interface TtsAudio {
   channels: number; duration_ms: number; sha256: string;
 }
 export interface TtsPort {
+  /** Same configured provider/model, using its existing live-call voice selection. No fallback voice. */
+  forCall?():TtsPort;
   synthesize(text: string, requestId: string, signal?: AbortSignal): Promise<TtsAudio>;
   stream?(text: string, requestId: string, signal?: AbortSignal): AsyncIterable<TtsAudio>;
 }
@@ -107,16 +109,21 @@ export class DashScopeTts implements TtsPort {
   readonly sampleRate: number;
   /** Optional natural-language tone instruction (config); the provider applies it to delivery, never to the text. */
   readonly instruction: string | undefined;
+  private readonly callTts:()=>TtsPort;private readonly callPorts=new Map<string,DashScopeTts>();
   private readonly createSocket: () => QwenTtsSocket;
   private socket: QwenTtsSocket | undefined;
   private tail: Promise<void> = Promise.resolve();
   private closed = false;
   private stop: ((error: unknown) => void) | undefined;
   constructor(configuration: QwenVoiceConfiguration, synthesis: {model: string; voice: string; sample_rate: number; endpoint?: string; instruction?: string}) {
+    this.callTts=()=>{const voice=configuration.call?.voice??configuration.voice;check(voice,'TTS_CALL_VOICE_UNAVAILABLE');
+      if(voice===this.voice)return this;let port=this.callPorts.get(voice);if(!port){port=new DashScopeTts(configuration,{...synthesis,voice});this.callPorts.set(voice,port);}return port;};
     this.model = synthesis.model; this.voice = synthesis.voice; this.sampleRate = synthesis.sample_rate; this.instruction = synthesis.instruction;
     this.createSocket = createQwenTtsTransport(configuration, synthesis.endpoint);
   }
+  forCall():TtsPort {return this.callTts();}
   close(): void {
+    for(const port of this.callPorts.values())port.close();this.callPorts.clear();
     this.closed = true;
     this.stop?.(new Error('TTS_CLOSED'));
     this.socket?.terminate(); this.socket = undefined;

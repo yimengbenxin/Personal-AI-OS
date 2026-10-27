@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "schema": "paios.presentation-tools.v1",
+  "tools": [
+    {
+      "name": "presentation_snapshot",
+      "description": "读取准确本地 Keynote 文档及共享放映窗口，不切页、不激活应用。",
+      "inputSchema": {
+        "type": "object",
+        "$ref": "urn:paios:presentation:1#/$defs/snapshot_input"
+      },
+      "x-paios": {
+        "class": "read",
+        "timeout_ms": 30000
+      }
+    },
+    {
+      "name": "presentation_apply_text",
+      "description": "仅执行平台已确认的封闭文字计划，保存后回读。",
+      "inputSchema": {
+        "type": "object",
+        "$ref": "urn:paios:presentation:1#/$defs/apply_input"
+      },
+      "x-paios": {
+        "class": "write",
+        "timeout_ms": 120000
+      }
+    },
+    {
+      "name": "presentation_edit_status",
+      "description": "只读查询同一 Mac 审计及保存回读结果，不重复写入。",
+      "inputSchema": {
+        "type": "object",
+        "$ref": "urn:paios:presentation:1#/$defs/status_input"
+      },
+      "x-paios": {
+        "class": "read",
+        "timeout_ms": 30000
+      }
+    }
+  ]
+}

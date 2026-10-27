@@ -45,7 +45,16 @@
           "check_with": "message_status",
           "context_inject": [
             "idempotency_key"
-          ]
+          ],
+          "send_consent": {
+            "recipient": "channel",
+            "kinds": {
+              "text": "message.text",
+              "file": "message.file",
+              "react": "message.reaction",
+              "unreact": "message.reaction_remove"
+            }
+          }
         },
         "message_status": {
           "effect": "observe",

@@ -1,3 +1,4 @@
+import {DEFAULT_TIME_ZONE} from '../deployment-time.ts';
 import {randomUUID} from 'node:crypto';
 import {canonical,check,ContractError,id,inactiveSource,principalAttribution,utc,sha256,type ProcessedEvent} from '../contracts.ts';
 import {hasTerminalCapability,type RegisteredDevice} from '../source-authority.ts';
@@ -21,7 +22,7 @@ const fen=(v:unknown)=>Number.isSafeInteger(v)&&Number(v)>0&&Number(v)<=10000000
 const screen=(v:unknown)=>typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);
 const unavailable=(u:UtteranceRef):VoiceVerdict=>({verdict:'unavailable',reason:'engine_unavailable',initiating:{score:null,speech_ms:0},channel:u.device_type==='glasses'?'glasses':'phone_app',speaker_model:'unavailable'});
 type Request=Pick<PaymentIntent,'principal_id'|'run_id'|'tool_call_id'|'session_id'|'processed_event_id'|'initiating'|'initiating_text'|'purpose'|'app'|'budget_fen'>;
-type OpenOptions={config?:PaymentConfig;now?:()=>number;verifier?:PaymentVoiceVerifier;terminals?:TerminalCards;owner_override_active?:()=>Promise<boolean>};
+type OpenOptions={time_zone?:string;config?:PaymentConfig;now?:()=>number;verifier?:PaymentVoiceVerifier;terminals?:TerminalCards;owner_override_active?:()=>Promise<boolean>};
 type OwnerEnrollment=Awaited<ReturnType<PaymentPorts['owner']>>;
 export interface PaymentInputBinding {connection:object|undefined;wear:TerminalWearSession|undefined}
 type PaymentWatcher={source:RegisteredDevice;deliver:(p:PaymentProjection)=>Promise<void>;session_id?:string|undefined;
@@ -30,6 +31,7 @@ type PaymentWatcher={source:RegisteredDevice;deliver:(p:PaymentProjection)=>Prom
 /** One payment authority: SQLite owns state, decide.ts alone authorizes, and one timer owns every deadline. */
 export class PaymentAuthority {
   readonly store:PaymentStore;readonly config:PaymentConfig;readonly keys:PaymentKeys;leases:PaymentLeases;
+  private readonly time_zone:string;
   private terminals:TerminalCards;private readonly now:()=>number;private verifier:PaymentVoiceVerifier|undefined;
   private readonly ownerOverrideActive:()=>Promise<boolean>;
   private ports:PaymentPorts|undefined;private timer:ReturnType<typeof setTimeout>|undefined;private closed=false;
@@ -39,6 +41,7 @@ export class PaymentAuthority {
   private readonly utterances=new Map<string,number>();private readonly verifying=new Map<string,AbortController>();
   private flushing:Promise<void>|undefined;private ticking:Promise<void>|undefined;private checking=false;private readonly changes=new Set<string>();
   private constructor(store:PaymentStore,options:OpenOptions){
+    this.time_zone=options.time_zone??DEFAULT_TIME_ZONE;
     this.store=store;this.config=parsePaymentConfig(options.config);this.now=options.now??Date.now;this.verifier=options.verifier;
     this.ownerOverrideActive=options.owner_override_active??(async()=>false);
     this.terminals=options.terminals??new TerminalCards(this.now);
@@ -185,8 +188,9 @@ export class PaymentAuthority {
   private verifyInitiatingIntent(intent:PaymentIntent):void{
     if(intent.initiating.kind!=='voice'||!intent.initiating.utterance)return;
     const utterance=intent.initiating.utterance;
+    const policyVersion=this.store.policy(intent.principal_id).version;
     void (this.verifier?this.verifier.verifyInitiating(intent.principal_id,utterance):Promise.resolve(unavailable(utterance))).then(verdict=>{
-      if(this.closed)return;const latest=this.store.getIntent(intent.intent_id)!;
+      if(this.closed||this.store.policy(intent.principal_id).version!==policyVersion)return;const latest=this.store.getIntent(intent.intent_id)!;
       this.store.tx(()=>this.store.updateIntent(intent.intent_id,{initiating:{...latest.initiating,verdict}}));
     }).catch(e=>console.error('PAYMENT_INITIATING_VERIFIER_FAILED',safeCode(e)));
   }
@@ -236,7 +240,7 @@ export class PaymentAuthority {
   }
   private saveReplay(key:string,body:unknown,result:Record<string,unknown>):void{this.store.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(key,canonical({body:canonical(body),result}));}
   private autoFacts(p:Payment,lease_now:boolean,stage:'initial'|'grant',devices:RegisteredDevice[],enrolled:boolean,now=this.now()){
-    const i=this.store.getIntent(p.intent_id)!,day=localDayBounds(now,this.config.day_timezone);
+    const i=this.store.getIntent(p.intent_id)!,day=localDayBounds(now,this.time_zone);
     return {...this.facts(p,i,lease_now,devices),now,stage,enrolled,auto_used_today:this.store.autoUsed(p.principal_id,day.start,day.end),recent_same_payee:this.store.recentSamePayee(p.principal_id,p.payee_key,p.payment_id,now-this.config.auto.same_payee_window_s*1000)};
   }
   private scheduleAuto(p:Payment,lease_now:boolean,devices:RegisteredDevice[],enrolled:boolean):Payment{
@@ -273,7 +277,7 @@ export class PaymentAuthority {
     // An auto grant cannot start a debit on a different budget day. Uncertain results retain the issue day.
     const expiresAt=issuedAt+this.config.grant_ttl_s*1000;
     const grant:PaymentGrant={grant_id:`grant-${randomUUID()}`,payment_id:p.payment_id,amount_fen:p.amount_fen,payee_key:p.payee_key,method:d.method,device_id:d.device_id,
-      issued_at_ms:issuedAt,expires_at_ms:d.method==='auto'?Math.min(expiresAt,localDayBounds(issuedAt,this.config.day_timezone).end):expiresAt,taps:0,first_tap_at_ms:null};
+      issued_at_ms:issuedAt,expires_at_ms:d.method==='auto'?Math.min(expiresAt,localDayBounds(issuedAt,this.time_zone).end):expiresAt,taps:0,first_tap_at_ms:null};
     this.store.insertGrant(grant);const next=this.update(p,{state:'granted',method:d.method,decided_by_device:d.device_id,decision:'pay',auto_at_ms:null,reason:null});
     this.audit(p.principal_id,'grant_issued',{grant_id:grant.grant_id,method:grant.method,device_id:d.device_id,amount_fen:grant.amount_fen,expires_at_ms:grant.expires_at_ms},next);this.enqueueContext(next);return next;
   }
@@ -458,6 +462,27 @@ export class PaymentAuthority {
     this.audit(principal,'cascade',{cause,turned_off});
   }
   async cascade(principal:string,cause:string):Promise<void>{this.store.tx(()=>this.cascadeTx(principal,cause));await this.after(principal);}
+  /** Retire model-dependent evidence for every persisted owner, including disconnected devices. Card decisions survive. */
+  async cascadeVoice(cause:string):Promise<void>{
+    const principals = this.store.db.prepare('SELECT principal_id FROM policy UNION SELECT principal_id FROM intents WHERE state<>\'closed\'')
+      .all() as {principal_id:string}[];
+    this.store.tx(()=>{
+      for(const {principal_id} of principals){
+        const policy=this.store.policy(principal_id);
+        if(!policy.voice_enabled&&!policy.auto_enabled)this.store.setPolicy({...policy,version:policy.version+1,updated_at_ms:this.now()});
+        for(const row of this.store.db.prepare("SELECT intent_id FROM intents WHERE principal_id=? AND state<>'closed'").all(principal_id) as {intent_id:string}[]){
+          const intent=this.store.getIntent(row.intent_id)!;
+          if(intent.initiating.verdict){const {verdict:_retired,...initiating}=intent.initiating;this.store.updateIntent(intent.intent_id,{initiating});}
+          for(const payment of this.store.payments(intent.intent_id))if(payment.state==='auto_pending'||payment.state==='verifying'){
+            const next=this.update(payment,{state:'awaiting_owner',auto_at_ms:null,reason:'VOICE_UNAVAILABLE'});
+            this.audit(principal_id,'voice_retired',{cause},next);
+          }
+        }
+      }
+    });
+    const results=await Promise.allSettled(principals.map(({principal_id})=>this.cascade(principal_id,cause)));
+    this.afterErrors(results.filter((result):result is PromiseRejectedResult=>result.status==='rejected').map(result=>result.reason));
+  }
   private async changeSettings(s:RegisteredDevice,b:Record<string,unknown>):Promise<void>{
     const c=b.change as SettingsChange,policy=this.store.policy(s.principal_id);
     const enabling=(c.kind==='voice'||c.kind==='auto')&&c.enabled;
@@ -495,7 +520,7 @@ export class PaymentAuthority {
     if((c.kind==='phone_lock'||c.kind==='glasses_lock')&&!c.enabled){const target=this.sources.get(JSON.stringify([s.principal_id,c.kind==='phone_lock'?s.device_id:c.device_id]));if(target)this.leases.lock(target,'disabled');}
   }
   private anomaly(p:Payment):void{
-    const day=localDayBounds(this.now(),this.config.day_timezone),policy=this.store.policy(p.principal_id);
+    const day=localDayBounds(this.now(),this.time_zone),policy=this.store.policy(p.principal_id);
     if(this.store.anomalyCount(p.principal_id,day.start,day.end)>=this.config.anomaly.max_per_day&&policy.paused_until_ms!==day.end){
       this.store.setPolicy({...policy,paused_until_ms:day.end,version:policy.version+1,updated_at_ms:this.now()});this.audit(p.principal_id,'auto_paused',{until_ms:day.end},p);this.enqueue(p,'auto_paused');
     }
@@ -586,7 +611,7 @@ export class PaymentAuthority {
     }
     }
   }
-  private used(principal:string):number{const day=localDayBounds(this.now(),this.config.day_timezone);return this.store.autoUsed(principal,day.start,day.end);}
+  private used(principal:string):number{const day=localDayBounds(this.now(),this.time_zone);return this.store.autoUsed(principal,day.start,day.end);}
   private async methods(p:Payment,ownerEvidence=true):Promise<import('./projection.ts').Methods>{
     if(await this.ownerOverrideActive())return {voice:{available:false,reason:'VOICE_UNAVAILABLE',tries_left:Math.max(0,this.config.voice.max_attempts_per_card-p.voice_attempts)},auto:{available:false,reason:'VOICE_UNAVAILABLE'}};
     const i=this.store.getIntent(p.intent_id)!,leased=await this.lease(i.initiating.device_id,p.principal_id),utterance=i.initiating.utterance;

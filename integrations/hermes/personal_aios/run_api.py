@@ -182,6 +182,13 @@ def measured_tool_callback(run_id, callback):
     return measured
 
 
+def activity_session_state(db, session_id):
+    """Compression ends a transcript segment; only its current native tip owns task lifetime."""
+    session = db.resolve_resume_session_id(session_id)
+    row = db.get_session(session)
+    return {key: row[key] for key in ('id', 'ended_at', 'end_reason')}
+
+
 def mirror_front_turn(db, body):
     """Append the finished front transcript once to its native conversation transcript."""
     from datetime import datetime
@@ -362,12 +369,20 @@ async def _serve_native_api():
                         self._model_settings_aux -= 1
                 return run
             return super()._http_route_table() + [("POST", "/api/model-settings/activate", self.activate_model_settings),
+                ("GET", "/v1/paios/sessions/{session_id}/state", self.activity_session_state),
                 ("POST", "/v1/paios/capability/{operation}", self.capability_operation),
                 ("POST", "/api/model-settings/usage", self.journal_model_usage),
                 ("POST", "/v1/paios/vision", tracked(self.analyze_frame)),
                 ("POST", "/v1/paios/call-intent", tracked(self.classify_call)),
                 ("POST", "/v1/paios/front-search", tracked(self.search_front)),
                 ("POST", "/v1/paios/front-turn", self.mirror_front)]
+
+        async def activity_session_state(self, request):
+            denied = self._check_auth(request)
+            if denied is not None:
+                return denied
+            db = await self._ensure_session_db_async()
+            return web.json_response({'session': await asyncio.to_thread(activity_session_state, db, request.match_info['session_id'])})
 
         async def capability_operation(self, request):
             denied = self._check_auth(request)

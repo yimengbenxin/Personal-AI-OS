@@ -13,6 +13,19 @@ import Security
     }
     let directory: URL
     var auditURL: URL { directory.appendingPathComponent("commands.jsonl") }
+    func acceptTrustedHistoryEpoch(_ epoch: String) async throws {
+        let marker = directory.appendingPathComponent("history-epoch")
+        if (try? String(contentsOf: marker, encoding: .utf8)) == epoch { return }
+        let previous = lease
+        lease?.cancel(); lease = nil
+        await previous?.value
+        try stop()
+        for path in [auditURL, directory.appendingPathComponent("opengcua-output")] {
+            if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try Data(epoch.utf8).write(to: marker, options: .atomic)
+    }
     private var children: [Process] = []
     private var lifelines: [Pipe] = []
     private var lease: Task<Void, Never>?
@@ -84,6 +97,7 @@ import Security
     func hasPendingRevocation(_ pairing: RealtimeDevicePairing) throws -> Bool {
         try revocations.load().contains { $0.deviceID == pairing.deviceID && $0.token == pairing.token }
     }
+    func hasPendingRevocations() throws -> Bool { try !revocations.load().isEmpty }
     func retryRevocations() async throws {
         for intent in try revocations.load() {
             _ = try await request(origin: intent.origin, deviceID: intent.deviceID, token: intent.token, action: "revoke", body: [:])

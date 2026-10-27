@@ -118,7 +118,8 @@ registerHooks({resolve(specifier,context,nextResolve){
             for label, alias in (("state_a_rel26_renderer", US), ("state_b_n_expand", US), ("state_b_n_contract", "")):
                 if label == "state_b_n_expand":
                     for relative in ("deploy/cloud/prepare-build.py", "deploy/cloud/staging_config.py", "deploy/cloud/cloud.json",
-                                     "deploy/cloud/front.conf.in", "deploy/cloud/paios_roaming_guard.js.in"):
+                                     "deploy/cloud/front.conf.in", "deploy/cloud/paios_roaming_guard.js.in",
+                                     "deploy/cloud/paios-staging-snapshot.timer"):
                         target = scratch / relative
                         target.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(ROOT / relative, target)

@@ -36,7 +36,11 @@
       "tools": {
         "read_device": {
           "effect": "observe",
-          "retry": "forbidden"
+          "retry": "forbidden",
+          "context_inject": [
+            "check_for"
+          ],
+          "target": "$.device"
         },
         "control_device": {
           "effect": "physical",
@@ -44,14 +48,19 @@
           "target": "$.device",
           "task_type": "mijia:control",
           "check_with": "read_device",
-          "context_inject": []
+          "context_inject": [
+            "idempotency_key"
+          ]
         },
         "run_scene": {
           "effect": "physical",
           "retry": "after_check",
           "target": "$.name",
           "task_type": "mijia:scene",
-          "check_with": "read_device"
+          "check_with": "read_device",
+          "context_inject": [
+            "idempotency_key"
+          ]
         },
         "get_login_status": {
           "effect": "observe",

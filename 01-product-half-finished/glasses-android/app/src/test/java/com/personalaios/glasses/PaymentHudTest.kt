@@ -47,8 +47,8 @@ class PaymentHudTest {
     }
 
     @Test fun I4_noticeReducerEmitsNoPhysicalGestureActionForEveryPaymentState() {
-        val cards = HudCards("glasses")
         for (state in PaymentNotice.states) {
+            val cards = HudCards("glasses")
             cards.accept(notice(state), 100)
             val payment = cards.payment(101)!!
             assertTrue(payment.title.isNotBlank()); assertEquals("一点点 ¥16.6", payment.amountLine)
@@ -107,18 +107,20 @@ class PaymentHudTest {
         val cards = HudCards("glasses"); cards.accept(notice(), 0)
         cards.accept(notice().apply { getJSONObject("notice").put("payment_id", "pay-new") }, 1)
         assertEquals("pay-new", cards.payment(1)!!.paymentId)
-        cards.accept(notice("verifying"), 2); assertTrue(cards.payment(2)!!.title.contains("核对中"))
+        fun current(state: String) = notice(state).apply { getJSONObject("notice").put("payment_id", "pay-new") }
+        cards.accept(current("verifying"), 2); assertTrue(cards.payment(2)!!.title.contains("核对中"))
         for (state in listOf("granted", "paying")) {
-            cards.accept(notice(state), 3); assertEquals("付款中", cards.payment(3)!!.title)
+            cards.accept(current(state), 3); assertEquals("付款中", cards.payment(3)!!.title)
         }
-        cards.accept(notice("paid"), 4); assertEquals("已付款", cards.payment(4)!!.title)
-        cards.accept(notice("paid"), 2500); assertNull(cards.payment(3004))
+        cards.accept(current("paid"), 4); assertEquals("已付款", cards.payment(4)!!.title)
+        cards.accept(current("paid"), 2500); assertNull(cards.payment(3004))
         for (state in listOf("failed", "outcome_unknown")) {
-            cards.accept(notice(state).apply { getJSONObject("notice").put("expires_in_ms", 0) }, 5)
+            cards.accept(notice(state).apply { getJSONObject("notice").put("payment_id", "pay-$state").put("expires_in_ms", 0) }, 5)
             assertNotNull(cards.payment(999999)); assertNull(cards.payment(5)!!.hint?.takeIf { it == "说「付吧」付款" })
         }
         cards.accept(JSONObject().put("operation", "payment_notice").put("notice", JSONObject.NULL), 6); assertNull(cards.payment(6))
-        cards.accept(notice(), 7); assertNull(cards.payment(300007))
+        cards.accept(notice().apply { getJSONObject("notice").put("payment_id", "pay-last") }, 7)
+        assertNotNull(cards.payment(7)); assertNull(cards.payment(300007))
     }
 
     @Test fun malformedNoticeCannotReplaceTheLastValidSnapshot() {

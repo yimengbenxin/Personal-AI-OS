@@ -21,6 +21,15 @@ SCHEMA = json.loads((ROOT / "capability/contracts/receipt.v1.schema.json").read_
 
 
 class Contract(unittest.TestCase):
+    def test_unknown_payment_requiring_owner_check_remains_unknown_on_a_waiting_card(self):
+        body = receipts.project({'success': False, 'error_code': 'PAYMENT_LINEAGE_OWNER_CHECK_REQUIRED',
+            'payment_intent': 'pi-fixture', 'payment_outcome': 'unknown'}, job_id='job-0123456789ab', revision=3)
+        self.assertEqual(body['status']['state'], 'waiting')
+        self.assertEqual(body['next']['waiting_on'], 'owner')
+        self.assertEqual(body['next']['check_with'], 'phone_status')
+        self.assertTrue(any(fact['about'] == 'payment_state' for fact in body['unknowns']))
+        self.assertEqual(body['effects'], [])
+
     def test_receipt_result_shapes(self):
         for fixture in yaml.safe_load((PACKAGE / "tests/contract.yaml").read_text())["fixtures"]:
             with self.subTest(fixture=fixture["id"]):
@@ -32,7 +41,9 @@ class Contract(unittest.TestCase):
                 self.assertEqual(result["structuredContent"], body)
                 if fixture["state"] == "unknown":
                     self.assertEqual(body["next"]["retry"], "after_check")
-                    self.assertEqual(body["next"]["check_with"], "phone_status")
+                    self.assertEqual(body["next"]["check_with"], "phone_check")
+                if fixture["id"] == "empty_status":
+                    self.assertNotIn("job", body)
 
     def test_manifest_and_adapter_limits(self):
         manifest = json.loads((PACKAGE / "plugin.json").read_text())
@@ -80,10 +91,63 @@ class Host(unittest.IsolatedAsyncioTestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    async def test_all_eight_tools_and_no_effect_parameter(self):
+    async def test_empty_and_list_status_are_successful_queries_without_execution_jobs(self):
+        jobs = [{"job_id": "job-0123456789ab", "success": False},
+                {"job_id": "job-ffffffffffff", "state": "running"}]
+        for observed in ([], jobs[:1], jobs):
+            with self.subTest(jobs=observed), patch.object(host.executor, "phone_status", AsyncMock(return_value={"jobs": observed})):
+                body = (await host.phone_status("owner")).structuredContent
+                Draft202012Validator(SCHEMA).validate(body)
+                self.assertEqual(body["status"]["state"], "succeeded")
+                self.assertNotIn("job", body)
+                self.assertEqual([job["job"]["id"] for job in body["jobs"]], [job["job_id"] for job in observed])
+
+    async def test_status_never_starts_a_check_and_check_has_a_declared_bound_identity(self):
+        owner = {"principal_id": "owner", "app": "千问", "of_job": "job-0123456789ab", "intent_id": "pi-unknown"}
+        with patch.object(host.payment, "unresolved", return_value=owner), \
+             patch.object(host.payment, "start_check") as start, \
+             patch.object(host.executor, "phone_status", AsyncMock(return_value={"jobs": []})):
+            body = (await host.phone_status("owner", owner["of_job"])).structuredContent
+            self.assertEqual(body["status"]["state"], "unknown")
+            self.assertEqual(body["next"]["retry"], "allowed")
+            self.assertNotIn("job", body)
+            start.assert_not_called()
+        query, check = host.MANIFEST["tools"]["phone_status"], host.MANIFEST["tools"]["phone_check"]
+        self.assertFalse(query.get("long_running", False))
+        self.assertNotIn("check_job_id", query["context_inject"])
+        self.assertTrue(check["long_running"])
+        self.assertEqual(check["target"], "$.job_id")
+        self.assertIn("check_job_id", check["context_inject"])
+        self.assertNotIn("job_id", check["context_inject"])
+
+    async def test_check_returns_the_real_platform_job_and_status_resolves_its_terminal_receipt(self):
+        original, checked = "job-0123456789ab", "job-ffffffffffff"
+        Path(self.tmp.name, original + ".delivered.json").write_text(json.dumps({
+            "job_id": original, "principal_id": "owner", "app": "千问", "task": "synthetic order",
+            "payment_intent": "pi-fixture", "phone_started_at": "2026-10-24T01:00:00Z", "payment_outcome": "unknown",
+            "finished_at": "2026-10-24T01:00:01.000Z", "success": False, "answer": "unknown"}))
+        async def check(executor, task):
+            self.assertEqual(task["check_owner"]["of_job"], original)
+            return {"success": True, "payment_observation": {"state": "unpaid"}, "answer": "synthetic read"}
+        with patch.object(host.payment, "check_order", side_effect=check) as read:
+            first = (await host.phone_check("owner", original, check_job_id=checked,
+                                           origin_processed_event_id="d:trusted")).structuredContent
+            self.assertEqual(first["job"]["id"], checked)
+            self.assertTrue(Path(self.tmp.name, checked + ".running.json").exists())
+            await host.executor._jobs[checked]["task"]
+            final = (await host.phone_status("owner", checked)).structuredContent
+            self.assertEqual(final["status"]["state"], "succeeded")
+            self.assertEqual(final["job"]["id"], checked)
+            self.assertGreater(final["job"]["revision"], first["job"]["revision"])
+            self.assertIsNone(host.payment.unresolved(host.executor, "owner"))
+            repeated = (await host.phone_check("owner", original)).structuredContent
+            self.assertEqual(repeated, final)
+            read.assert_called_once()
+
+    async def test_all_declared_tools_and_no_effect_parameter(self):
         tools = await host.mcp.list_tools()
         self.assertEqual({t.name for t in tools}, set(host.MANIFEST["tools"]))
-        self.assertEqual(len(tools), 8)
+        self.assertEqual(len(tools), 9)
         for t in tools:
             self.assertNotIn("effect", t.inputSchema["properties"])
 
@@ -125,7 +189,38 @@ class Host(unittest.IsolatedAsyncioTestCase):
         with patch.object(host.executor, "phone_status", AsyncMock(side_effect=ConnectionError)):
             result = await host.phone_status("owner")
         self.assertEqual(result.structuredContent["status"]["state"], "unknown")
-        self.assertEqual(result.structuredContent["next"]["retry"], "after_check")
+        self.assertEqual(result.structuredContent["next"]["retry"], "allowed")
+        self.assertNotIn("job", result.structuredContent)
+
+    async def test_missing_runtime_resource_is_unknown_with_the_local_cause(self):
+        with patch.object(host.executor, "_errand_task", AsyncMock(side_effect=FileNotFoundError("fixture prompt"))):
+            first = await host.phone_task("读取页面", "read", principal_id="owner")
+            jid = first.structuredContent['job']['id']
+            await host.executor._jobs[jid]['task']
+            result = (await host.phone_status("owner", jid)).structuredContent
+        self.assertEqual(result['status']['state'], 'unknown')
+        self.assertEqual(result['status']['reason_code'], 'PHONE_LOCAL_RESOURCE_UNAVAILABLE')
+        self.assertEqual(result['next']['retry'], 'after_check')
+
+    async def test_unreadable_lineage_cannot_block_reading_an_existing_job(self):
+        jid = "job-0123456789ab"
+        Path(self.tmp.name, jid + ".invalid.json").write_text("{}")
+        body = receipts.receipt("failed", job={"id": jid, "revision": 7})
+        with patch.object(host.executor, "phone_status", AsyncMock(return_value={
+                "jobs": [{"job_id": jid, "capability_receipt": body}]})) as read, \
+             patch.object(host.payment, "start_check") as start:
+            result = await host.phone_status("owner", jid)
+        self.assertEqual(result.structuredContent, body)
+        read.assert_awaited_once_with(principal_id="owner", job_id=jid, context=None)
+        start.assert_not_called()
+
+    async def test_lineage_io_failure_does_not_prevent_status_or_start_work(self):
+        with patch.object(host.payment, "unresolved", side_effect=OSError("fixture unavailable")), \
+             patch.object(host.executor, "phone_status", AsyncMock(return_value={"jobs": []})) as read, \
+             patch.object(host.payment, "start_check") as start:
+            await host.phone_status("owner")
+        read.assert_awaited_once()
+        start.assert_not_called()
 
     async def test_cancel_is_principal_scoped(self):
         host.executor._jobs.update({"job-0123456789ab": {"principal_id": "other", "state": "running"}})
@@ -199,14 +294,49 @@ class Host(unittest.IsolatedAsyncioTestCase):
         Path(self.tmp.name, "job-0123456789ab.invalid.json").write_text("{")
         with patch.object(host.executor, "phone_start", AsyncMock()) as start:
             result = await host.phone_start("owner")
-            self.assertEqual(result.structuredContent["status"]["state"], "unknown")
+            self.assertEqual(result.structuredContent["status"]["state"], "waiting")
+            self.assertEqual(result.structuredContent["next"]["waiting_on"], "owner")
             self.assertEqual(result.structuredContent["next"]["retry"], "after_check")
             start.assert_not_called()
+
+    async def test_malformed_nonpayment_quarantine_follows_the_lineage_authority(self):
+        Path(self.tmp.name, "job-0123456789ab.invalid.json").write_text(json.dumps({
+            'principal_id': 'owner', 'job_id': 'job-0123456789ab', 'app': '千问',
+            'answer': 'synthetic failed read', 'payment_owner': None, 'phone_started_at': None}))
+        self.assertIsNone(host.payment.unresolved(host.executor, 'owner'))
+
+    async def test_possible_payment_quarantine_requests_one_stable_owner_check_without_execution(self):
+        jid = 'job-0123456789ab'
+        Path(self.tmp.name, jid + '.invalid.json').write_text(json.dumps({
+            'principal_id': 'owner', 'job_id': jid, 'payment_intent': 'pi-fixture'}))
+        with patch.object(host.executor, 'phone_start', AsyncMock()) as start:
+            first = (await host.phone_start('owner')).structuredContent
+            second = (await host.phone_start('owner')).structuredContent
+        self.assertEqual(first, second)
+        self.assertEqual(first['status']['state'], 'waiting')
+        self.assertEqual(first['next']['waiting_on'], 'owner')
+        self.assertEqual(first['effects'], [])
+        self.assertEqual(first['next']['retry'], 'after_check')
+        start.assert_not_called()
+        with patch.object(host.executor, 'phone_status', AsyncMock(return_value={'jobs': []})) as read:
+            await host.phone_status('owner', jid)
+        read.assert_awaited_once()
+
+    async def test_malformed_present_payment_intent_is_not_proof_of_no_payment(self):
+        path = Path(self.tmp.name, 'job-0123456789ab.invalid.json')
+        for intent in [None, '', False, 0, [], {}]:
+            with self.subTest(intent=intent):
+                path.write_text(json.dumps({'payment_intent': intent}))
+                with patch.object(host.executor, 'phone_start', AsyncMock()) as start:
+                    body = (await host.phone_start('owner')).structuredContent
+                self.assertEqual(body['status']['state'], 'waiting')
+                self.assertEqual(body['next']['waiting_on'], 'owner')
+                start.assert_not_called()
 
     async def test_payment_check_cannot_create_an_unbound_executor_job(self):
         owner = {"principal_id": "owner", "app": "千问", "of_job": "job-0123456789ab", "intent_id": "pi-unknown"}
         with patch.object(host.payment, "unresolved", return_value=owner), patch.object(host.executor, "_start") as start:
-            result = await host.phone_status("owner", owner["of_job"])
+            result = await host.phone_check("owner", owner["of_job"])
             self.assertEqual(result.structuredContent["status"]["reason_code"], "PAYMENT_CHECK_BINDING_REQUIRED")
             start.assert_not_called()
 

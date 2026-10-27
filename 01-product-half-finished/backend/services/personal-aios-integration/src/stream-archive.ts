@@ -205,6 +205,7 @@ export class StreamArchive {
     check(canonical(parse(commit))===canonical(j),'STREAM_REVISION_INTEGRITY',500);
     return parse(await this.storage.publish('stream-revisions',alias,encoded));
   }
+  private journalRecords(j:JournalRevision){return [digest(j),this.key(j.raw_ref,j.revision)].map(key=>({namespace:'stream-revisions',key}));}
   private receipt(j:JournalRevision):ArchivedEvent{return {...j.event,raw_ref:j.raw_ref,archive_revision:digest(j),
     archive_status:'durable',payload_sha256:j.payload_sha256,bytes:j.total_bytes};}
   private async requireOpen(rawRef:string,chunk:StoredChunk){
@@ -429,6 +430,7 @@ export class StreamArchive {
         const existing=state.slots.get(slot(record));
         if(existing){check(existing.chunk.fingerprint===record.fingerprint,'CHUNK_IDENTITY_CONFLICT',409);
           const committed=existing;
+          await this.storage.trackSessionRecords?.(rawRef,this.journalRecords(committed));
           check(digest(await this.publishJournal(committed))===digest(committed),'STREAM_REVISION_INTEGRITY',500);
           return {event:this.receipt(committed),chunk:structuredClone(existing.chunk)};}
         const descriptor=state.tracks.get(track(record));if(descriptor)this.checkDescriptor(descriptor,record);
@@ -436,10 +438,10 @@ export class StreamArchive {
         const n=state.entries.length+1,total=(previous?.total_bytes??0)+record.bytes;
         check(n<=this.budget.max_chunks&&total<=this.budget.max_total_bytes,'STREAM_BUDGET_EXCEEDED',413);
         check(n<=this.budget.max_revisions,'STREAM_REVISION_BUDGET_EXCEEDED',413);
-        await this.storage.trackSessionRecords?.(rawRef,[{namespace:'objects',key:objectHash}]);
-        const object=await this.storage.publish('objects',objectHash,payload);check(sha256(object)===objectHash,'STREAM_OBJECT_INTEGRITY',500);
         const j:JournalRevision={schema:'paios.stream.delta.v2',raw_ref:rawRef,revision:n,parent:previous?digest(previous):null,
           event:previous?.event??bound,chunk:record,total_bytes:total,payload_sha256:rolling(previous?.payload_sha256??null,objectHash)};
+        await this.storage.trackSessionRecords?.(rawRef,[{namespace:'objects',key:objectHash},...this.journalRecords(j)]);
+        const object=await this.storage.publish('objects',objectHash,payload);check(sha256(object)===objectHash,'STREAM_OBJECT_INTEGRITY',500);
         const winner=await this.publishJournal(j);
         // Only the slot winner commits a revision. Losing content-addressed proposals remain unreferenced.
         if(digest(winner)===digest(j)){await this.journal(rawRef,n);return {event:this.receipt(j),chunk:structuredClone(record)};}
@@ -482,7 +484,9 @@ export class StreamArchive {
             chunk:x.record,total_bytes:total,payload_sha256:rolling(previous?.payload_sha256??null,x.objectHash)};
           const proposal={j,indices:[index]};proposals.push(proposal);bySlot.set(slot(x.record),proposal);tracks.set(track(x.record),x.record);previous=j;
         }
-        if(!objectsPublished){await this.storage.trackSessionRecords?.(rawRef,[...objects.keys()].map(key=>({namespace:'objects',key})));
+        await this.storage.trackSessionRecords?.(rawRef,[...(!objectsPublished?[...objects.keys()].map(key=>({namespace:'objects',key})):[]),
+          ...proposals.flatMap(({j})=>this.journalRecords(j))]);
+        if(!objectsPublished){
           await this.storage.publishMany!('objects',[...objects].map(([key,bytes])=>({key,bytes})));objectsPublished=true;}
         if(proposals.length)await this.storage.publishMany!('stream-revisions',proposals.map(x=>({key:digest(x.j),bytes:bytes(x.j)})));
         const committed:{j:JournalRevision;indices:number[]}[]=[];
@@ -534,11 +538,11 @@ export class StreamArchive {
         'STREAM_BUDGET_EXCEEDED', 413);
       const n = (previous?.revision ?? 0)+1;
       check(n <= this.budget.max_revisions, 'STREAM_REVISION_BUDGET_EXCEEDED', 413);
-      await this.storage.trackSessionRecords?.(rawRef,[{namespace:'objects',key:objectHash}]);
-      const object = await this.storage.publish('objects',objectHash,payload);
-      check(sha256(object) === objectHash, 'STREAM_OBJECT_INTEGRITY', 500);
       const m: StreamManifest = {schema:'paios.stream.v1', raw_ref: rawRef, revision:n,
         parent: previous ? digest(previous) : null, event: previous?.event ?? bound, chunks, extents: extents(chunks)};
+      await this.storage.trackSessionRecords?.(rawRef,[{namespace:'objects',key:objectHash},{namespace:'stream-revisions',key:this.key(rawRef,n)}]);
+      const object = await this.storage.publish('objects',objectHash,payload);
+      check(sha256(object) === objectHash, 'STREAM_OBJECT_INTEGRITY', 500);
       const winner = await this.storage.publish('stream-revisions',this.key(rawRef,n),bytes(m));
       if (digest(parse(winner)) === digest(m)) return publishResult(m);
     }

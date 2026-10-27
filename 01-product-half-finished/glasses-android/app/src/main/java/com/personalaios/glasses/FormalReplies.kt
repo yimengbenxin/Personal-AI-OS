@@ -98,6 +98,11 @@ class FormalReplies(private val deviceId: String, saved: JSONObject? = null,
         reply.nextRead = now + reply.backoff; reply.backoff = (reply.backoff * 2).coerceAtMost(30000)
         JSONObject().put("operation", "result").put("processed_event_id", id)
     }
+    /** Ambient notices awaken existing result recovery; notification text is never a delivered chunk. */
+    @Synchronized fun notified(id: String): JSONObject? {
+        val reply = reply(id); checkpoint()
+        return reply.header?.let { JSONObject(it.toString()) }
+    }
     suspend fun observe(send: suspend (JSONObject) -> Unit, wait: suspend (Long) -> Unit = { delay(it) },
         now: () -> Long = { System.nanoTime() / 1000000 }) {
         try { while (true) {

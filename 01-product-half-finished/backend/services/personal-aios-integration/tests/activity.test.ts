@@ -48,6 +48,19 @@ test('receipt-derived states satisfy the existing card and item wire requirement
   }
 });
 
+test('an owner payment check remains a visible waiting card after the reporting run completes',()=>{
+  const h=harness();
+  h.projection.event({run_id:'run-test',event:'subagent.start',subagent_id:'child',goal:'核对执行结果',timestamp:base/1000});
+  h.projection.receipts([{id:'owner-check',task_id:'child',tool_call_id:'call',tool:'opaque',invocation:'opaque',fingerprint:'opaque',
+    receipt:receipt('waiting',{status:{reason_code:'PAYMENT_LINEAGE_OWNER_CHECK_REQUIRED'},
+      unknowns:[{about:'payment_state',why:'隔离记录可能含付款，缺少可信来源'}],
+      next:{retry:'after_check',check_with:'phone_status',waiting_on:'owner'},job:{id:'job-0123456789ab',revision:1}})}]);
+  h.projection.settle('completed');
+  const card=h.latest();assert.equal(card.state,'waiting');assert.equal(card.items[0]!.state,'waiting');
+  assert.equal(card.completed_at,undefined);assert.match(card.summary,/主人/u);assert.equal(card.failure_reason,undefined);
+  h.projection.close();
+});
+
 test('delegated short title is preserved and a derived title ends at a word boundary with an ellipsis',async()=>{
   const h=harness(),title='计算 Excel 并通过微信发送';
   await sse(h,[{...start('titled'),goal:title}]);
@@ -65,6 +78,15 @@ test('bounded titles keep exact-fit text and whole Chinese or English words',()=
   assert.equal(activityTitle('核对报表并发送结果',8),'核对报表并发送…');
   assert.equal(activityTitle('Review the spreadsheet calculations and deliver the verified output',32),'Review the spreadsheet…');
   assert.equal(activityTitle('准备数据，核对报表，发送结果',10),'准备数据，核对报表…');
+  // An unbroken first word longer than the budget keeps a visible prefix instead of a lone ellipsis.
+  const identifier='run_0123456789abcdef0123456789abcdef0123456789abcdef_0123';
+  assert.equal([...identifier].length,57);
+  assert.equal(activityTitle(identifier+' failed'),'run_0123456789abcdef0123456789abcdef0123456789a…');
+  assert.equal([...activityTitle(identifier+' failed')].length,48);
+  assert.equal(activityTitle('x'.repeat(60),10),'xxxxxxxxx…');
+  // Unicode: astral letters count once each, and a combining accent stays with its letter.
+  assert.equal(activityTitle('𝒜'.repeat(60),10),'𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜…');
+  assert.equal(activityTitle('e\u0301'.repeat(30),10),'e\u0301e\u0301e\u0301e\u0301…');
 });
 
 test('a child business outcome remains partial with its reason through SSE, settlement and recovery',async()=>{

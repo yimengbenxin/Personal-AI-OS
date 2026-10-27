@@ -12,6 +12,7 @@ import { RunAdmission } from './native-source-fixture.ts';
 import { OutputAuthority } from '../src/output.ts';
 import { EVENT_SCHEMA, sha256 } from '../src/contracts.ts';
 import { readonlyRuntime,policy } from './sealed-replay-check.ts';
+import {fileURLToPath} from 'node:url';
 const now='2026-10-01T00:00:00.000Z';
 const devices=[{principal_id:'owner',device_id:'mac',device_type:'mac' as const,channel:'text',consent_ref:'consent',route_version:'route',output_modes:['text'],token_sha256:sha256('fixture-token')},
   {principal_id:'owner',device_id:'other',device_type:'mac' as const,channel:'text',consent_ref:'consent',route_version:'route',output_modes:['text'],token_sha256:sha256('other-token')}];
@@ -48,7 +49,7 @@ test('actual POSIX sealed replay survives partial/full/lost ACK and fresh runtim
     await assert.rejects(fresh.runtime.result(await fresh.runtime.authenticate('other-token'),'session',d.processed_event_id,{text_replay:'sealed'}),{code:'OUTPUT_RECIPIENT_SCOPE_DENIED',status:403});
     } finally {await fresh.runtime.close();}
     assert.deepEqual(fresh.calls,{native:0,writes:0,receipts:0,tts:0});
-    const {stdout}=await promisify(execFile)(process.execPath,[new URL('./sealed-replay-check.ts',import.meta.url).pathname,root,config]);
+    const {stdout}=await promisify(execFile)(process.execPath,[fileURLToPath(new URL('./sealed-replay-check.ts',import.meta.url)),root,config]);
     const child=JSON.parse(stdout);assert.deepEqual(child.result.chunks,chunks);assert.equal(child.result.rendered_text_through_seq,watermark);
     assert.deepEqual(child.calls,{native:0,writes:0,receipts:0,tts:0});assert.deepEqual(await snapshot(root),before);
     if(process.env.PAIOS_FORMAL_ENVELOPE_FIXTURE_OUT){const path=process.env.PAIOS_FORMAL_ENVELOPE_FIXTURE_OUT,fixture=JSON.parse(await fs.readFile(path,'utf8'));

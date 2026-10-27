@@ -37,8 +37,10 @@ import org.json.JSONObject
 internal fun formalPacket(bytes: ByteArray, sessionId: String): JSONObject {
     return JSONObject(String(bytes, Charsets.UTF_8)).also {
         require(it.getString("schema_version") == "paios.central.text-envelope.v1" && it.getString("session_id") == sessionId)
-        if (it.getString("operation") == "ready")
-            require(it.keys().asSequence().toSet() == setOf("schema_version", "session_id", "operation"))
+        if (it.getString("operation") == "ready") {
+            require(it.keys().asSequence().toSet().all { key -> key in setOf("schema_version", "session_id", "operation", "history_epoch") })
+            if (it.has("history_epoch")) require(it.getString("history_epoch").matches(Regex("^[a-f0-9]{32}$")))
+        }
     }
 }
 
@@ -104,6 +106,7 @@ class LiveSession(private val context: Context, private val scope: CoroutineScop
                     }
                     val value = formalPacket(bytes.toByteArray(), binding.sessionId)
                     require(room === candidate && value.getString("operation") == "ready")
+                    onMessage(value)
                     gatewayReady.connected()
                 }
             }

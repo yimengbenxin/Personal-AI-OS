@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:yimi:hermes:hook-input:1",
+  "title": "Public Hermes hook input and admission binding",
+  "type": "object",
+  "required": [
+    "hook",
+    "payload"
+  ],
+  "properties": {
+    "hook": {
+      "enum": [
+        "pre_llm_call",
+        "pre_api_request",
+        "on_session_start",
+        "on_session_end",
+        "on_session_finalize",
+        "on_session_reset",
+        "on_session_delete",
+        "subagent_start",
+        "subagent_stop"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_subagent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_subagent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "telemetry_schema_version": {
+          "const": "hermes.observer.v1"
+        },
+        "user_message": {
+          "type": [
+            "string",
+            "array"
+          ]
+        },
+        "platform": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "failed": {
+          "type": "boolean"
+        },
+        "child_status": {
+          "type": "string"
+        },
+        "child_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "conversation_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "content": {}
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "x-upstream": {
+    "version": "v0.22.5",
+    "commit": "bf0203a794a07aac3ff764972ab9087baa4e4f4e",
+    "sources": [
+      "website/docs/developer-guide/observer-hooks.md:71",
+      "website/docs/developer-guide/observer-hooks.md:93",
+      "website/docs/developer-guide/observer-hooks.md:114",
+      "website/docs/developer-guide/observer-hooks.md:132",
+      "website/docs/developer-guide/observer-hooks.md:232"
+    ]
+  },
+  "x-tool-input": {
+    "contract": "gateway-api.v1.json",
+    "schemas": [
+      "PreToolCall",
+      "TransformToolResult",
+      "PostToolCall"
+    ],
+    "preserve": [
+      "session_id",
+      "task_id",
+      "turn_id",
+      "tool_call_id",
+      "api_request_id"
+    ],
+    "api_request_id": "opaque provider attempt, never a product run id"
+  },
+  "x-binding": {
+    "authority": "existing RunAdmission and its durable storage",
+    "authentication": "Existing internal credential is scoped by server composition to its configured native profile. Payloads cannot select a profile, principal, scope, product run or generation.",
+    "reserve_before": "native.create",
+    "reservation": [
+      "profile",
+      "admission_key",
+      "expected_session_id",
+      "input_sha256"
+    ],
+    "root_evidence": [
+      "authenticated profile",
+      "native session confirmed by create/status response or exact reserved session",
+      "sha256 of the current public user_message or the last public user history row equals the immutable submitted input; a newer unmatched user row cannot reuse an earlier source",
+      "previously unseen nonempty public turn_id and task_id"
+    ],
+    "root_ambiguity": "Reject duplicate input reservations and mismatched/late turns. Retained evidence is fenced to reservations present when observed; it cannot acquire a future grant. Never choose the only active run.",
+    "children": [
+      "subagent_start joins exact parent_session_id and parent_turn_id with parent_subagent_id when present",
+      "child_session_id and child_subagent_id are recorded before a child turn may bind",
+      "depth has no special-case limit; all links must belong to the same admission"
+    ],
+    "tools": [
+      "resolve public turn_id plus task_id in the authenticated profile",
+      "session_id must match an observed session alias or the bound root conversation",
+      "product context is injected from admission; ignore identity in args"
+    ],
+    "compression": "An already bound turn/task may observe a new session alias through pre_api_request, subagent_start or on_session_end. A new turn still requires its own immutable input/history evidence.",
+    "loss": "Missing, late, conflicting or unverified evidence refuses capability execution; verify through native create/status and replay matching evidence. No exactly-once guarantee.",
+    "terminal": "Session end closes its public turn for new tools. Child stop may update the original activity after parent termination; it never authorizes another run.",
+    "recovery": "Persist reservation and public turn/child evidence under the admission authority; recover exact original bindings, never reassign to the current run."
+  },
+  "x-media": {
+    "package_output": "Existing receipt.v1 structuredContent and public MCP Text/Image/Resource content",
+    "complete_receipt": "Platform validates and admits once; gateway transform passes original package content unchanged",
+    "legacy": "Only plain text without package receipt uses a replacement string",
+    "failure": "pre RPC failure blocks; legacy transform RPC failure returns an unknown receipt"
+  }
+}

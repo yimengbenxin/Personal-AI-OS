@@ -8,6 +8,16 @@ import {createHash} from 'node:crypto';
 const ajv=new Ajv({strict:true});
 const outputs=Object.fromEntries(Object.entries(modelSettingsWire.outputs).map(([op,value])=>[op,ajv.compile({$defs:modelSettingsWire.$defs,...value as object})]));
 const inputs=Object.fromEntries(Object.entries(modelSettingsWire.inputs).map(([op,value])=>[op,ajv.compile({$defs:modelSettingsWire.$defs,...value.definition as object})]));
+test('local switching uses signed draft execution and rejects arbitrary model paths or downloads',()=>{
+  const message={operation:'model_settings_draft',control_id:'local-switch',request:{action:'switch_local',expected_revision:1,local_kind:'voiceprint',local_target:'installed-model'}};
+  assert.equal(inputs.model_settings_draft!(message),true);
+  assert.equal(inputs.model_settings_draft!({...message,request:{...message.request,path:'/tmp/unpinned.onnx'}}),false);
+  assert.equal(inputs.model_settings_draft!({...message,request:{...message.request,download:true}}),false);
+  const signed=modelSettingsWire.examples.model_settings_switch_local![0]!;
+  assert.equal(inputs.model_settings_switch_local!(signed),true);
+  assert.equal(inputs.model_settings_switch_local!({...signed,signature_b64:undefined}),false);
+  assert.equal(inputs.model_settings_local_catalog!({operation:'model_settings_local_catalog',control_id:'catalog',request:{offset:0}}),true);
+});
 test('model settings frozen examples cover every formal operation and reject unknown fields and secret draft fields',()=>{
   for(const [operation,examples] of Object.entries(modelSettingsWire.examples))for(const example of examples){
     const validate=inputs[operation]??outputs[operation]!;assert.ok(validate(example),`${operation}: ${JSON.stringify(validate.errors)}`);

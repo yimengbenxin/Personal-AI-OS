@@ -12,6 +12,7 @@ import {UnifiedIngress} from '../src/ingress.ts';
 import {openFixtureDatabase} from '../src/memory/fixture-database.ts';
 import {MemoryToolAuthority} from '../src/memory/tools.ts';
 import type {AssertionInput, ForgetReceipt} from '../src/memory/contracts.ts';
+import {fileURLToPath} from 'node:url';
 const database=process.env.PAIOS_L3_TEST_DATABASE_URL, python=process.env.PAIOS_HERMES_PYTHON;
 const nativeSource=process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT;
 
@@ -20,7 +21,7 @@ test('real L5/L3 correction and scoped native L2/L4 forget retain receipts and c
  const directory=await mkdtemp(join(tmpdir(),'paios-memory-cross-layer-'));
  const schema='paios_fixture_cross_'+randomUUID().replaceAll('-','').slice(0,24);
  const fixture=await openFixtureDatabase({url:database!,schema,
-  migration_file:new URL('../../../migrations/0009_hermes_l3.up.sql',import.meta.url).pathname});
+  migration_file:fileURLToPath(new URL('../../../migrations/0009_hermes_l3.up.sql',import.meta.url))});
  t.after(async()=>{try{await fixture.l3.close();await fixture.pool.query('DROP SCHEMA '+schema+' CASCADE');}
   finally{await fixture.close();await rm(directory,{recursive:true,force:true});}});
  const storage=new PosixStorage(join(directory,'central')),archive=new RawArchive(storage,16384);
@@ -50,7 +51,7 @@ test('real L5/L3 correction and scoped native L2/L4 forget retain receipts and c
  assert.equal(current.assertions[0]?.effective_at,corrected.committed_at);
  const marker=String(current.assertions[0]!.value),assertionRef='assertion:'+a.assertion_id,home=join(directory,'native');
  await mkdir(home);
- const harness=new URL('../../../../../tests/hermes/memory_cross_layer_fixture.py',import.meta.url).pathname;
+ const harness=fileURLToPath(new URL('../../../../../tests/hermes/memory_cross_layer_fixture.py',import.meta.url));
  function native(phase:string,receipt?:ForgetReceipt){
   const child=spawnSync(python!,[harness,phase,home,marker,assertionRef,String(a.value)],{encoding:'utf8',timeout:60000,
    env:{...process.env,PAIOS_NATIVE_SOURCE_TEST_ROOT:nativeSource!,PYTHONPATH:nativeSource!,PYTHONDONTWRITEBYTECODE:'1'},input:receipt?JSON.stringify(receipt):undefined});

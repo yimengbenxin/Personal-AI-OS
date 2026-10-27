@@ -3,6 +3,27 @@ import XCTest
 @testable import HealthKitExporter
 
 final class YimiTimelineIncrementalTests: XCTestCase {
+    func testWatchLatestIndexPreservesOwnerOrderEditsAndRetirement() {
+        var timeline = YimiConversationTimeline(items: [
+            YimiItem(id: "a1", kind: .her, text: "a1", date: .distantPast, seq: 1, ownerIdentity: "a"),
+            YimiItem(id: "b2", kind: .her, text: "b2", date: .distantPast, seq: 2, ownerIdentity: "b"),
+            YimiItem(id: "a4", kind: .her, text: "a4", date: .distantPast, seq: 4, ownerIdentity: "a"),
+            YimiItem(id: "legacy", kind: .her, text: "legacy", date: .distantPast)
+        ])
+        XCTAssertNil(timeline.latestAssistantItem(ownerIdentity: nil))
+        XCTAssertEqual(timeline.latestAssistantItem(ownerIdentity: "a")?.id, "a4")
+        timeline.upsert(YimiItem(id: "a3", kind: .her, text: "older", date: .distantPast, seq: 3, ownerIdentity: "a"))
+        XCTAssertEqual(timeline.latestAssistantItem(ownerIdentity: "a")?.id, "a4")
+        var edited = timeline.item(id: "a4")!; edited.ownerIdentity = "b"; timeline.upsert(edited)
+        XCTAssertEqual(timeline.latestAssistantItem(ownerIdentity: "a")?.id, "a3")
+        XCTAssertEqual(timeline.latestAssistantItem(ownerIdentity: "b")?.id, "a4")
+        timeline.remove(ids: ["a4"])
+        XCTAssertEqual(timeline.latestAssistantItem(ownerIdentity: "b")?.id, "b2")
+        timeline.remove(ids: ["a1", "b2", "a3"])
+        XCTAssertNil(timeline.latestAssistantItem(ownerIdentity: "a"))
+        XCTAssertNil(timeline.latestAssistantItem(ownerIdentity: "b"))
+    }
+
     func testCallAndAmbientRowsFollowThePresentationOwnerTogether() {
         var timeline = YimiConversationTimeline()
         let call = CentralCall(id: "owner-call", state: "live", lines: [

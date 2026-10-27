@@ -23,6 +23,64 @@ import {EVENT_SCHEMA,canonical,digest,sha256} from '../src/contracts.ts';
 import {PHONE_CAPABILITIES} from '../src/source-authority.ts';
 import {sourceClient} from './native-source-fixture.ts';
 
+test('recorded raw provider usage reaches runtime pricing without lost or double-counted cache',{timeout:20000},async t=>{
+  const repository=fileURLToPath(new URL('../../../../../',import.meta.url));
+  const fixture=JSON.parse(await readFile(join(repository,'tests/hermes/fixtures/model-usage-responses.json'),'utf8')) as
+    {cases:{id:string;response:unknown;expected_usage:Record<string,number>;contract?:{provider:string;cost:number|null}}[]};
+  const cases=fixture.cases.filter((item):item is typeof item&{contract:{provider:string;cost:number|null}}=>!!item.contract);
+  const routes={
+    'deepseek-paios':{base_url:'https://api.deepseek.com',model:'deepseek-flash',role:'brain',protocol:'chat_completions'},
+    'opencode-paios':{base_url:'https://opencode.ai/zen/go/v1',model:'deepseek-v4.1-flash',role:'delegation',protocol:'chat_completions'},
+    'siliconflow-paios':{base_url:'https://api.siliconflow.cn/v1',model:'zai-org/GLM-5.3-Flash',role:'auxiliary.vision',protocol:'chat_completions'},
+    'chat-fixture':{base_url:'https://chat.invalid/v1',model:'fixture',role:'auxiliary.review',protocol:'chat_completions'},
+    'responses-fixture':{base_url:'https://responses.invalid/v1',model:'fixture',role:'auxiliary.compression',protocol:'codex_responses'},
+    'messages-fixture':{base_url:'https://messages.invalid/v1',model:'fixture',role:'call.intent',protocol:'anthropic_messages'},
+  } as const;
+  const root=await mkdtemp(join(tmpdir(),'usage-response-')),storage=new PosixStorage(join(root,'storage')),archive=new RawArchive(storage,8192);
+  const authority=ModelSettingsAuthority.open(join(root,'models'),{environment_id:'test',master_key:Buffer.alloc(32,7)});
+  authority.bootstrap({providers:Object.entries(routes).map(([id,route])=>({id,display_name:id,wire_protocol:route.protocol,base_url:route.base_url,credential_ref:null})),
+    roles:Object.entries(routes).map(([id,route])=>({id:route.role,profile:'owner',provider_ref:id,model_id:route.model,parameters:{},
+      ordered_fallbacks:[],activation_boundary:'brain_idle' as const}))});
+  const run={run_id:'recorded-usage-run',session_id:'recorded-usage-session',conversation_session_id:'recorded-usage-session',status:'running'};
+  const native=sourceClient({create:async()=>({...run}),status:async()=>({...run}),cancel:async()=>({...run,status:'cancelled'})});
+  const admission=new RunAdmission(storage,native,{max_pending_events:4,max_pending_bytes:100000,max_event_age_ms:10000,
+    poll_interval_ms:1000,native_idempotency_retention_ms:86400000,policy_version:'recorded-usage'});
+  const runtime=new PersonalAIOSRuntime({storage,archive,admission,native,output:new OutputAuthority(storage),skill:'test',max_read_bytes:8192,
+    payment:PaymentAuthority.open(join(root,'payments')),payment_devices:async()=>[]});
+  const usage=new ModelUsage(authority.db,{notify:async()=>{}});runtime.installModelSettings(authority);runtime.installModelUsage(usage,'test');
+  const token='fake-recorded-usage-service-token',server=createServer(async(req,res)=>{await handleModelSettingsHttp(req,res,runtime,token,16384);});
+  t.after(async()=>{await new Promise<void>(done=>server.close(()=>done()));await runtime.close();authority.close();await rm(root,{recursive:true,force:true});});
+  await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
+  usage.setPrices(Object.keys(routes).map(provider_id=>({environment:'test',provider_id,model_id:routes[provider_id as keyof typeof routes].model,
+    currency:'CNY',price_version:'recorded-shape-fixture',source:'Configured fixture rates, not bills',updated_at:'2026-10-25T00:00:00.000Z',
+    input_per_million:provider_id==='siliconflow-paios'?0.8:2,output_per_million:provider_id==='siliconflow-paios'?2.8:8,
+    cache_read_per_million:provider_id==='siliconflow-paios'?0.23:0.04,cache_write_per_million:4,input_tokens_include_cache:provider_id!=='messages-fixture'})));
+  const d=await new UnifiedIngress(archive).accept({schema_version:EVENT_SCHEMA,event_id:'recorded-usage-source',device_id:'phone',device_type:'phone',
+    captured_at:new Date().toISOString(),source:{channel:'fixture'},media_type:'text',mime:'text/plain;charset=utf-8',representation:'uploaded_original',payload:Buffer.from('offline usage fixture')},
+    {principal_id:'owner',device_id:'phone',device_type:'phone',consent_ref:'fixture',channel:'fixture',submission:'explicit_text'});
+  await storage.publish('processed-events',digest({principal_id:d.principal_id,processed_event_id:d.processed_event_id}),Buffer.from(canonical(d)));
+  await admission.admit(d,run.session_id,'test');
+  for(let n=0;n<100&&!(await admission.readOnly('owner',run.session_id,d.processed_event_id))?.run_id;n++)await new Promise(done=>setTimeout(done,5));
+  assert.equal((await admission.readOnly('owner',run.session_id,d.processed_event_id))?.run_id,run.run_id);
+  const tokenFile=join(root,'token'),requestFile=join(root,'request.json');await writeFile(tokenFile,token);
+  await writeFile(requestFile,JSON.stringify({cases,routes,home:join(root,'home'),token_file:tokenFile,
+    service_url:`http://127.0.0.1:${(server.address() as {port:number}).port}`,
+    projection:{environment_id:'test',profile:'owner',revision:1,group:'brain',config:{providers:Object.fromEntries(Object.entries(routes).map(([id,route])=>[id,{api:route.base_url}]))}}}));
+  assert.ok(process.env.PAIOS_HERMES_PYTHON&&process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT,'Use the committed composed native');
+  const {stdout}=await promisify(execFile)(process.env.PAIOS_HERMES_PYTHON,[join(repository,'tests/hermes/model_usage_response_probe.py'),repository,
+    process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT,requestFile]);
+  const proof=JSON.parse(stdout.trim().split('\n').at(-1)!);
+  assert.equal(proof.mocked_model_requests.length,cases.length);
+  const attempts=usage.recentAttempts('test','owner');assert.equal(attempts.length,cases.length);
+  for(const item of cases){
+    const fact=attempts.find(attempt=>attempt.request_id===item.id)!;assert.ok(fact,item.id);
+    assert.equal(fact.status,'completed',item.id);assert.deepEqual(fact.original_usage,item.expected_usage,item.id);
+    assert.equal(fact.cost.kind,item.contract.cost===null?'unknown':'estimated',item.id);
+    assert.equal(fact.cost.amount,item.contract.cost,item.id);
+    assert.equal(fact.reasoning_tokens,item.expected_usage.reasoning_tokens,item.id);
+  }
+});
+
 test('brotli SDK attempts cross the real usage HTTP budget path exactly once',{timeout:20000},async t=>{
   const root=await mkdtemp(join(tmpdir(),'usage-observer-'));
   const authority=ModelSettingsAuthority.open(join(root,'models'),{environment_id:'test',master_key:Buffer.alloc(32,7),allow_private_hosts:['127.0.0.1']});

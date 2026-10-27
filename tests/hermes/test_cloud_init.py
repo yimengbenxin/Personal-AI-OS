@@ -24,6 +24,16 @@ cloud = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cloud)
 
 
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux deployment ownership contract')
+@pytest.mark.parametrize('existing', ['fresh', 'imported'])
+def test_root_init_leaves_native_good_config_backup_writable_as_uid_10000(existing):
+    command = [sys.executable, '-B', str(ROOT / 'tests/hermes/fixtures/config-backup-owner.py'), str(ROOT), existing]
+    if os.geteuid() != 0:
+        command = ['unshare', '--user', '--map-auto', '--map-root-user', *command]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize('staging', [False, True])
 def test_workshop_persistent_cap_reuses_image_and_rejects_unmounted_data(tmp_path, monkeypatch, staging):
     spec = importlib.util.spec_from_file_location('cloud_workshop_storage', ROOT / 'deploy/cloud/migrate.py')
@@ -120,7 +130,7 @@ def publish_projection(home, config):
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv('PAIOS_INTEGRATION_PORT', '19661')
     gateway_config = tmp_path / 'gateway.json'
-    gateway_config.write_text(json.dumps({'desktop': {'enabled': True}, 'capability_packages': {
+    gateway_config.write_text(json.dumps({'time_zone': 'Asia/Taipei', 'desktop': {'enabled': True}, 'capability_packages': {
         'enabled': ['mijia'], 'gateway': ['mijia'], 'single_host_flags': {'mijia': 'PAIOS_ENABLE_MIHOME'}}}))
     monkeypatch.setenv('PAIOS_PRODUCT_CONFIG', str(gateway_config))
     monkeypatch.delenv('PAIOS_STAGE', raising=False)
@@ -147,7 +157,7 @@ def load(home):
 def test_selected_families_keep_the_shared_hosts_provider_interpreter_and_registry(home, monkeypatch, staging):
     gateway = Path(os.environ['PAIOS_PRODUCT_CONFIG'])
     selection = json.loads((ROOT / 'deploy/cloud/cloud.json').read_text())['capability_packages']
-    gateway.write_text(json.dumps({'desktop': {'enabled': True}, 'capability_packages': selection}))
+    gateway.write_text(json.dumps({'time_zone': 'Asia/Taipei', 'desktop': {'enabled': True}, 'capability_packages': selection}))
     (cloud.SECRETS / 'agentbay.key').write_text('synthetic-agentbay')
     monkeypatch.delenv('PAIOS_DEPLOYMENT', raising=False)
     if staging:
@@ -156,6 +166,8 @@ def test_selected_families_keep_the_shared_hosts_provider_interpreter_and_regist
     config = load(home)
     assert set(config['mcp_servers']) >= {'phone', 'yimi_shared', 'platform_ts', 'desktop', 'owner_mac'}
     phone = config['mcp_servers']['phone']
+    if not staging:
+        assert phone['env']['PAIOS_TIME_ZONE'] == 'Asia/Taipei'
     assert phone['command'] == '/opt/paios-phone/bin/python'
     assert phone['args'] == [str(ROOT / ('capability/packages/phone/fake/server.py' if staging else 'capability/packages/phone/server/main.py'))]
     assert config['mcp_servers']['yimi_shared']['args'][:2] == ['-m', 'capability.hosts.python']
@@ -292,7 +304,7 @@ def test_production_shaped_config_gets_product_rules_and_retains_state(home, mon
                                  'api_server': {'interim_assistant_messages': False}}
     assert config['agent']['api_max_retries'] == 1
     assert config['agent']['auto_recovery_cycles'] == 0
-    for field in ('model', 'providers', 'fallback_providers', 'timezone', '_config_version',
+    for field in ('model', 'providers', 'fallback_providers', '_config_version',
                   'command_allowlist', 'known_plugin_toolsets', 'known_builtin_toolsets',
                   'tool_gateway_declined_tools'):
         assert config[field] == source[field]
@@ -471,7 +483,7 @@ def test_cloud_phone_provider_controls_production_and_staging_registration(home,
         phone = servers['phone']
         assert phone['args'] == [str(executor / 'server.py')]
         assert phone['env'] == {
-            'PAIOS_PHONE_PROVIDER': 'mac-android', 'PAIOS_INTEGRATION_PORT': '19661',
+            'PAIOS_PHONE_PROVIDER': 'mac-android', 'PAIOS_INTEGRATION_PORT': '19661', 'PAIOS_TIME_ZONE': 'Asia/Taipei',
             'PAIOS_DEEPSEEK_KEY_FILE': str(cloud.SECRETS / 'deepseek.key'),
             'PAIOS_SILICONFLOW_KEY_FILE': str(cloud.SECRETS / 'siliconflow.key'),
             'PAIOS_MOBILERUN_CONFIG': str(executor / 'mobilerun-config.example.yaml'),
@@ -484,7 +496,7 @@ def test_cloud_phone_provider_controls_production_and_staging_registration(home,
         executor = ROOT / 'integrations/connectors/phone_executor'
         assert servers['phone'] == {'command': '/opt/paios-phone/bin/python',
             'args': [str(executor / 'server.py')], 'cwd': str(executor), 'env': {
-                'PAIOS_PHONE_PROVIDER': 'agentbay', 'PAIOS_AGENTBAY_IMAGE': 'imgc-fixture',
+                'PAIOS_PHONE_PROVIDER': 'agentbay', 'PAIOS_AGENTBAY_IMAGE': 'imgc-fixture', 'PAIOS_TIME_ZONE': 'Asia/Taipei',
                 'PAIOS_AGENTBAY_KEY_FILE': str(cloud.SECRETS / 'agentbay.key'),
                 'PAIOS_AGENTBAY_ADBKEY': str(cloud.SECRETS / 'agentbay.adbkey'),
                 'PAIOS_DEEPSEEK_KEY_FILE': str(cloud.SECRETS / 'deepseek.key'),
@@ -578,7 +590,7 @@ def test_I17_desktop_mcp_is_discoverable_but_grantable_tools_never_enter_platfor
     (home / 'config.yaml').write_text(yaml.safe_dump({'platform_toolsets': {
         'cron': ['memory', 'desktop'], 'api_server_build': ['file', 'desktop']}}))
     for enabled in (True, False, True):
-        Path(os.environ['PAIOS_PRODUCT_CONFIG']).write_text(json.dumps({'desktop': {'enabled': enabled}}))
+        Path(os.environ['PAIOS_PRODUCT_CONFIG']).write_text(json.dumps({'time_zone': 'Asia/Taipei', 'desktop': {'enabled': enabled}}))
         cloud.initialize(home, INTEGRATION, PRODUCT_CONFIG)
         config = load(home)
         assert ('desktop' in config['mcp_servers']) is enabled
@@ -742,7 +754,7 @@ def test_fresh_home_uses_native_product_rules(home):
     cloud.initialize(home, INTEGRATION, PRODUCT_CONFIG)
     config = load(home)
     for field in ['model', 'custom_providers', 'auxiliary', 'compression', 'gateway',
-                  'display', 'fallback_providers', 'timezone']:
+                  'display', 'fallback_providers']:
         assert config[field] == source[field]
     assert config['agent'] == {**{key: value for key, value in source['agent'].items()
             if key not in {'max_turns', 'background_max_turns', 'run_budget_seconds', 'max_tokens', 'reasoning_effort'}},
@@ -2213,7 +2225,7 @@ def test_cloud_renderer_preserves_supplied_fictional_video_resources(tmp_path):
     import shutil
     cloud = tmp_path / 'deploy/cloud'
     cloud.mkdir(parents=True)
-    for name in ('prepare-build.py', 'staging_config.py', 'front.conf.in', 'paios_roaming_guard.js.in'):
+    for name in ('prepare-build.py', 'staging_config.py', 'front.conf.in', 'paios_roaming_guard.js.in', 'paios-staging-snapshot.timer'):
         shutil.copyfile(ROOT / 'deploy/cloud' / name, cloud / name)
     fixture = {'payment': {'enabled': True, 'staging': False}, 'product_resources': {
         'postgres': {'host': 'fixture-postgres'},
@@ -2358,7 +2370,7 @@ def test_I9_I14_payment_secret_mounts_are_scoped_and_staging_uses_own_keys():
 def test_I13_I14_rendered_staging_quarantines_restored_payment_intents(tmp_path):
     import shutil
     for relative in ['deploy/cloud/prepare-build.py', 'deploy/cloud/staging_config.py', 'deploy/cloud/cloud.json',
-                     'deploy/cloud/front.conf.in',
+                     'deploy/cloud/front.conf.in', 'deploy/cloud/paios-staging-snapshot.timer',
                      'deploy/cloud/paios_roaming_guard.js.in']:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2518,3 +2530,82 @@ def test_core_profile_projection_mounts_are_platform_writable_and_native_read_on
         assert not any(isinstance(mount, str) and mount.startswith('owner-data') for mount in native['volumes'])
     profile = json.loads((ROOT / 'deploy/cloud/cloud.json').read_text())['core_profile']
     assert profile == {'enabled': True, 'profile_home': '${PAIOS_DATA_ROOT}/core-profile', 'native_profile_home': '/opt/data'}
+
+@pytest.mark.parametrize('zone', ['America/Los_Angeles', 'UTC', 'Asia/Taipei'])
+def test_deployment_zone_replaces_imported_native_clock_in_both_profiles(home, zone, monkeypatch):
+    monkeypatch.setenv('PAIOS_PHONE_PROVIDER', 'mac-android')
+    gateway = Path(os.environ['PAIOS_PRODUCT_CONFIG'])
+    product = json.loads(gateway.read_text())
+    product['time_zone'] = zone
+    gateway.write_text(json.dumps(product))
+    (home / 'config.yaml').write_text('timezone: America/New_York\n')
+    cloud.initialize(home, INTEGRATION, PRODUCT_CONFIG)
+    assert load(home)['timezone'] == zone
+    assert load(home)['mcp_servers']['phone']['env']['PAIOS_TIME_ZONE'] == zone
+    assert yaml.safe_load((home / 'workshop/config.yaml').read_text())['timezone'] == zone
+
+
+@pytest.mark.parametrize('deployment_zone', [None, 'America/Los_Angeles', 'UTC'])
+def test_n13_switch_renders_deployment_zone_before_migrate_and_native_init(home, monkeypatch, deployment_zone):
+    import shutil
+    from test_release import Stack, release, release_checks
+
+    render, start = release.render, release.start
+    stack = Stack(home / 'release-stack', monkeypatch)
+    candidate = stack.root / 'releases/cand'
+    legacy = subprocess.run(['git', '-C', str(ROOT), 'show', '9dff83f4f:deploy/cloud/cloud.json'],
+                            check=True, capture_output=True).stdout
+    assert 'time_zone' not in json.loads(legacy)
+    # A retained owner config and a stale rendered file both lack the new deployment field.
+    retained = home / 'mac-product.json'
+    retained.write_bytes(legacy)
+    for name in ('old', 'cand'):
+        build = stack.root / f'releases/{name}/deploy/cloud/.build'
+        build.mkdir(parents=True)
+        (build / 'production.json').write_bytes(legacy)
+    for name in ('prepare-build.py', 'staging_config.py', 'cloud.json', 'front.conf.in',
+                 'paios_roaming_guard.js.in', 'paios-staging-snapshot.timer'):
+        shutil.copyfile(ROOT / 'deploy/cloud' / name, candidate / 'deploy/cloud' / name)
+    config_path = candidate / 'deploy/cloud/cloud.json'
+    product = json.loads(config_path.read_text())
+    product['time_zone'] = 'Asia/Taipei'
+    config_path.write_text(json.dumps(product))
+    env = stack.root / 'releases/old/.release/env'
+    with env.open('a') as stream:
+        stream.write('PAIOS_PUBLIC_API_URL=https://fixture.invalid\nPAIOS_LEGACY_PUBLIC_API_URLS=\n')
+        if deployment_zone:
+            stream.write(f'PAIOS_TIME_ZONE={deployment_zone}\n')
+    expected = deployment_zone or product['time_zone']
+    definition = yaml.safe_load((ROOT / 'deploy/cloud/compose.yaml').read_text())
+    for service in ('gateway', 'hermes'):
+        assert './.build/production.json:/etc/paios/cloud.json:ro' in definition['services'][service]['volumes']
+    assert definition['services']['hermes']['environment']['PAIOS_PRODUCT_CONFIG'] == '/etc/paios/cloud.json'
+    product_path = candidate / 'deploy/cloud/.build/production.json'
+    monkeypatch.setenv('PAIOS_PRODUCT_CONFIG', str(product_path))
+    (home / 'config.yaml').write_text('timezone: America/New_York\n')
+    calls = []
+
+    def run(command, **kwargs):
+        if 'migrate' in command:
+            assert command[command.index('--config') + 1] == '/etc/paios/cloud.json'
+            assert json.loads(product_path.read_text())['time_zone'] == expected
+            calls.append('migrate')
+        if command[0] == 'up' and command[-1] == 'hermes':
+            assert calls == ['migrate']
+            cloud.initialize(home, INTEGRATION, PRODUCT_CONFIG)
+            assert load(home)['timezone'] == expected
+            assert yaml.safe_load((home / 'workshop/config.yaml').read_text())['timezone'] == expected
+            calls.append('init')
+        return SimpleNamespace(stdout='')
+
+    monkeypatch.setattr(release, 'render', render)
+    monkeypatch.setattr(release, 'start', start)
+    monkeypatch.setattr(stack.host, 'definition', lambda target: definition)
+    monkeypatch.setattr(stack.host, 'runner', lambda target: run)
+    monkeypatch.setattr(release_checks, 'wait_health', lambda *args: {})
+    monkeypatch.setattr(release_checks, 'native_ready', lambda *args: {'official_native_ready': True})
+    with (home / 'switch.lock').open('a') as lock:
+        release.switch(stack.host, candidate, lock)
+    assert calls == ['migrate', 'init']
+    assert retained.read_bytes() == legacy
+    assert (stack.root / 'releases/old/deploy/cloud/.build/production.json').read_bytes() == legacy

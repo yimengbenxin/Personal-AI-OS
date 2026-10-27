@@ -1,11 +1,14 @@
 package com.personalaios.glasses
 
 import org.json.JSONObject
+import android.os.Handler
+import android.os.Looper
 
 data class HudAction(val id: String, val label: String, val command: JSONObject, val lines: List<String>? = null)
 data class HudCard(val id: String, val title: String, val lines: List<String>, val priority: Int,
     val expiresAt: Long, val progress: String? = null,
-    val actions: List<HudAction> = emptyList(), val ack: JSONObject? = null, val startedAt: Long = 0)
+    val actions: List<HudAction> = emptyList(), val ack: JSONObject? = null, val startedAt: Long = 0,
+    val companion: Boolean = false)
 /** A call_transcript line (mine = the owner's); the same turn's partial updates replace it in place. */
 data class HudCaption(val id: String, val role: String, val turn: Long, val text: String, val at: Long) {
     val mine get() = role == "user"
@@ -26,56 +29,95 @@ data class HudState(val status: String = "配置连接", val cards: List<HudCard
     val conversation: CallConversation? = null, val conversationPending: CallModeRequest? = null, val conversationError: String? = null,
     val avatar: AvatarPortrait? = null, val ambientConfirmation: Boolean = false,
     val activities: List<ActivityCard> = emptyList(), val legacyProgressCovered: Boolean = false,
-    val microphoneApplied: Microphone? = null, val ambientRequestedAt: Long = 0L, val ambientError: String? = null)
+    val microphoneApplied: Microphone? = null, val ambientRequestedAt: Long = 0L, val ambientError: String? = null,
+    val companionReply: CompanionReplyLine? = null)
 
 class HudCards(private val deviceId: String, val replies: FormalReplies = FormalReplies(deviceId),
     private val monotonic: () -> Long = android.os.SystemClock::elapsedRealtime,
-    private val wireNow: () -> Long = ServerClock.shared::nowMillis) {
+    private val wireNow: () -> Long = ServerClock.shared::nowMillis,
+    private val activityChanged: () -> Unit = {}) {
     private val activities = linkedMapOf<String, ActivityCard>()
-    // Replay identity survives presentation retirement until this inbox's scope is cleared.
-    private val retiredActivityRevisions = mutableMapOf<String, Long>()
-    private val activityProcessedIds = mutableSetOf<String>()
-    fun activities(): List<ActivityCard> {
+    private data class RetiredActivity(val revision: Long, val processed: String, val until: Long)
+    private val retiredActivityRevisions = linkedMapOf<String, RetiredActivity>()
+    private var retiredRevisionFloor = -1L
+    private val activityHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var activityExpiry: Runnable? = null
+    // At most 64 terminal payloads and 256 identities; retired identities live ten minutes.
+    private fun reclaimActivities() {
         val now = monotonic()
-        val entries = activities.entries.iterator()
-        while (entries.hasNext()) {
-            val card = entries.next().value
-            if (card.phase != ActivityPhase.running && card.alpha(now) == 0f) {
-                retiredActivityRevisions[card.id] = card.revision
-                entries.remove()
+        val terminal = activities.values.filter { !it.ongoing }
+        terminal.forEachIndexed { index, card ->
+            if (card.alpha(now) == 0f || index < terminal.size - 64) {
+                retiredActivityRevisions[card.id] = RetiredActivity(card.revision, card.processedEventId, now + 600_000)
+                activities.remove(card.id)
             }
         }
+        val retired = retiredActivityRevisions.entries.iterator()
+        while (retired.hasNext()) {
+            val identity = retired.next().value
+            if (identity.until <= now || retiredActivityRevisions.size > 256) {
+                retiredRevisionFloor = maxOf(retiredRevisionFloor, identity.revision)
+                retired.remove()
+                if (activities.values.none { it.processedEventId == identity.processed } &&
+                    retiredActivityRevisions.values.none { it.processed == identity.processed })
+                    cards.entries.removeAll { it.value.ack?.optString("processed_event_id") == identity.processed }
+            }
+        }
+        activityExpiry?.let(activityHandler::removeCallbacks)
+        activityExpiry = (activities.values.filter { !it.ongoing }.map { it.receivedAt + 3500 } +
+            retiredActivityRevisions.values.map { it.until }).minOrNull()?.let { until ->
+            Runnable { activityExpiry = null; reclaimActivities(); activityChanged() }.also {
+                activityHandler.postDelayed(it, (until - now).coerceAtLeast(0))
+            }
+        }
+    }
+    fun activities(): List<ActivityCard> {
+        reclaimActivities()
         return activities.values.toList()
     }
     fun legacyProgressCovered(card: HudCard? = cards.values.lastOrNull { it.progress != null }): Boolean =
-        card?.ack?.optString("processed_event_id") in activityProcessedIds
+        card?.ack?.optString("processed_event_id")?.let { processed ->
+            activities.values.any { it.processedEventId == processed } || retiredActivityRevisions.values.any { it.processed == processed }
+        } ?: false
     private val cards = linkedMapOf<String, HudCard>()
+    val companionReply = CompanionReplyState()
     private val captions = linkedMapOf<String, HudCaption>()
     private var payment: PaymentNotice? = null
+    private val retiredPayments = mutableSetOf<String>()
     var accepted: JSONObject? = null
         private set
     fun captions() = captions.values.toList()
     fun payment(now: Long = monotonicMillis()) = payment?.takeIf { it.until > now }
-    fun clearPayment() { payment = null }
+    fun clearPayment() { payment?.let { retiredPayments.add(it.paymentId) }; payment = null }
 
-    fun accept(message: JSONObject, now: Long = monotonicMillis()): List<HudCard> {
+    fun accept(message: JSONObject, now: Long = monotonicMillis(), companionMode: Boolean = false): List<HudCard> {
         snapshot(now)
         accepted = null
         when (message.getString("operation")) {
+            "ambient_reply" -> if (companionMode && companionReply.notice(message, now)) {
+                replies.notified(message.getString("processed_event_id"))?.let { companionReply.header(it, now) }
+                cards.values.forEach(companionReply::card)
+            }
             "activity_update" -> {
                 activities()
                 val next = ActivityCard.from(message, monotonic())
-                if (next.revision > (activities[next.id]?.revision ?: retiredActivityRevisions[next.id] ?: -1)) {
+                if (next.revision > (activities[next.id]?.revision ?: retiredActivityRevisions[next.id]?.revision ?: retiredRevisionFloor)) {
                     retiredActivityRevisions.remove(next.id)
-                    activityProcessedIds.add(next.processedEventId)
                     activities.remove(next.id)
                     activities[next.id] = next
                 }
+                reclaimActivities()
             }
             "payment_notice" -> {
                 val next = PaymentNotice.from(message, now)
-                payment = if (next != null && next.paymentId == payment?.paymentId && next.state == payment?.state)
-                    next.copy(until = minOf(next.until, payment!!.until)) else next
+                if (next == null) clearPayment()
+                else if (next.paymentId !in retiredPayments || next.terminal && (payment == null || next.paymentId == payment?.paymentId)) {
+                    val previous = payment
+                    if (previous != null && previous.paymentId != next.paymentId) retiredPayments.add(previous.paymentId)
+                    payment = if (previous?.paymentId == next.paymentId && (!next.terminal || next.state == previous.state))
+                        next.copy(until = minOf(next.until, previous.until)) else next
+                    if (next.terminal) retiredPayments.add(next.paymentId)
+                }
             }
             "display_card" -> {
                 val id = message.getString("card_id")
@@ -111,12 +153,14 @@ class HudCards(private val deviceId: String, val replies: FormalReplies = Formal
                     startedAt = cards[id]?.startedAt ?: now)
                 accepted = update?.ack
                 put(card)
+                companionReply.card(card)
             }
             "accepted", "result_header", "ack_receipt" -> {
                 replies.accept(message, wireNow()).forEach { update ->
                     if (update.reset) cards.values.filter { it.ack?.optString("processed_event_id") == update.id }
                         .forEach { cards.remove(it.id) }
                 }
+                if (message.getString("operation") == "result_header") companionReply.header(message, now)
             }
         }
         return snapshot(now)
@@ -133,7 +177,7 @@ class HudCards(private val deviceId: String, val replies: FormalReplies = Formal
         cards.values.filter { it.expiresAt <= now }.forEach {
             cards.remove(it.id)
         }
-        return cards.values.toList()
+        return cards.values.map { it.copy(companion = companionReply.owns(it)) }
     }
     // Arrival order is stable; the last card is the newest presentation.
     private fun put(card: HudCard) {
@@ -145,6 +189,9 @@ class HudCards(private val deviceId: String, val replies: FormalReplies = Formal
         cards[cardId]?.takeIf { it.expiresAt > now }?.actions?.firstOrNull { it.id == actionId }?.command
     fun consume(id: String) { cards.remove(id) }
     fun clearInteractions() { cards.values.filter { it.actions.isNotEmpty() }.forEach { cards.remove(it.id) } }
-    fun clear() { activities.clear(); retiredActivityRevisions.clear(); activityProcessedIds.clear()
-        cards.clear(); captions.clear(); replies.clear(); payment = null; accepted = null }
+    fun clearActivities() { activityExpiry?.let(activityHandler::removeCallbacks); activityExpiry = null
+        activities.clear(); retiredActivityRevisions.clear(); retiredRevisionFloor = -1
+    }
+    fun clear() { clearActivities()
+        cards.clear(); captions.clear(); replies.clear(); companionReply.clear(); payment = null; retiredPayments.clear(); accepted = null }
 }

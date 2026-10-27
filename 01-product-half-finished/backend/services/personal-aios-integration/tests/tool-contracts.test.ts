@@ -22,7 +22,7 @@ test('actual Hermes run-scope policy withholds owner data schemas and blocks for
   const names = enabledToolSchemas({memory: true, health: true, contacts: true, visual:true,voiceprint:true}).map(schema => schema.name);
   const code = `import json,sys,runpy\nfrom types import SimpleNamespace\nglobals().update(runpy.run_path(sys.argv[2]))\nnames=json.loads(sys.argv[1])\n` +
     `for scope in (*RUN_SCOPES,'care'):\n agent=SimpleNamespace(tools=[{'function':{'name':n}} for n in names])\n restrict_agent(agent,scope)\n` +
-    ` for name in ['paios_health_query','paios_contacts_search','paios_visual_recall','paios_visual_delete','paios_people','paios_speaker_name']:\n` +
+    ` for name in ['paios_health_query','paios_contacts_search','paios_visual_recall','paios_visual_delete','paios_people','paios_speaker_name','paios_personality_zone']:\n` +
     `  allowed=scope=='owner' or scope=='care' and name=='paios_health_query'\n` +
     `  assert (name in [_tool_name(t) for t in agent.tools]) == allowed\n` +
     `  assert (tool_block(agent,name) is None) == allowed\n` +
@@ -43,12 +43,12 @@ function input(): MemoryCommandInput {
       relation_to_peers: 'unknown', typed_scores: {}, depends_on: []}};
 }
 test('enabled central schema registers only implemented tools and leaves confirmation out of model tools', () => {
-  assert.deepEqual(enabledToolSchemas({memory: false}).map(s => s.name), ['paios_l5_read', 'paios_l5_locate', 'paios_open_reply','paios_task_amend','paios_terminal_question','paios_call_offer','paios_glasses_pay','paios_visual_delete','paios_payment','paios_avatar','paios_senses']);
+  assert.deepEqual(enabledToolSchemas({memory: false}).map(s => s.name), ['paios_l5_read', 'paios_l5_locate', 'paios_open_reply','paios_personality_zone','paios_task_amend','paios_terminal_question','paios_call_offer','paios_glasses_pay','paios_visual_delete','paios_payment','paios_avatar','paios_senses']);
   assert.deepEqual(enabledToolSchemas({memory: true}).map(s => s.name),
-    ['paios_l5_read', 'paios_l5_locate', 'paios_open_reply','paios_task_amend', 'paios_l3_query', 'paios_l3_inspect', 'paios_l3_commit', 'paios_l3_forget','paios_terminal_question','paios_call_offer','paios_glasses_pay','paios_visual_delete','paios_payment','paios_avatar','paios_senses']);
+    ['paios_l5_read', 'paios_l5_locate', 'paios_open_reply','paios_personality_zone','paios_task_amend', 'paios_l3_query', 'paios_l3_inspect', 'paios_l3_commit', 'paios_l3_forget','paios_terminal_question','paios_call_offer','paios_glasses_pay','paios_visual_delete','paios_payment','paios_avatar','paios_senses']);
   assert.equal(enabledToolSchemas({memory: true, actions: true}).some(s => s.name === 'paios_action_request'), true);
   // Owner-only ambient tools appear only with the journal / voiceprint registry they serve.
-  assert.deepEqual(enabledToolSchemas({memory: false, ambient: true, voiceprint: true}).map(s => s.name).slice(4),
+  assert.deepEqual(enabledToolSchemas({memory: false, ambient: true, voiceprint: true}).map(s => s.name).slice(5),
     ['paios_terminal_question','paios_call_offer','paios_glasses_pay','paios_visual_delete','paios_payment','paios_avatar','paios_senses','paios_ambient_journal_search', 'paios_speaker_name','paios_people']);
   assert.equal(enabledToolSchemas({memory: false, ambient: true}).some(s => s.name === 'paios_speaker_name'), false);
   assert.deepEqual(enabledToolSchemas({memory: false, voiceprint: true}).find(s => s.name === 'paios_speaker_name')!.parameters.required, ['speaker']);

@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "name": "local_read",
+      "tool": "read_deck",
+      "args": {},
+      "state": "succeeded"
+    },
+    {
+      "name": "pointing",
+      "tool": "locate_region",
+      "args": {
+        "utterance_id": "utterance:demo",
+        "snapshot_ref": "snapshot:demo",
+        "frame_refs": [
+          "frame:demo"
+        ]
+      },
+      "state": "succeeded"
+    },
+    {
+      "name": "plan_only",
+      "tool": "plan_text",
+      "args": {
+        "suggestion_ids": [
+          "suggestion:demo"
+        ],
+        "base_snapshot_ref": "snapshot:demo"
+      },
+      "state": "succeeded"
+    },
+    {
+      "name": "before_confirmation",
+      "tool": "apply_text",
+      "args": {
+        "plan_id": "plan:demo",
+        "plan_sha256": "492a7b86d9c26994f544eeb58d94dee4b124b9ab20069c2d331e8a790bab5f34",
+        "idempotency_key": "call:demo"
+      },
+      "state": "waiting"
+    },
+    {
+      "name": "unknown_status",
+      "tool": "edit_status",
+      "args": {
+        "operation_id": "op:missing"
+      },
+      "state": "unknown"
+    }
+  ]
+}

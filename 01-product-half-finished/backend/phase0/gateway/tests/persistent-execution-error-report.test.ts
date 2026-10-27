@@ -3,6 +3,19 @@ import test from 'node:test';
 import {reportPersistentExecutionError} from '../src/rayneo-persistent-production-entrypoint.ts';
 import {AudioConsumptionUnknownError} from '../../../services/personal-aios-integration/src/media/audio-consumption.ts';
 import {CallTurnBackpressureError} from '../src/call-turn-manager.ts';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {RuntimeEventStore,installRuntimeEventStore} from '../../../services/personal-aios-integration/src/self-events.ts';
+
+test('a throwing frame survives timestamp normalization and persistent event storage',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'execution-error-')),store=new RuntimeEventStore({directory:root}),detach=installRuntimeEventStore(store);
+  t.after(async()=>{detach();await store.close();await rm(root,{recursive:true,force:true});});
+  const lines:string[]=[];t.mock.method(process.stderr,'write',(value:string)=>{lines.push(value);return true;});
+  reportPersistentExecutionError(new TypeError('fetch failed'));
+  const wire=JSON.parse(lines[0]!);assert.equal(wire.at,undefined);assert.ok(wire.frames.length>0);
+  const rows=await store.read();assert.equal(typeof rows[0]?.at,'number');assert.deepEqual(rows[0]?.frames,wire.frames);
+});
 
 test('production reporting preserves each known call turn budget reason',t=>{
   const lines:string[]=[];
@@ -32,7 +45,7 @@ test('production reporting separates lane transitions and prints only safe unkno
   assert.deepEqual(records[3].cause_codes,['VOICE_WINDOW_CANCELLED']);
   assert.deepEqual(records[4],{central_text_failed:'CALL_ARCHIVE_UNAVAILABLE',cause_codes:['EIO']});
   assert.equal(records[5].central_text_failed,'Error');
-  assert.ok(records[5].at.length>0&&records[5].at.every((frame:string)=>frame.length<=160&&!frame.includes('/Users/')&&!frame.includes('/opt/')));
-  assert.match(records[5].at[0],/persistent-execution-error-report\.test\.ts:\d+:\d+/);
+  assert.ok(records[5].frames.length>0&&records[5].frames.every((frame:string)=>frame.length<=160&&!frame.includes('/Users/')&&!frame.includes('/opt/')));
+  assert.match(records[5].frames[0],/persistent-execution-error-report\.test\.ts:\d+:\d+/);
   assert.doesNotMatch(lines.join(''),/private|secret|transcript/);
 });

@@ -113,9 +113,20 @@ struct YimiItem: Codable, Identifiable, Equatable {
 }
 
 /// Local history belongs to a provisioned pairing, just like the shared terminal cache.
-/// Unpartitioned legacy history has no trusted owner and is deliberately left untouched.
+/// A server history generation also retires legacy and previously paired owners' caches.
 struct YimiConversationStore: Sendable {
     let url: URL
+    private var epochURL: URL { url.appendingPathExtension("epoch") }
+    func historyEpoch() -> String? { try? String(contentsOf: epochURL, encoding: .utf8) }
+    func retireHistory(for epoch: String, generation: UInt64 = 0) throws {
+        try AssistantHistoryFiles.locked {
+            let directory = url.deletingLastPathComponent()
+            let retired = try AssistantHistoryFiles.retire(epoch, generation: generation, in: directory)
+            guard retired || historyEpoch() != epoch else { return }
+            try write([], historyEpoch: epoch)
+            try Data(epoch.utf8).write(to: epochURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+    }
 
     init?(folder: URL, pairing: RealtimeDevicePairing?) {
         guard let pairing else { return nil }
@@ -127,9 +138,12 @@ struct YimiConversationStore: Sendable {
         return try JSONDecoder().decode([YimiItem].self, from: Data(contentsOf: url))
     }
 
-    func write(_ items: [YimiItem]) throws {
-        try JSONEncoder().encode(items).write(to: url,
-            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    func write(_ items: [YimiItem], historyEpoch: String? = nil) throws {
+        try AssistantHistoryFiles.locked {
+            guard AssistantHistoryFiles.permits(historyEpoch, in: url.deletingLastPathComponent()) else { throw CocoaError(.fileWriteNoPermission) }
+            try JSONEncoder().encode(items).write(to: url,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
     }
 }
 
@@ -148,6 +162,7 @@ struct YimiConversationTimeline {
     private var positions = YimiItemPositions()
     private var positionBase = 0
     private var callMembers: [String: [String]] = [:]
+    private var latestAssistantByOwner: [String: String] = [:]
     private var unsettled = Set<String>()
     private var serverCount = 0, recordCount = 0
     private var newestSeq = 0
@@ -161,6 +176,12 @@ struct YimiConversationTimeline {
 
     private func position(_ id: String) -> Int? { positions[id].map { $0 - positionBase } }
     func item(id: String) -> YimiItem? { position(id).map { items[$0] } }
+
+    /// Watch displays one latest assistant row, in the same order as the conversation.
+    func latestAssistantItem(ownerIdentity: String?) -> YimiItem? {
+        guard let ownerIdentity, let id = latestAssistantByOwner[ownerIdentity] else { return nil }
+        return item(id: id)
+    }
 
     /// A terminal snapshot is a source revision, independent of local sends and call captions.
     /// Live one-item packets use their delta; missed revisions and restored pages reconcile by ID.
@@ -231,6 +252,9 @@ struct YimiConversationTimeline {
             // A server item's unique sequence and retained timestamp fix its position.
             if item.seq == old.seq {
                 items[index] = item
+                if item.kind != old.kind || item.ownerIdentity != old.ownerIdentity {
+                    updateLatestAssistant(old: old, item: item, at: index)
+                }
                 if item.callID != old.callID || item.turn != old.turn || item.role != old.role { reindex() }
                 updateUnsettled(item)
                 changed(item.seq == nil ? [item.id] : settleReply(item).union([item.id]))
@@ -286,6 +310,7 @@ struct YimiConversationTimeline {
     }
     private mutating func index(_ item: YimiItem, at index: Int) {
         positions[item.id] = index + positionBase
+        if item.kind == .her, let owner = item.ownerIdentity { latestAssistantByOwner[owner] = item.id }
         if let callID = item.callID { callMembers[callID, default: []].append(item.id) }
         if let seq = item.seq { serverCount += 1; newestSeq = max(newestSeq, seq) }
         else {
@@ -294,8 +319,17 @@ struct YimiConversationTimeline {
         }
         updateUnsettled(item)
     }
+    private mutating func updateLatestAssistant(old: YimiItem, item: YimiItem, at index: Int) {
+        if let owner = old.ownerIdentity, latestAssistantByOwner[owner] == old.id {
+            latestAssistantByOwner[owner] = items.last { $0.kind == .her && $0.ownerIdentity == owner }?.id
+        }
+        if item.kind == .her, let owner = item.ownerIdentity,
+           latestAssistantByOwner[owner].flatMap({ position($0) }).map({ $0 > index }) != true {
+            latestAssistantByOwner[owner] = item.id
+        }
+    }
     private mutating func reindex() {
-        positions = YimiItemPositions(); positionBase = 0; callMembers = [:]; unsettled = []
+        positions = YimiItemPositions(); positionBase = 0; callMembers = [:]; unsettled = []; latestAssistantByOwner = [:]
         serverCount = 0; recordCount = 0; newestSeq = 0; newestLocalDate = .distantPast
         for (offset, item) in items.enumerated() { index(item, at: offset) }
     }
@@ -314,6 +348,9 @@ struct YimiConversationTimeline {
         if items.prefix(removed.count).allSatisfy({ removed.contains($0.id) && $0.callID == nil }) {
             for item in items.prefix(removed.count) {
                 positions[item.id] = nil; unsettled.remove(item.id)
+                if let owner = item.ownerIdentity, latestAssistantByOwner[owner] == item.id {
+                    latestAssistantByOwner[owner] = nil
+                }
                 if item.seq != nil { serverCount -= 1 } else { recordCount -= 1 }
             }
             items.removeFirst(removed.count); positionBase += removed.count
@@ -420,10 +457,15 @@ struct YimiChatScrollState {
         var nearBottom: Bool { bottom <= viewport + 72 }
         var nearTop: Bool { top >= -44 }
     }
+    private let tracksHistoryGestures: Bool
     private(set) var pinned = true
     private var metrics: Metrics?
     private var historyGesture = false
     private var requestedHistory = false
+
+    init(tracksHistoryGestures: Bool = false) {
+        self.tracksHistoryGestures = tracksHistoryGestures
+    }
 
     mutating func drag(towardHistory: Bool, began: Bool) -> Bool {
         if began { requestedHistory = false }
@@ -432,13 +474,14 @@ struct YimiChatScrollState {
         return takeHistoryRequest()
     }
 
-    /// Returns whether this layout asks for one older page. Only scrolling that leaves the size unchanged says where the
-    /// owner is; a size change (growth, keyboard, an older page above) is not the owner moving.
+    /// Returns whether this layout asks for one older page. Offset changes during programmatic positioning or keyboard
+    /// adjustment are not reading intent for consumers that report history gestures. Geometry-only consumers infer
+    /// reading from stable-size offset changes, including AppKit clip-view scrolling.
     mutating func update(_ next: Metrics) -> Bool {
         let previous = metrics
         metrics = next
         let resized = previous.map { abs(next.height - $0.height) > 1 || next.viewport != $0.viewport } ?? true
-        if !resized, !requestedHistory { pinned = next.nearBottom }
+        if !resized, !requestedHistory, !tracksHistoryGestures || historyGesture || !pinned { pinned = next.nearBottom }
         return takeHistoryRequest()
     }
 
@@ -465,7 +508,7 @@ struct YimiChatScrollState {
 }
 
 /// The newest rows a chat renders. The timeline keeps every loaded row (the cache restores all of them, the server retains
-/// up to 5000) and an eager stack lays out each rendered row, so a surface renders a tail. The older-history action first
+/// up to 5000). The surface keeps a bounded tail of lazy message containers. The older-history action first
 /// widens the tail over rows that are already loaded and asks the server only when none is hidden.
 struct YimiChatWindow: Equatable {
     static let tail = 150
@@ -481,6 +524,27 @@ struct YimiChatWindow: Equatable {
         let allShown = !hides(loaded)
         limit += Self.step
         return allShown
+    }
+}
+
+/// How much of one message a chat surface lays out. SwiftUI measures and draws a Text whole, on the main thread, several
+/// times per layout, so a 70k-character reply (receipt facts dumped into replies on N13) held the history push past the
+/// 10 s watchdog. A longer message shows a prefix here and opens in full on its own page.
+enum YimiLongText {
+    static let characters = 2_000
+    static let lines = 40
+
+    /// The prefix a chat row renders, or nil when the whole text fits. Reads at most `characters` characters.
+    static func preview(_ text: String) -> String? {
+        var end = text.startIndex, count = 0, breaks = 0
+        while end < text.endIndex {
+            if count == characters { break }
+            if text[end].isNewline { breaks += 1; if breaks == lines { break } }
+            count += 1
+            end = text.index(after: end)
+        }
+        guard !text[end...].allSatisfy(\.isWhitespace) else { return nil }
+        return text[..<end].trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 }
 

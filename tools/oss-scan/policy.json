@@ -3246,7 +3246,7 @@
     {
       "rule": "domain",
       "file": "01-product-half-finished/backend/services/personal-aios-integration/src/model-usage.ts",
-      "line_pattern": "\\*\\ https://opencode\\.ai/docs/go/\\ \\(only\\ models\\ whose\\ Cached\\ Write\\ column\\ is\\ \"\\-\"\\)\\ \\*/",
+      "line_pattern": "\\*\\ https://opencode\\.ai/docs/go/\\ \\(only\\ models\\ whose\\ Cached\\ Write\\ column\\ is\\ \"\\-\"\\)",
       "reason": "Public model-provider endpoints documented by the usage billing adapter; no account credentials."
     },
     {
@@ -3258,7 +3258,7 @@
     {
       "rule": "domain",
       "file": "01-product-half-finished/backend/services/personal-aios-integration/src/model-usage.ts",
-      "line_pattern": "host==='opencode\\.ai'\\&\\&goInputBilling\\.has\\(model\\)\\)return\\ 'input';",
+      "line_pattern": "host==='opencode\\.ai'\\&\\&goInputBilling\\.has\\(model\\)\\|\\|",
       "reason": "Public model-provider endpoints documented by the usage billing adapter; no account credentials."
     },
     {
@@ -3410,6 +3410,120 @@
       "file": "ci/hermes-python312.requirements.txt",
       "line_pattern": "brotlicffi==1\\.2\\.0\\.2",
       "reason": "Locked Brotli Python dependency version; not a network address or instance identifier."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/capability-confirmation-restart-http.test.ts",
+      "line_pattern": "http:\\{internal_token:'synthetic\\-in\\-memory\\-internal\\-key',max_request_bytes:65536,request_timeout_ms:5000\\}\\}\\);",
+      "reason": "Explicit synthetic in-memory HTTP fixture token; the test creates an isolated local assembly and contains no account credential."
+    },
+    {
+      "rule": "app-key",
+      "file": "tests/hermes/data_reset_fixtures.py",
+      "line_pattern": "write\\(root\\('projections'\\),\\ 'current\\.json',\\ b'\\{\"model\":\"fixture\\-brain\",\"api_key\":\"synthetic\\-credential\\-never\\-print\"\\}'\\)",
+      "reason": "Synthetic model credential in isolated reset/restore fixtures; no external account credential."
+    },
+    {
+      "rule": "domain",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/model-usage-observer.test.ts",
+      "line_pattern": "'opencode\\-paios':\\{base_url:'https://opencode\\.ai/zen/go/v1',model:'deepseek\\-v4\\.1\\-flash',role:'delegation',protocol:'chat_completions'\\},",
+      "reason": "Public OpenCode API origin in an offline recorded protocol fixture; it carries no credential."
+    },
+    {
+      "rule": "domain",
+      "file": "deploy/cloud/data_reset_cold.py",
+      "line_pattern": "target\\ =\\ self\\.local\\ /\\ relative",
+      "reason": "Python pathlib expression self.local / relative, not a network domain or deployed endpoint."
+    },
+    {
+      "rule": "home-path",
+      "file": "01-product-half-finished/apple/current-mac-source-20260930/clients/phase0/apple-native/PersonalAIOSPhase0/OpenSource/apple-health-exporter/app/App/YimiConversation.swift",
+      "line_pattern": "let\\ line\\ =\\ \"directories\\[0\\]\\.path：/Users/fixture/Desktop，来源\\ desktop\\ relay。\\\\n\"",
+      "reason": "Fictional generic home path in a DEBUG UI-test long-message fixture."
+    },
+    {
+      "rule": "gitleaks:generic-api-key",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/model-settings-runtime.test.ts",
+      "line_pattern": "const\\ B=f\\.authority\\.keyDraft\\(f\\.source,\\{expected_revision:1,credential_ref:'custom',key:'signed\\-key\\-B\\-1234'\\}\\);",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "gitleaks:generic-api-key",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/model-settings-runtime.test.ts",
+      "line_pattern": "const\\ C=f\\.authority\\.keyDraft\\(f\\.source,\\{expected_revision:2,credential_ref:'custom',key:'signed\\-key\\-C\\-5678'\\}\\);",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/model-usage-observer.test.ts",
+      "line_pattern": "const\\ token='fake\\-recorded\\-usage\\-service\\-token',server=createServer\\(async\\(req,res\\)=>\\{await\\ handleModelSettingsHttp\\(req,res,runtime,token,16384\\);\\}\\);",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/startup-recovery.test.ts",
+      "line_pattern": "http:\\{internal_token:'synthetic\\-internal\\-key\\-abcdefghijklmnop',max_request_bytes:65536,request_timeout_ms:1000\\}\\}\\);",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/startup-recovery.test.ts",
+      "line_pattern": "skill:'fixture',max_event_bytes:8192,max_read_bytes:8192,http:\\{internal_token:'synthetic\\-internal\\-key\\-abcdefghijklmnop',max_request_bytes:8192,request_timeout_ms:1000\\}\\}\\);",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "tests/hermes/data_reset_fixtures.py",
+      "line_pattern": "write\\(root\\('projections'\\),\\ 'current\\.json',\\ b'\\{\"model\":\"fixture\\-brain\",\"api_key\":\"synthetic\\-credential\\-never\\-print\"\\}'\\)",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "tests/hermes/data_reset_fixtures.py",
+      "line_pattern": "write\\(root\\('hermes'\\),'mcp\\-tokens/tool\\.json',b'\\{\"token\":\"synthetic\\-credential\\-never\\-print\"\\}'\\)",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "tests/hermes/data_reset_fixtures.py",
+      "line_pattern": "write\\(root\\('hermes'\\),'\\.credentials\\.json',b'\\{\"token\":\"synthetic\\-credential\\-never\\-print\"\\}'\\)",
+      "reason": "Explicit synthetic credential for an isolated local test; no provider, deployed service or account secret."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/activity-runtime.test.ts",
+      "line_pattern": "http:\\{internal_token:'fixture\\-internal\\-key\\-abcdefghijklmnop',max_request_bytes:65536,request_timeout_ms:1000\\}\\}\\);",
+      "reason": "Explicit synthetic credential in an isolated local test; no provider account, deployed endpoint or real credential."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/u0-kernel-compat.test.ts",
+      "line_pattern": "const\\ root=new\\ URL\\('\\.\\./\\.\\./\\.\\./\\.\\./\\.\\./',import\\.meta\\.url\\)\\.pathname\\.replace\\(/\\\\/\\$/u,''\\),token='synthetic\\-u0\\-internal\\-token\\-abcdefgh';",
+      "reason": "Explicit synthetic credential in an isolated local test; no provider account, deployed endpoint or real credential."
+    },
+    {
+      "rule": "key-literal",
+      "file": "tests/hermes/fixtures/u0-native.py",
+      "line_pattern": "agent=AIAgent\\(model='fixture\\-model',provider='custom:fixture',base_url=base\\+'/v1',api_key='synthetic\\-fixture\\-key',",
+      "reason": "Explicit synthetic credential in an isolated local test; no provider account, deployed endpoint or real credential."
+    },
+    {
+      "rule": "domain",
+      "file": "deploy/cloud/data_reset_cold.py",
+      "line_pattern": "path\\ =\\ self\\.local/relative",
+      "reason": "Local filesystem path expressions using the self.local attribute; neither line contains a network hostname."
+    },
+    {
+      "rule": "domain",
+      "file": "deploy/cloud/data_reset_cold.py",
+      "line_pattern": "original,\\ destination\\ =\\ self\\.local/source,\\ self\\.local/target",
+      "reason": "Local filesystem path expressions using the self.local attribute; neither line contains a network hostname."
+    },
+    {
+      "rule": "key-literal",
+      "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/call-intent-fallback.test.ts",
+      "line_pattern": "const\\ token='fake\\-rq115\\-service\\-token\\-abcdefghijklmnop',service=createServer\\(async\\(req,res\\)=>\\{",
+      "reason": "Explicit fake service token used only by an isolated loopback integration fixture; no deployed or provider credential."
     }
   ],
   "public_namespaces": [

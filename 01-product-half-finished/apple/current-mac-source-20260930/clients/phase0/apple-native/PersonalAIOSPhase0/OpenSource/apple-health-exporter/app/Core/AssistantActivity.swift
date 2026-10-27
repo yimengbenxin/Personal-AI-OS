@@ -140,7 +140,9 @@ struct CentralActivityStore: Equatable, Sendable {
 /// Index anchors once for the whole history, including rows outside the visible tail.
 struct YimiActivityLayout {
     let replyProcessedIDs: Set<String>
+    private(set) var leading: [ActivityPresentation] = []
     private(set) var under: [String: [ActivityPresentation]] = [:]
+    /// Compatibility view of cards without request/reply anchors; their display slots are above.
     private(set) var unanchored: [ActivityPresentation] = []
     private var anchors: [String: String] = [:]
 
@@ -154,11 +156,20 @@ struct YimiActivityLayout {
         }
         replyProcessedIDs = Set(replies.keys)
         for activity in activities {
-            let rows = (activity.collapsed(replyProcessedIDs: replyProcessedIDs) ? replies : requests)[activity.processedEventID] ?? []
-            if rows.isEmpty { unanchored.append(activity) }
-            else {
+            let id = activity.processedEventID
+            let rows = activity.collapsed(replyProcessedIDs: replyProcessedIDs)
+                ? replies[id] ?? [] : requests[id] ?? replies[id] ?? []
+            if !rows.isEmpty {
                 anchors[activity.id] = rows[0]
                 for row in rows { under[row, default: []].append(activity) }
+            } else {
+                unanchored.append(activity)
+                // Wire decoding guarantees UTC timestamps. Replay arrival time is only an elapsed-time clock.
+                let started = (ISO8601.utc.date(from: activity.card.started_at)
+                    ?? ISO8601.basic.date(from: activity.card.started_at))!
+                let next = items.firstIndex { $0.date > started } ?? items.endIndex
+                if next == items.startIndex { leading.append(activity) }
+                else { under[items[next - 1].id, default: []].append(activity) }
             }
         }
     }

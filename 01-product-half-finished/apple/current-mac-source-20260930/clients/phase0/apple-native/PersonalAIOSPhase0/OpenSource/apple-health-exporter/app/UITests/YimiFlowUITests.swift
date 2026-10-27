@@ -1,14 +1,34 @@
 import XCTest
 
-/// Human-style flow through the 依米 app on the loopback transport: real taps, typing, long press and an edge swipe,
-/// with a screenshot attached at every step.
+private extension XCUIApplication {
+    func backgroundForYimiTest() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        springboard.activate()
+        XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 5), "SpringBoard is foreground")
+        let backgrounded = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
+            guard let app = object as? XCUIApplication else { return false }
+            return app.state == .runningBackground || app.state == .runningBackgroundSuspended
+        }, object: self)
+        XCTAssertEqual(XCTWaiter().wait(for: [backgrounded], timeout: 5), .completed,
+                       "the YiMi app is running in the background")
+    }
+}
+
+/// Local presentation flow with synthetic history: real taps, typing, long press and an edge swipe.
+/// Connected media and server replies are covered by YimiLiveUITests.
 final class YimiFlowUITests: XCTestCase {
     private var app: XCUIApplication!
 
-    override func setUp() {
-        continueAfterFailure = true
+    override func setUpWithError() throws {
+        continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments.append("-ui-testing")
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "activity-update.fixtures", withExtension: "json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let fixtures = try XCTUnwrap(root["fixtures"] as? [String: [String: Any]])
+        app.launchEnvironment["YIMI_CHAT_FIXTURES"] = "{\"count\":0,\"hugeHistory\":false}"
+        app.launchEnvironment["YIMI_ACTIVITY_FIXTURES"] = String(
+            decoding: try JSONSerialization.data(withJSONObject: [try XCTUnwrap(fixtures["single_running"])]), as: UTF8.self)
         app.launch()
     }
 
@@ -22,7 +42,7 @@ final class YimiFlowUITests: XCTestCase {
     private func button(_ label: String) -> XCUIElement { app.buttons[label].firstMatch }
 
     func testHomeChatCallFlow() {
-        XCTAssertTrue(app.staticTexts["在呢"].waitForExistence(timeout: 25), "auto-connects without a Start button")
+        XCTAssertTrue(button("对话").waitForExistence(timeout: 25), "fixture app reaches home")
         shot("01-home")
 
         button("对话").tap()
@@ -31,7 +51,8 @@ final class YimiFlowUITests: XCTestCase {
         let input = app.descendants(matching: .any)["yimi.input"].firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 3))
         input.tap()
-        input.typeText("今晚有点累\n")
+        input.typeText("今晚有点累")
+        button("发送").tap()
         XCTAssertTrue(app.staticTexts["今晚有点累"].waitForExistence(timeout: 5), "typed message appears")
         shot("02-chat-typed")
 
@@ -45,8 +66,10 @@ final class YimiFlowUITests: XCTestCase {
         button("回到语音通话").tap()
         XCTAssertTrue(button("挂断").waitForExistence(timeout: 5), "island restores the call")
 
-        button("摄像头").tap()
-        XCTAssertTrue(button("翻转镜头").waitForExistence(timeout: 5), "switched to video")
+        button("挂断").tap()
+        XCTAssertFalse(button("挂断").waitForExistence(timeout: 2), "voice call cover closes")
+        button("视频通话").tap()
+        XCTAssertTrue(button("翻转镜头").waitForExistence(timeout: 5), "video call cover opens")
         shot("05-video-call")
         button("收起通话").tap()
         XCTAssertTrue(button("回到视频通话").waitForExistence(timeout: 5), "video minimised (island + PiP)")
@@ -56,9 +79,9 @@ final class YimiFlowUITests: XCTestCase {
         button("挂断").tap()
         XCTAssertFalse(button("挂断").waitForExistence(timeout: 2), "call cover closes")
 
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)))
-        XCTAssertTrue(app.staticTexts["在呢"].waitForExistence(timeout: 5), "edge swipe goes back home")
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5)).withOffset(CGVector(dx: 2, dy: 0))
+        start.press(forDuration: 0, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)), withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertTrue(button("对话").waitForExistence(timeout: 5), "edge swipe goes back home")
         shot("07-home-after-swipe")
 
         button("按住说话").press(forDuration: 1.6)
@@ -174,7 +197,7 @@ final class YimiLiveUITests: XCTestCase {
 
     func test2ReturnFromBackgroundShowsHome() {
         assertHomeWithoutCover("02-before-background")
-        XCUIDevice.shared.press(.home)
+        app.backgroundForYimiTest()
         sleep(4)
         app.activate()
         assertHomeWithoutCover("02-after-background")
@@ -207,7 +230,7 @@ final class YimiLiveUITests: XCTestCase {
         input.typeText("测试：请用三段话介绍一下你自己")
         send()
         shot("07-long-question-sent")
-        XCUIDevice.shared.press(.home)
+        app.backgroundForYimiTest()
         sleep(8)
         app.activate()
         if button("对话").waitForExistence(timeout: 10) { button("对话").tap() }
@@ -344,6 +367,34 @@ final class YimiLiveUITests: XCTestCase {
         shot("04-voice-call-closed")
     }
 
+    /// Minimising before she picked up left the island unresponsive, and 「查看完整对话」 froze
+    /// the app (his history holds 72,255- and 29,164-character replies). On his phone, against his own history.
+    func test14MinimiseBeforeLiveThenReturnAndOpenHistory() {
+        assertHomeWithoutCover("14-home")
+        button("语音通话").tap()
+        let connection = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "yimi.call.connection.")).firstMatch
+        XCTAssertTrue(connection.waitForExistence(timeout: 15), "call presentation opens")
+        button("收起通话").tap()
+        let island = button("回到语音通话")
+        XCTAssertTrue(island.waitForExistence(timeout: 5), "minimised while connecting")
+        var start = ProcessInfo.processInfo.systemUptime
+        island.tap()
+        XCTAssertTrue(connection.waitForExistence(timeout: 2), "the island brings the connecting call back")
+        XCTAssertLessThanOrEqual(ProcessInfo.processInfo.systemUptime - start, 2)
+        let live = expectation(for: NSPredicate(format: "value == %@", "已接通"), evaluatedWith: connection)
+        XCTAssertEqual(XCTWaiter().wait(for: [live], timeout: 60), .completed)
+        start = ProcessInfo.processInfo.systemUptime
+        app.buttons["yimi.call.transcript"].firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["yimi.chat.history"].waitForExistence(timeout: 3), "the full history opens during the call")
+        XCTAssertLessThanOrEqual(ProcessInfo.processInfo.systemUptime - start, 3, "history push stays interactive")
+        shot("14-history-during-call")
+        island.tap()
+        let hangUp = app.buttons["yimi.call.hangUp"].firstMatch
+        XCTAssertTrue(hangUp.waitForExistence(timeout: 3))
+        hangUp.tap()
+    }
+
     func test5VideoCallConnectsAndHangsUp() {
         assertHomeWithoutCover("05-home")
         button("视频通话").tap()
@@ -439,6 +490,39 @@ final class YimiActivityUITests: XCTestCase {
         attachment.name = name; attachment.lifetime = .keepAlways
         add(attachment)
     }
+    /// N13 dumped receipt facts into replies (72,255 characters on the owner's phone); the history push laid that text
+    /// out whole on the main thread and the watchdog killed the app. A long reply now shows a prefix and opens in full.
+    func testHistoryWithA70kReplyOpensWithinOneSecond() throws {
+        let fixtureURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "activity-update.fixtures", withExtension: "json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any])
+        let running = try XCTUnwrap((root["fixtures"] as? [String: [String: Any]])?["parallel_six"])
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing"]
+        app.launchEnvironment["YIMI_ACTIVITY_FIXTURES"] = String(decoding: try JSONSerialization.data(withJSONObject: [running]), as: UTF8.self)
+        app.launchEnvironment["YIMI_LONG_REPLY_CHARACTERS"] = "70000"
+        app.launch()
+        let history = app.descendants(matching: .any)["yimi.chat.history"].firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout: 60), "the fixture opens the history")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let open = app.buttons["对话"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 30), "back on the home page")
+        // Measure the app's navigation-to-layout interval. tap() also includes XCTest IPC and idle polling.
+        open.tap()
+        XCTAssertTrue(history.exists)
+        let elapsed = try XCTUnwrap(Double(try XCTUnwrap(history.value as? String)))
+        XCTAssertGreaterThan(elapsed, 0)
+        let measurement = XCTAttachment(string: "navigation_to_layout_seconds=\(elapsed)")
+        measurement.name = "history-navigation-to-layout"; measurement.lifetime = .keepAlways
+        add(measurement)
+        XCTAssertLessThan(elapsed, 1, "history opened in \(elapsed) s")
+        let full = app.buttons["yimi.message.fullText"].firstMatch
+        XCTAssertTrue(full.waitForExistence(timeout: 2), "the long reply shows a prefix and a link to the whole text")
+        shot(app, name: "history-long-reply-prefix")
+        full.tap()
+        XCTAssertTrue(app.textViews["yimi.message.fullText.page"].waitForExistence(timeout: 2), "the whole reply opens on its own page")
+        shot(app, name: "history-long-reply-full")
+    }
+
     func testCardExpandsSixItemsAndCollapsesUnderMatchingReply() throws {
         continueAfterFailure = false
         let fixtureURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "activity-update.fixtures", withExtension: "json"))
@@ -483,5 +567,207 @@ final class YimiActivityUITests: XCTestCase {
         screenshot.name = "activity-completed"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+}
+
+/// Deterministic chat regressions use synthetic Debug fixtures and the same conversation timeline as the app.
+final class YimiChatRegressionUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func tearDown() {
+        if let app, (testRun?.failureCount ?? 0) > 0 {
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "failure-tree"
+            tree.lifetime = .keepAlways
+            add(tree)
+            shot("failure")
+        }
+    }
+
+    override func setUpWithError() throws {
+#if targetEnvironment(simulator)
+        continueAfterFailure = false
+        app = XCUIApplication()
+#else
+        throw XCTSkip("synthetic chat regression runs only on Simulator")
+#endif
+    }
+
+    private func activityFixtureJSON(offsets: [TimeInterval] = [-900, -480]) throws -> String {
+        let fixtureURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "activity-update.fixtures", withExtension: "json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any])
+        let fixtures = try XCTUnwrap(root["fixtures"] as? [String: [String: Any]])
+        var packets = Array([try XCTUnwrap(fixtures["single_running"]), try XCTUnwrap(fixtures["parallel_six"])].prefix(offsets.count))
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = Date()
+        let observedAt = now.addingTimeInterval(-15)
+        for index in packets.indices {
+            var card = try XCTUnwrap(packets[index]["card"] as? [String: Any])
+            let startedAt = now.addingTimeInterval(offsets[index])
+            card["started_at"] = formatter.string(from: startedAt)
+            card["observed_at"] = formatter.string(from: observedAt)
+            card["last_progress_at"] = formatter.string(from: observedAt)
+            card["elapsed_ms"] = Int(observedAt.timeIntervalSince(startedAt) * 1000)
+            var items = try XCTUnwrap(card["items"] as? [[String: Any]])
+            for itemIndex in items.indices {
+                let itemStart = startedAt.addingTimeInterval(Double(itemIndex + 1))
+                items[itemIndex]["started_at"] = formatter.string(from: itemStart)
+                if items[itemIndex]["state"] as? String == "running" {
+                    items[itemIndex]["elapsed_ms"] = Int(observedAt.timeIntervalSince(itemStart) * 1000)
+                    items[itemIndex].removeValue(forKey: "completed_at")
+                } else {
+                    let completedAt = observedAt.addingTimeInterval(-2)
+                    items[itemIndex]["completed_at"] = formatter.string(from: completedAt)
+                    items[itemIndex]["elapsed_ms"] = Int(completedAt.timeIntervalSince(itemStart) * 1000)
+                }
+            }
+            card["items"] = items
+            packets[index]["card"] = card
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: packets), as: UTF8.self)
+    }
+
+    private func launchChatFixture(hugeHistory: Bool = false) throws {
+        let descriptor: [String: Any] = ["count": hugeHistory ? 5000 : 150, "hugeHistory": hugeHistory]
+        app.launchArguments = ["-ui-testing"]
+        app.launchEnvironment["YIMI_CHAT_FIXTURES"] = String(
+            decoding: try JSONSerialization.data(withJSONObject: descriptor), as: UTF8.self)
+        app.launchEnvironment["YIMI_ACTIVITY_FIXTURES"] = try activityFixtureJSON()
+        app.launch()
+    }
+
+    private func button(_ label: String) -> XCUIElement { app.buttons[label].firstMatch }
+
+    private func shot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func openChatWithKeyboard() -> XCUIElement {
+        XCTAssertTrue(button("对话").waitForExistence(timeout: 25), "fixture app reaches home")
+        button("对话").tap()
+        XCTAssertTrue(app.navigationBars.staticTexts["依米"].waitForExistence(timeout: 5), "conversation opens")
+        let keyboard = button("切换到键盘")
+        if keyboard.waitForExistence(timeout: 5) { keyboard.tap() }
+        let input = app.descendants(matching: .any)["yimi.input"].firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 10), "chat input appears")
+        return input
+    }
+
+    private func reply(for prompt: String, token: String) -> XCUIElement {
+        app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label != %@", token, prompt)).firstMatch
+    }
+
+    func testOldCompanionAndOrphanKeepTheirHistoryPositionAndNewestPreview() throws {
+        app.launchArguments = ["-ui-testing"]
+        app.launchEnvironment["YIMI_CHAT_FIXTURES"] = "{\"count\":3,\"hugeHistory\":false,\"oldCompanion\":true}"
+        app.launchEnvironment["YIMI_ACTIVITY_FIXTURES"] = try activityFixtureJSON(offsets: [-150])
+        app.launch()
+        XCTAssertTrue(button("对话").waitForExistence(timeout: 25))
+        let preview = app.staticTexts["依米：最近一条历史"].firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "home previews the newest message, not the old companion reply")
+        shot("rq116-home-newest-preview")
+        button("对话").tap()
+        let old = app.staticTexts["10-18 随身回复"].firstMatch
+        let middle = app.staticTexts["历史 1：这是一条完整保留的历史消息，用于验证聊天窗口。"].firstMatch
+        let newest = app.staticTexts["最近一条历史"].firstMatch
+        let card = app.descendants(matching: .any)["yimi.activity.card"].firstMatch
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        XCTAssertTrue(newest.isHittable, "the newest message stays at the visible end of history")
+        // With three rows, the orphan and both neighbouring messages fit without scrolling.
+        XCTAssertTrue(old.isHittable)
+        XCTAssertTrue(card.isHittable)
+        XCTAssertTrue(middle.isHittable)
+        XCTAssertLessThanOrEqual(old.frame.maxY, card.frame.minY)
+        XCTAssertLessThanOrEqual(card.frame.maxY, middle.frame.minY, "the replayed orphan uses started_at, before the newer rows")
+        XCTAssertLessThan(middle.frame.maxY, newest.frame.minY)
+        shot("rq116-orphan-between-history-rows-newest-last")
+    }
+
+    func testLongHistoryOpensWithoutLayingOutOffscreenHugeReplies() throws {
+        try launchChatFixture(hugeHistory: true)
+        XCTAssertTrue(button("对话").waitForExistence(timeout: 25), "fixture app reaches home")
+        let started = ProcessInfo.processInfo.systemUptime
+        button("对话").tap()
+        XCTAssertTrue(app.navigationBars.staticTexts["依米"].waitForExistence(timeout: 5), "conversation opens")
+        let keyboard = button("切换到键盘")
+        if keyboard.waitForExistence(timeout: 5) { keyboard.tap() }
+        let input = app.descendants(matching: .any)["yimi.input"].firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 15), "chat input attaches within 15 seconds")
+        input.tap()
+        XCTAssertTrue(input.isHittable, "focused input remains hittable")
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        print("YIMI_CHAT_ATTACH_SECONDS=\(elapsed)")
+        XCTAssertLessThanOrEqual(elapsed, 15,
+                                 "home-to-chat keyboard attach stays within 15 seconds")
+        shot("chat-regression-huge-history-input")
+    }
+
+    func testChatHistoryStaysVisibleWithKeyboardAndFollowsReplies() throws {
+        try launchChatFixture()
+        let input = openChatWithKeyboard()
+        let firstToken = "chat-" + String(UUID().uuidString.prefix(8))
+        let firstPrompt = "只回复这个标记，不加其他文字：" + firstToken
+        input.tap()
+        input.typeText(firstPrompt)
+        button("发送").tap()
+        let firstReply = reply(for: firstPrompt, token: firstToken)
+        XCTAssertTrue(firstReply.waitForExistence(timeout: 15), "first fixture reply appears")
+        let firstVisible = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: firstReply)
+        XCTAssertEqual(XCTWaiter().wait(for: [firstVisible], timeout: 5), .completed,
+                       "first reply follows into the viewport")
+        XCTAssertTrue(firstReply.isHittable, "first reply is visible in the viewport")
+        shot("chat-regression-first-reply-visible")
+
+        button("切换到语音").tap()
+        button("切换到键盘").tap()
+        input.tap()
+        let secondToken = "chat-" + String(UUID().uuidString.prefix(8))
+        let secondPrompt = "只回复这个标记，不加其他文字：" + secondToken
+        input.typeText(secondPrompt)
+        XCTAssertTrue(firstReply.isHittable, "history remains visible while the field is focused and typing")
+        button("发送").tap()
+        let secondReply = reply(for: secondPrompt, token: secondToken)
+        XCTAssertTrue(secondReply.waitForExistence(timeout: 15), "second fixture reply appears")
+        XCTAssertTrue(secondReply.isHittable, "the new reply is visible without leaving chat")
+        shot("chat-regression-second-reply-visible")
+    }
+
+    func testTypingWorksAfterBackgroundMidReply() throws {
+        try launchChatFixture()
+        let input = openChatWithKeyboard()
+        let firstToken = "resume-" + String(UUID().uuidString.prefix(8))
+        let firstPrompt = "请只回复这个标记：" + firstToken
+        input.tap()
+        input.typeText(firstPrompt)
+        button("发送").tap()
+        app.backgroundForYimiTest()
+        sleep(3)
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "YiMi returns to foreground")
+        if !app.descendants(matching: .any)["yimi.input"].firstMatch.waitForExistence(timeout: 5) {
+            XCTAssertTrue(button("对话").waitForExistence(timeout: 10), "conversation can be reopened")
+            button("对话").tap()
+            let keyboard = button("切换到键盘")
+            if keyboard.waitForExistence(timeout: 5) { keyboard.tap() }
+        }
+        let decision = app.buttons.matching(NSPredicate(
+            format: "label CONTAINS '未确认' OR label CONTAINS '结果不确定'")).firstMatch
+        XCTAssertFalse(decision.exists, "background return does not leave a recovery decision blocking chat")
+        let resumedInput = app.descendants(matching: .any)["yimi.input"].firstMatch
+        XCTAssertTrue(resumedInput.waitForExistence(timeout: 10), "chat input returns")
+        XCTAssertTrue(resumedInput.isHittable, "chat input accepts typing after backgrounding")
+        let secondToken = "resume-" + String(UUID().uuidString.prefix(8))
+        let secondPrompt = "请只回复这个标记：" + secondToken
+        resumedInput.tap()
+        resumedInput.typeText(secondPrompt)
+        button("发送").tap()
+        let secondReply = reply(for: secondPrompt, token: secondToken)
+        XCTAssertTrue(secondReply.waitForExistence(timeout: 15), "second fixture reply arrives after backgrounding")
+        XCTAssertTrue(secondReply.isHittable, "reply remains visible in the resumed conversation")
+        shot("chat-regression-resumed-reply-visible")
     }
 }

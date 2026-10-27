@@ -1,4 +1,4 @@
-"""Eight package tools wrap the existing executor; no action/consent authority lives here."""
+"""Package tools wrap the existing executor; no action/consent authority lives here."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import sys
 from typing import Literal
-import uuid
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "integrations/connectors/phone_executor"))
@@ -27,9 +26,11 @@ def output(body):
 
 
 def snapshot(raw, job_id=None):
+    if "jobs" in raw:
+        return receipts.project(raw, job_id=None, revision=1)
     if raw.get("capability_receipt"):
         return raw["capability_receipt"]
-    return receipts.project(raw, job_id=job_id or raw.get("job_id") or "job-" + uuid.uuid4().hex[:12],
+    return receipts.project(raw, job_id=job_id or raw.get("job_id"),
                             revision=raw.get("receipt_revision", 1))
 
 
@@ -40,27 +41,21 @@ async def invoke(name, args):
     try:
         try:
             owner = None if name == "phone_cancel" else payment.unresolved(executor, principal)
-        except (ValueError, AttributeError):
-            return output(receipts.receipt("unknown", status={"reason_code": "PAYMENT_LINEAGE_UNREADABLE"},
-                unknowns=[receipts.unknown_fact("payment_state", "付款来源记录无法核验")],
-                next={"retry": "after_check", "check_with": "phone_status", "waiting_on": "none"},
-                job={"id": "job-" + uuid.uuid4().hex[:12], "revision": 1}))
-        if owner and name not in {"phone_status", "phone_control_link", "phone_cancel"}:
+        except payment.OwnerCheckRequired as exc:
+            if name != "phone_status":
+                return output(payment.owner_check(principal, exc))
+            owner = None
+        except (ValueError, AttributeError, OSError):
+            if name != "phone_status":
+                return output(receipts.receipt("unknown", status={"reason_code": "PAYMENT_LINEAGE_UNREADABLE"},
+                    unknowns=[receipts.unknown_fact("payment_state", "付款来源记录无法核验")],
+                    next={"retry": "after_check", "check_with": "phone_check", "waiting_on": "none"}))
+            owner = None  # Reading a snapshot cannot start a reconciliation without readable ownership.
+        if owner and name not in {"phone_status", "phone_check", "phone_control_link", "phone_cancel"}:
             return output(receipts.receipt("unknown", status={"reason_code": "PAYMENT_ORDER_CHECK_REQUIRED"},
                 unknowns=[receipts.unknown_fact("payment_state", "必须先核对原订单")],
-                next={"retry": "after_check", "check_with": "phone_status", "waiting_on": "none",
-                      "waiting_detail": owner["of_job"]}, job={"id": "job-" + uuid.uuid4().hex[:12], "revision": 1}))
-        if name == "phone_status" and owner and args.get("job_id") == owner["of_job"]:
-            if not args.get("check_job_id") or not args.get("origin_processed_event_id"):
-                return output(receipts.receipt("unknown", status={"reason_code": "PAYMENT_CHECK_BINDING_REQUIRED"},
-                    unknowns=[receipts.unknown_fact("payment_state", "原订单核对需要平台绑定的任务来源")],
-                    next={"retry": "after_check", "check_with": "phone_status", "waiting_on": "none"},
-                    job={"id": "job-" + uuid.uuid4().hex[:12], "revision": 1}))
-            args["job_id"] = payment.start_check(executor, owner, args["check_job_id"], args["origin_processed_event_id"], args.get("context"), args.get("self_check_of"))
-        if name == "phone_status":
-            args.pop("check_job_id", None)
-            args.pop("origin_processed_event_id", None)
-            args.pop("self_check_of", None)
+                next={"retry": "after_check", "check_with": "phone_check", "waiting_on": "none",
+                      "waiting_detail": owner["of_job"]}, job={"id": owner["of_job"], "revision": 1}))
         if name == "phone_cancel":
             # The legacy stop wire has no principal. Narrow its targets before calling it.
             targets = [jid for jid, job in executor._jobs.items() if job["principal_id"] == principal and
@@ -86,7 +81,7 @@ async def invoke(name, args):
             args["effect"] = {"kind": kind, "task_type": task_type, "requested": False,
                               **({"recipient": args.pop("recipient")} if kind == "send" else {})}
             args.pop("recipient", None)
-        raw = await getattr(executor, name)(**args)
+        raw = await payment.status_check(executor, owner, args) if name == "phone_check" else await getattr(executor, name)(**args)
         jid = raw.get("job_id")
         if jid in executor._jobs:
             executor._jobs[jid]["effect_kind"] = declared if kind is not None else MANIFEST["tools"][name]["effect"]
@@ -94,12 +89,14 @@ async def invoke(name, args):
                 executor._jobs[jid]["task_type"] = task_type
                 executor._write_running(jid, force=True)
             return output(snapshot(executor._jobs[jid], jid))
-        if jid or name in {"phone_status", "phone_control_link"}:
+        if jid or "jobs" in raw or name in {"phone_status", "phone_control_link"}:
             status = raw if "jobs" in raw else await executor.phone_status(principal_id=principal, job_id=jid)
             jobs = status.get("jobs", [])
-            if len(jobs) == 1 and name != "phone_control_link":
+            if len(jobs) == 1 and args.get("job_id") and name != "phone_control_link":
                 return output(snapshot(jobs[0], jobs[0]["job_id"]))
-            body = snapshot({"jobs": []})
+            body = (receipts.receipt("unknown", unknowns=[receipts.unknown_fact("outcome", "尚未找到指定任务的可核验回执")],
+                    next={"retry": "allowed", "check_with": "phone_check", "waiting_on": "none"})
+                    if name == "phone_status" and args.get("job_id") and not jobs else snapshot({"jobs": []}))
             body["jobs"] = [snapshot(job, job["job_id"]) for job in jobs]
             body["values"] = [receipts.value("任务", job["job_id"], "none", "observed", "executor_spool", receipts.now()) for job in jobs]
             for key in ("provider", "status", "state", "stage", "view_url", "summary", "control_url", "control_link", "control_links", "resource_url", "answer", "phase"):
@@ -112,15 +109,19 @@ async def invoke(name, args):
         if executor.SPOOL and raw.get("answer"):
             raw["observed_content"] = [{"key": "诊断", "text": raw["answer"], "provenance": "observed"}]
         return output(snapshot(raw))
+    except (FileNotFoundError, PermissionError):
+        return output(receipts.receipt("unknown", status={"reason_code": "PHONE_LOCAL_RESOURCE_UNAVAILABLE"},
+            unknowns=[receipts.unknown_fact("outcome", "执行器本地配置或资源不可用，尚未核实执行结果")],
+            next={"retry": "allowed" if name == "phone_status" else "after_check",
+                  "check_with": "phone_status" if name == "phone_status" else "phone_check", "waiting_on": "none"}))
     except (TimeoutError, ConnectionError, OSError):
         return output(receipts.receipt("unknown", status={"reason_code": "PHONE_DISCONNECTED"},
             unknowns=[receipts.unknown_fact("outcome", "连接中断，不能证明操作失败")],
-            next={"retry": "after_check", "check_with": "phone_status", "waiting_on": "none"},
-            job={"id": "job-" + uuid.uuid4().hex[:12], "revision": 1}))
+            next={"retry": "allowed" if name == "phone_status" else "after_check",
+                  "check_with": "phone_status" if name == "phone_status" else "phone_check", "waiting_on": "none"}))
     except ValueError:
         return output(receipts.receipt("failed", status={"reason_code": "PHONE_INPUT_INVALID"},
-            next={"retry": "forbidden", "check_with": "phone_status", "waiting_on": "none"},
-            job={"id": "job-" + uuid.uuid4().hex[:12], "revision": 1}))
+            next={"retry": "forbidden", "check_with": "phone_status", "waiting_on": "none"}))
 
 
 @mcp.tool()
@@ -136,11 +137,16 @@ async def phone_task(goal: str, task_type: Literal["read", "read_app", "purchase
 
 
 @mcp.tool()
-async def phone_status(principal_id: str, job_id: str | None = None, context: dict | None = None,
-                       check_job_id: str | None = None, origin_processed_event_id: str | None = None,
-                       self_check_of: str | None = None) -> CallToolResult:
-    """读取本人的任务回执；付款结果未知时指定原 job_id，只读核对原订单。"""
+async def phone_status(principal_id: str, job_id: str | None = None, context: dict | None = None) -> CallToolResult:
+    """读取本人已有的任务回执，不启动任务。"""
     return await invoke("phone_status", locals())
+
+
+@mcp.tool()
+async def phone_check(principal_id: str, job_id: str, context: dict | None = None, check_job_id: str | None = None,
+                      origin_processed_event_id: str | None = None, self_check_of: str | None = None) -> CallToolResult:
+    """只读核对原任务的订单付款状态；再次查询原任务沿用已有核对结果，核对任务可用 phone_status 读取。"""
+    return await invoke("phone_check", locals())
 
 
 @mcp.tool()

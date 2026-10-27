@@ -1,0 +1,88 @@
+{
+  "snapshot": {
+    "version": 1,
+    "target": {
+      "kind": "keynote-local",
+      "app_bundle_id": "com.apple.iWork.Keynote",
+      "document_id": "demo-doc",
+      "file_identity": "demo-volume:42",
+      "file_url": "file:///fixtures/demo.key",
+      "display_name": "演示.key",
+      "target_id": "deck:demo",
+      "target_device_id": "mac:demo"
+    },
+    "deck_revision": "002573e7f4e1c156af98c592bc72088cca59aacbf496c7123c5c4d620ac741a4",
+    "captured_at": "2026-10-26T00:00:00Z",
+    "clock_uncertainty_ms": 10,
+    "presentation_id": "presentation:demo",
+    "mode": "editing",
+    "slide_id": "slide:2",
+    "slide_number": 2,
+    "page_source": "document_selection",
+    "cross_check": "unavailable",
+    "image": {
+      "target_id": "deck:demo",
+      "target_device_id": "mac:demo",
+      "image_ref": "mac-image:demo",
+      "sha256": "5306d0284c7946673bbe38bd26eb321adbf626692537c40cf24905a129f9c2d4",
+      "mime": "image/jpeg",
+      "width": 1280,
+      "height": 720,
+      "window_id": 42,
+      "captured_at": "2026-10-26T00:00:00Z",
+      "expires_at": "2026-10-26T00:01:00Z"
+    },
+    "elements": [
+      {
+        "element_id": "text:2:1",
+        "kind": "text",
+        "text": "预计 30 万杯",
+        "text_sha256": "f3e9aa585d803306c6493c9bab359438e18bfdef82571f4ef853b60903e3afea",
+        "bbox": [
+          0.2,
+          0.3,
+          0.7,
+          0.5
+        ],
+        "text_style_ref": "style:2:1"
+      }
+    ]
+  },
+  "plan": {
+    "version": 1,
+    "plan_id": "plan:demo",
+    "revision": 1,
+    "target": {
+      "kind": "keynote-local",
+      "app_bundle_id": "com.apple.iWork.Keynote",
+      "document_id": "demo-doc",
+      "file_identity": "demo-volume:42",
+      "file_url": "file:///fixtures/demo.key",
+      "display_name": "演示.key",
+      "target_id": "deck:demo",
+      "target_device_id": "mac:demo"
+    },
+    "scope_session_id": "scope:demo",
+    "base_deck_revision": "002573e7f4e1c156af98c592bc72088cca59aacbf496c7123c5c4d620ac741a4",
+    "workflow": "local_review_then_project",
+    "edits": [
+      {
+        "work_item_id": "page:2:text:1",
+        "slide_id": "slide:2",
+        "slide_number": 2,
+        "element_id": "text:2:1",
+        "op": "replace_text",
+        "before_text_sha256": "f3e9aa585d803306c6493c9bab359438e18bfdef82571f4ef853b60903e3afea",
+        "after_text": "预计 50 万杯",
+        "basis_refs": [
+          "utterance:demo",
+          "pointing:demo"
+        ]
+      }
+    ],
+    "preview_items": [
+      "第 2 页：预计 30 万杯 → 预计 50 万杯"
+    ],
+    "plan_sha256": "492a7b86d9c26994f544eeb58d94dee4b124b9ab20069c2d331e8a790bab5f34"
+  }
+}

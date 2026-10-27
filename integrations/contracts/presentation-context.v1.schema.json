@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:paios:presentation-context:1",
+  "title": "Existing MCP tools/list _meta ai.yimi.presentation; no new wire operation",
+  "anyOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "shared_window_id",
+        "origin_processed_event_id",
+        "session_id",
+        "attachment_grant_id"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "urn:paios:presentation:1#/$defs/target"
+        },
+        "shared_window_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "origin_processed_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attachment_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    }
+  ]
+}

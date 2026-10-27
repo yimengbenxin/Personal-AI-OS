@@ -14,12 +14,16 @@ import {PosixStorage} from '../../../services/personal-aios-integration/src/stor
 import {ContractError,sha256} from '../../../services/personal-aios-integration/src/contracts.ts';
 import {createPersonalAIOSAssembly} from '../../../services/personal-aios-integration/src/assembly.ts';
 import {sourceClient,type NativeRun} from '../../../services/personal-aios-integration/tests/native-source-fixture.ts';
+import {fileURLToPath} from 'node:url';
+import {PersonalityZone} from '../../../services/personal-aios-integration/src/personality/zone.ts';
 
 const token='self-mcp-synthetic-internal-token',binding={run_id:'owner-run',session_id:'session',tool_call_id:'call'};
 test('self MCP authenticates each call, validates windows, and keeps status and originals private',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'self-mcp-')),errors:unknown[]=[];
   await mkdir(join(directory,'spool'));
   const self=await createSelfSurface({storage:new PosixStorage(directory),errand_spool:join(directory,'spool'),policy_version:'fixture',onError:e=>errors.push(e)});
+  const zone=new PersonalityZone(new PosixStorage(directory));
+  await zone.call('owner',{action:'apply',expected_version:0,content:'表达：先说结论'},'change');
   const runtime={scheduleContext:async(context:typeof binding)=>{
     if(context.run_id!=='owner-run')throw new ContractError('SCHEDULE_OWNER_REQUIRED',403);
     return {principal_id:'owner',allow_owner_mutation:true};}};
@@ -56,6 +60,13 @@ test('self MCP authenticates each call, validates windows, and keeps status and 
   assert.equal((await client.callTool({name:'runtime_query',arguments:{}})).isError,true);
   assert.equal((await client.callTool({name:'runtime_query',arguments:{_context:binding,since:100,until:1}})).isError,true);
   assert.equal((await client.callTool({name:'runtime_status',arguments:{_context:binding,_l4:{sessions:3,complete:false},_identity:{hermes_version:'fixture',provider:null,model:null}}})).isError,undefined);
+  const status=(await client.callTool({name:'runtime_status',arguments:{_context:binding,_l4:{sessions:3,complete:false},_identity:{hermes_version:'fixture',provider:null,model:null}}})).structuredContent as any;
+  assert.equal(status.personality_zone.read_only,true);assert.equal(status.personality_zone.content,'表达：先说结论');
+  const page=(await client.callTool({name:'runtime_query',arguments:{_context:binding,source:'personality',offset:1,limit:1}})).structuredContent as any;
+  assert.deepEqual(page.history.map((row:any)=>row.version),[0]);assert.equal(page.read_only,true);
+  const denied=await client.callTool({name:'runtime_query',arguments:{_context:{...binding,run_id:'guest'},source:'personality'}});
+  assert.equal(denied.isError,true);assert.doesNotMatch(JSON.stringify(denied),/先说结论/);
+  assert.equal((await zone.read('owner')).current,1);
   assert.equal((await fetch(url,{method:'POST',headers:{Authorization:'Bearer guest'}})).status,401);
   assert.equal((await fetch(url,{headers:{Authorization:`Bearer ${token}`}})).status,405);
   const unowned=join(directory,'spool','job-111111111111.delivered.json');
@@ -108,7 +119,7 @@ test('a question traverses Hermes native tools, owner Admission, self MCP and pe
   const at=Date.now();self.store.write({voice_call_stage:'session_open',channel:'phone',at});self.store.write({voice_call_stage:'turn_commit',at});
   for(const score of [.9,.8])self.store.write({voice_call_stage:'turn_speaker',channel:'phone',verdict:'owner',score,at});
   self.store.write({voice_call_stage:'turn_speaker',channel:'phone',verdict:'uncertain',score:.4,at});await self.store.flush();
-  const root=new URL('../../../../..',import.meta.url).pathname,source=process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT??'/opt/hermes-agent';
+  const root=fileURLToPath(new URL('../../../../..',import.meta.url)),source=process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT??'/opt/hermes-agent';
   const home=join(directory,'hermes');await mkdir(home);
   const probe=await promisify(execFile)(process.env.PAIOS_HERMES_PYTHON??join(source,'.venv/bin/python'),
     [join(root,'tests/hermes/self_mcp_probe.py'),`${base}/internal/self/mcp`,base,'run:self-owner','self-question'],

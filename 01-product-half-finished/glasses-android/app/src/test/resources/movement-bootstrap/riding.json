@@ -1,0 +1,68 @@
+{
+  "server_now": "2026-10-01T00:00:00.000Z",
+  "previous": {
+    "operation": "move_hud",
+    "kind": "ride_nav",
+    "at": "2026-10-01T00:00:00.000Z",
+    "seq": 23,
+    "coordinate_system": "wgs84",
+    "position": {
+      "lat": 31,
+      "lng": 121,
+      "accuracy_m": 5,
+      "at": "2026-10-01T00:00:00.000Z"
+    },
+    "ride": {
+      "speed_kmh": 18,
+      "avg_kmh": 16,
+      "max_kmh": 25,
+      "distance_m": 100,
+      "moving_s": 20,
+      "elapsed_s": 30,
+      "hr_alert": false
+    },
+    "nav": {
+      "nav_id": "f6b448cd-7a30-42e3-ad15-09f2a912358a",
+      "revision": 1,
+      "step_index": 0,
+      "maneuver": "right",
+      "distance_to_maneuver_m": 300,
+      "remaining_m": 1000,
+      "remaining_s": 400,
+      "route_segment_index": 0,
+      "segment_fraction": 0.25,
+      "maneuver_location": {
+        "lat": 31,
+        "lng": 121
+      }
+    },
+    "session_id": "glasses-continuity",
+    "schema_version": "paios.central.text-envelope.v1"
+  },
+  "packets": [
+    {
+      "operation": "move_hud",
+      "kind": "ride",
+      "at": "2026-10-01T00:00:00.000Z",
+      "seq": 23,
+      "coordinate_system": "wgs84",
+      "ride": {
+        "speed_kmh": 18,
+        "avg_kmh": 16,
+        "max_kmh": 25,
+        "distance_m": 100,
+        "moving_s": 20,
+        "elapsed_s": 30,
+        "hr_alert": false
+      },
+      "position": {
+        "lat": 31,
+        "lng": 121,
+        "accuracy_m": 5,
+        "at": "2026-10-01T00:00:00.000Z"
+      },
+      "session_id": "glasses-continuity",
+      "schema_version": "paios.central.text-envelope.v1"
+    }
+  ]
+}

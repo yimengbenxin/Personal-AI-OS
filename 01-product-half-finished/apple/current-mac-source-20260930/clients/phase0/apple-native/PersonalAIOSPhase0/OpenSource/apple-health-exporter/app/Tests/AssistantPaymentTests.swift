@@ -64,7 +64,7 @@ final class AssistantPaymentTests: XCTestCase {
             for name in extras[group] ?? [] { XCTAssertNotNil(nodes.removeValue(forKey: name), name) }
             // Activity display extends the formal contract; its closed shapes are checked by AssistantActivityTests.
             if group == "$defs" {
-                for name in ["activity_card", "activity_item"] { XCTAssertNotNil(nodes.removeValue(forKey: name)) }
+                for name in ["activity_card", "activity_item", "scope_confirmation"] { XCTAssertNotNil(nodes.removeValue(forKey: name)) }
             } else if group == "outputs" { XCTAssertNotNil(nodes.removeValue(forKey: "activity_update")) }
             // Mode controls extend the call contract while preserving the historical authority projection.
             if group == "inputs" {
@@ -126,6 +126,12 @@ final class AssistantPaymentTests: XCTestCase {
                 navigationDefinition["properties"] = navigationProperties; navigation["definition"] = navigationDefinition
                 nodes["nav_control"] = navigation
             } else if group == "outputs" {
+                var ready = try XCTUnwrap(nodes["ready"] as? [String: Any])
+                var readyProperties = try XCTUnwrap(ready["properties"] as? [String: Any])
+                XCTAssertEqual(readyProperties.removeValue(forKey: "history_epoch") as? [String: String],
+                    ["type": "string", "pattern": "^[a-f0-9]{32}$"])
+                XCTAssertFalse(try XCTUnwrap(ready["required"] as? [String]).contains("history_epoch"))
+                ready["properties"] = readyProperties; nodes["ready"] = ready
                 var hud = try XCTUnwrap(nodes["move_hud"] as? [String: Any])
                 var hudProperties = try XCTUnwrap(hud["properties"] as? [String: Any])
                 XCTAssertEqual(hudProperties.removeValue(forKey: "seq") as? NSDictionary,
@@ -187,6 +193,13 @@ final class AssistantPaymentTests: XCTestCase {
                 XCTAssertEqual(itemProperties.removeValue(forKey: "purpose") as? [String: [String]], ["enum": ["trust_window", "call"]])
                 XCTAssertEqual(itemProperties.removeValue(forKey: "source_device_id") as? [String: String], deviceID)
                 XCTAssertEqual(itemProperties.removeValue(forKey: "source_device_type") as? NSDictionary, deviceType as NSDictionary)
+                XCTAssertEqual(itemProperties.removeValue(forKey: "scope_confirmation") as? [String: String],
+                    ["$ref": "#/$defs/scope_confirmation"])
+                let scopeCondition: [[String: Any]] = [[
+                    "if": ["properties": ["scope_confirmation": [String: Any]()], "required": ["scope_confirmation"]],
+                    "then": ["properties": ["kind": ["const": "native_approval"]], "required": ["kind"]]
+                ]]
+                XCTAssertEqual(item.removeValue(forKey: "allOf") as? NSArray, scopeCondition as NSArray)
                 item["properties"] = itemProperties; confirmations["items"] = item
                 cardProperties["confirmations"] = confirmations; cards["properties"] = cardProperties
                 nodes["voice_confirmations"] = cards
@@ -307,6 +320,17 @@ final class AssistantPaymentTests: XCTestCase {
         let (formalBytes, formal) = try self.contract("formal-message.v1")
         XCTAssertEqual(SHA256.hash(data: formalBytes).map { String(format: "%02x", $0) }.joined(), AssistantCentralTextWire.contractSHA256)
         XCTAssertEqual(formal["version"] as? Int, 1)
+        var confirmation: [String: Any] = ["confirmation_id": String(repeating: "a", count: 64),
+            "event_id": "scope-event", "expires_in_ms": 1000, "kind": "native_approval",
+            "scope_confirmation": ["grant_request": ["scope_session_id": "scope-1", "target_id": "target-1",
+                "target_device_id": "device-1", "expires_at": "2026-10-26T12:00:00.000Z",
+                "allowed_operation_kinds": ["desktop.click"]], "preview_items": ["打开设置"]]]
+        var native: [String: Any] = ["schema_version": "paios.central.text-envelope.v1",
+            "operation": "voice_confirmations", "session_id": "session-1", "confirmations": [confirmation]]
+        _ = try packet(native)
+        confirmation.removeValue(forKey: "kind")
+        native["confirmations"] = [confirmation]
+        XCTAssertThrowsError(try packet(native), "A scope confirmation must explicitly be a native approval")
         let examples = try XCTUnwrap(contract["examples"] as? [String: [[String: Any]]])
         let inputs = try XCTUnwrap(contract["inputs"] as? [String: Any])
         let outputs = try XCTUnwrap(contract["outputs"] as? [String: Any])

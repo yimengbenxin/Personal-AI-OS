@@ -27,7 +27,7 @@ const errand=(task:string,success:boolean)=>d({app_event:{kind:'errand_result',t
 const settle=async()=>{for(let i=0;i<20;i++)await new Promise(resolve=>setImmediate(resolve));};
 
 const timed=new WeakSet<test.TestContext>();
-async function setup(t:test.TestContext) {
+async function setup(t:test.TestContext,time_zone='Asia/Taipei') {
   const directory=await mkdtemp(join(tmpdir(),'paios-care-'));
   const contacts=ContactsStore.open(join(directory,'contacts')),health=HealthStore.open(join(directory,'health'));
   contacts.ingest('owner','phone',{control_id:'cards',deleted:[],contacts:[{id:'a',name:'张丽',phones:[{number:'021-5555 1234',label:'_$!<Home>!$_'},
@@ -39,7 +39,7 @@ async function setup(t:test.TestContext) {
     deliver:async()=>{},request:async()=>{},locations:undefined as unknown as DeviceLocations,
     sync(batch:HealthBatch) {health.ingest('owner','phone',batch);h.care.synced(phone,'session',batch.metric,health.records('owner',batch.metric,batch.samples.map(s=>s.id)));},
     open() {
-      h.care=CareAuthority.open(join(directory,'care'),()=>h.clock);
+      h.care=CareAuthority.open(join(directory,'care'),()=>h.clock,time_zone);
       const ports:CarePorts={contacts,locate:async(principal,device,refresh)=>{
         if(refresh&&!h.locations.fresh(principal,device))await h.request();
         return {current:h.locations.fresh(principal,device),last_known:h.locations.lastKnown(principal,device)};
@@ -65,7 +65,7 @@ test('a fall is checked on at once; without a response for 60 s every emergency 
   h.care.respond('owner',T-6000,'刚才');await h.advance(59_999);
   assert.equal(h.sms.length,0,'speech before the fall is no response; the timer has not run out');
   await h.advance(1);
-  const stamp=new Intl.DateTimeFormat('zh-CN',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'shortOffset'}).format(T-5000);
+  const stamp=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Taipei',month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'shortOffset'}).format(T-5000);
   const text=`【依米紧急提醒】我是示例用户的AI助理依米。示例用户的手表在${stamp}检测到可能摔倒，已60秒无回应，可能受伤或失去意识。当前位置（台湾时间2026/10/9 14:00:00）：西湖边，`+
     'https://uri.amap.com/marker?position=120.15,30.27&coordinate=wgs84（误差约12米）。请尽快联系示例用户。';
   assert.deepEqual(h.sms.map(m=>[m.to,m.text]),[['13800000000',text],['13900000001',text]],'the entry\'s number; else the named card\'s mobile');
@@ -232,4 +232,16 @@ test('fall outreach preserves durable event time through escalation and restart'
   assert.deepEqual(h.reachedAt,[T-5000]);
   h.care.close();h.clock+=5*60_000;h.open();await h.advance(0);
   assert.deepEqual(h.reachedAt,[T-5000,T-5000],'overdue check-in and alert share the durable fall event time');
+});
+
+for(const [zone,name,locationTime,fallTime] of [
+  ['America/Los_Angeles','洛杉矶时间','2026/10/8 23:00:00','22:59:55'],
+  ['UTC','GMT+0','2026/10/9 06:00:00','05:59:55'],
+] as const)test(`deployment ${zone} controls the fall SMS event and location clocks`,async t=>{
+  const h=await setup(t,zone);h.sync(fall('1'));await settle();await h.advance(60_000);
+  assert.equal(h.sms.length,2);
+  for(const {text} of h.sms){
+    assert.ok(text.includes(`当前位置（${name}${locationTime}）`),text);
+    assert.ok(text.includes(fallTime),text);assert.ok(!text.includes('台湾时间'),text);
+  }
 });

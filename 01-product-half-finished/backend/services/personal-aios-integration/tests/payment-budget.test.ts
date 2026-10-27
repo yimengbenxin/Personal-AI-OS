@@ -40,10 +40,11 @@ test('I-02: two prechecked cards atomically reserve the same remaining daily bud
 
 for(const [zone,instant,hours] of [
   ['Asia/Taipei','2026-10-14T12:00:00Z',24],
+  ['UTC','2026-10-14T12:00:00Z',24],
   ['America/Los_Angeles','2026-03-08T15:00:00Z',23],
   ['America/Los_Angeles','2026-11-01T15:00:00Z',25],
 ] as const)test(`I-02: ${zone} ${hours}h day expires unused auto grant at midnight without moving its reservation`,async t=>{
-  const f=await paymentFixture(t,{day_timezone:zone});f.setNow(Date.parse(instant)-3600000);await f.unlock();await f.known();
+  const f=await paymentFixture(t,{},true,zone);f.setNow(Date.parse(instant)-3600000);await f.unlock();await f.known();
   const day=localDayBounds(Date.parse(instant),zone);assert.equal(day.end-day.start,hours*3600000);
   f.setNow(day.end-6000);await f.locks();f.policy(true,true);
   const card=await f.open({initiating:f.initiating(),amount:5000});await f.advance(5000);

@@ -24,7 +24,7 @@ To get there, the assistant first has to be a complete, independent system that 
 | Safety through isolation, rollback and first-time confirmation, not refusal | Reads only check scope; external effects are confirmed the first time; every payment is confirmed | Gates and rollback (sections 5, 10, 12) |
 | Runs unchanged in the cloud | No mechanism specific to one personal computer on the product path | Container deployment (section 11) |
 
-What follows is based on the public 0.0.2 code. End-to-end capabilities marked "in progress" have not finished going live: code that is wired up is not the same as accepted in production.
+What follows is based on the public 0.1.5 code. End-to-end capabilities marked "in progress" have not finished going live: code that is wired up is not the same as accepted in production.
 
 ## 2 Overall structure
 
@@ -44,7 +44,7 @@ Hermes is pinned to upstream v0.22.5, commit `bf0203a` (`integrations/hermes/per
 
 | Attachment | What it does | Location |
 |---|---|---|
-| Thin plugin `yimi-gateway` | Registers three hooks, `pre_tool_call`, `transform_tool_result` and `post_tool_call`; hands decisions to the platform and turns results into receipts; 125 lines | `integrations/hermes/yimi_gateway/` |
+| Thin plugin `yimi-gateway` | Registers three tool hooks, `pre_tool_call`, `transform_tool_result` and `post_tool_call`, plus nine lifecycle hooks; hands decisions to the platform and turns results into receipts; 133 lines | `integrations/hermes/yimi_gateway/` |
 | Memory provider `personal_aios` | An upstream `MemoryProvider`; brings the platform-generated core profile into context every turn; native memory writes are off | `integrations/hermes/personal_aios/__init__.py` |
 | Package loading | At deploy time, validates each package's `plugin.json` and, from configuration and switches, generates Hermes's MCP server configuration and skill directories | `capability/packages/load.py`, `deploy/cloud/hermes-init.py` |
 
@@ -179,7 +179,7 @@ All devices share one timeline: the reply goes to the device where the sentence 
 - **Read-aloud**: Qwen TTS (default `qwen-audio-3.0-tts-plus`). Yimi's voice comes from Qwen's voice models, called through Alibaba Cloud DashScope.
 - **Local models on the server**: voice activity detection, recognition, voiceprint, wake word and face recognition use local ONNX models.
 
-Voiceprints are enrolled per capture channel, with thresholds of 0.65 / 0.45. Face ID or Touch ID opens a 60-second trust window that vouches for one call; an anchor within the call recognises short utterances. Per-device thresholds that only rise and never fall below 0.65 are still in progress.
+Voiceprints are enrolled per capture channel, with default initial thresholds of 0.65 / 0.45. Face ID or Touch ID opens a 60-second trust window that vouches for one call; an anchor within the call recognises short utterances. Voiceprint verification thresholds are persisted per capture channel, never decrease and have a floor of 0.65. Automatic gradual increases require enough confirmed samples from the same channel; restarting or lowering the configured value does not lower a saved threshold.
 
 ## 9 Memory L1–L5
 
@@ -218,7 +218,7 @@ L5 processing and storage run on budgets: small archive batches, disk admission 
 - The single-host entry starts 7 services by default: gateway, hermes, front, postgres, livekit, workshop, workshop-link.
 - Each host marks the current and previous versions with two pointers, `current` and `previous`, and the cleanup command keeps only those two. When `release-watchdog` finds a new version persistently unhealthy or restarting repeatedly, it switches back to the previous version.
 
-**Model roles.** Main conversation, background subagents, vision, the voice front end, read-aloud, and the fast and slow tiers of the phone executor are each configured separately. In the example configuration, the brain and subagents use DeepSeek, vision uses GLM hosted on SiliconFlow, and the phone executor uses DeepSeek plus GLM. The user can change the provider and model of the everyday roles in iPhone or Mac settings. A change is saved as a draft first; after biometric confirmation on the device it takes effect when the current task ends (Face ID on iPhone, Touch ID on an authorized Mac). Yimi can only read and draft, not change it directly. Local-model roles are read-only; switching local models in settings is still in progress.
+**Model roles.** Main conversation, background subagents, vision, the voice front end, read-aloud, and the fast and slow tiers of the phone executor are each configured separately. In the example configuration, the brain and subagents use DeepSeek, vision uses GLM hosted on SiliconFlow, and the phone executor uses DeepSeek plus GLM. The user can change the provider and model of the everyday roles in iPhone or Mac settings. A change is saved as a draft first; after biometric confirmation on the device it takes effect when the current task ends (Face ID on iPhone, Touch ID on an authorized Mac). Yimi can only read and draft, not change it directly. Once a local catalog is configured, settings can switch speech recognition, voice activity detection, voiceprint, wake-word and embedding models after a device-signed approval, and show the selected and effective versions, the previous version, progress and errors. The deployer must configure `local_catalog_file` and supply model files, absolute paths and trusted digests; this entry point does not download models. Changing a speech model requires a service restart; changing the voiceprint model also requires re-enrollment and calibration for each capture channel in use. Embedding models need their own runtime environment and take effect only after derived indexes are rebuilt. Face models are listed, but switching them goes through the face-enrollment flow.
 
 ## 12 Cloud phone executor
 
@@ -230,14 +230,15 @@ The executor phone is an Alibaba Cloud Wuying AgentBay cloud phone by default. T
 - **Repairing herself**: reproduce in the build workshop, find the root cause, minimal fix, add a regression test → ask the user once if a protected baseline is touched → immutable image, 7 offline test suites → re-check on the production host → switch when idle → watchdog. When Yimi changes the kernel, she first checks and syncs staging with production, then runs the regression in staging (in progress).
 - **Learning from experience**: Hermes's native background review writes experience into skills; workshop tools cannot be changed directly and must go through the build and registration process.
 
+**Speaking preferences.** Yimi can choose preset tone, expression and habit preferences in the platform preference area, up to 1,500 characters, and restore the previous version. The platform stores the versions and projects them into a read-only `memories/PERSONALITY.md`; preferences cannot change her identity, locked personality or protected rules.
+
+**Optional meeting assistant (end-to-end work in progress).** This version provides optional meeting-assistant server orchestration and a presentation protocol, covering slide reads, locating text from the discussion, edit previews, first-edit consent and reconciliation of unknown results. Actual Keynote reads and writes require a Mac executor that implements this protocol and returns edit-readback evidence. The included Mac source does not yet implement these tools, so enabling the package alone does not make the assistant usable. Connecting such an executor also requires a configured platform port and internal service credentials, an authorized local file, and the specified Mac and one pair of glasses online. The protocol limits edits to replacing text and appending paragraphs; the default deployment does not enable the package.
+
 ## 14 In progress
 
 | Capability | Status |
 |---|---|
 | Removing the residual kernel patch | In progress: still contains product logic such as run scopes and the main-agent division of labour |
-| Per-device voiceprint threshold that only rises (minimum 0.65) | In progress |
 | When Yimi changes the kernel, align with production first, then go through staging | In progress |
-| A personality-preferences area Yimi can edit herself | In progress |
-| Meeting assistant: edits the slides directly based on what the meeting decides | In progress |
-| Switching local models in settings | In progress |
+| Meeting assistant: read and edit local Keynote from the discussion | In progress: server orchestration and protocol exist; the included Mac source lacks the executor implementation |
 | Assistants negotiating directly with each other (A2A) | In progress: the current public version has no complete A2A integration; treating outside agents as guests and confirming outbound sends first is a design boundary |

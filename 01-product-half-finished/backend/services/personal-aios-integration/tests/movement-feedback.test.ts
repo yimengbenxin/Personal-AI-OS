@@ -232,5 +232,7 @@ test('navigation route versions precede HUD, reconnect replays current route and
   assert.equal(sent.at(-1)!.terminal,'glasses');assert.equal(sent.at(-1)!.body.revision,2);
   await movement.glassesConnected('owner');assert.equal(sent.findLast(s=>s.terminal==='glasses'&&s.body.operation==='nav_route')!.body.revision,2);
   assert.equal(sent.at(-1)!.body.operation,'move_hud');
-  await movement.stopNavigation('owner');const count=sent.length;await movement.glassesConnected('owner');assert.equal(sent.length,count);
+  await movement.stopNavigation('owner');const count=sent.length;await movement.glassesConnected('owner');assert.equal(sent.length,count+1);
+  const idle=sent.at(-1)!;assert.equal(idle.terminal,'glasses');assert.equal(idle.body.operation,'move_hud');
+  assert.equal(idle.body.kind,'walk_nav');assert.equal(idle.body.nav,undefined);assert.equal(idle.body.ride,undefined);
 });

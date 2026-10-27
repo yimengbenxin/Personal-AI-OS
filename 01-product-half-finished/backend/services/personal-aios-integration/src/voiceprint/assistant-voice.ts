@@ -117,7 +117,7 @@ export class AssistantVoiceLearner {
 
 /** The system TTS port teaching the learner each reply it synthesizes (the audio formal voice playback sends). */
 export function learningTts(tts: TtsPort, learner: AssistantVoiceLearner, voice = 'system_tts'): TtsPort {
-  return {...(tts.stream ? {stream: async function* (text: string, requestId: string, signal?: AbortSignal) {
+  return {...(tts.forCall?{forCall:()=>learningTts(tts.forCall!(),learner,voice)}:{}),...(tts.stream ? {stream: async function* (text: string, requestId: string, signal?: AbortSignal) {
     let utterance: AssistantUtterance | undefined;
     try {for await (const audio of tts.stream!(text, requestId, signal)) {
       utterance ??= learner.utterance(voice, audio.sample_rate);

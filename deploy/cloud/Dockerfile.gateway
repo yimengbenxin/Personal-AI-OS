@@ -19,6 +19,7 @@ COPY --chmod=a+rX,go-w 01-product-half-finished/backend 01-product-half-finished
 COPY --chmod=a+rX,go-w integrations integrations
 COPY --chmod=a+rX,go-w capability capability
 COPY --chmod=a+rX,go-w deploy/cloud/model-settings-project.ts deploy/cloud/model-settings-project.ts
+COPY --chmod=a+rX,go-w deploy/cloud/model-settings-call-intent.ts deploy/cloud/model-settings-call-intent.ts
 # The terminal simulator reads the same endpoint contract as the native clients.
 COPY --chmod=a+rX,go-w 01-product-half-finished/apple/current-mac-source-20260930/clients/phase0/apple-native/PersonalAIOSPhase0/OpenSource/apple-health-exporter/app/Contracts/client-endpoints.json 01-product-half-finished/apple/current-mac-source-20260930/clients/phase0/apple-native/PersonalAIOSPhase0/OpenSource/apple-health-exporter/app/Contracts/client-endpoints.json
 COPY --chmod=a+rX,go-w scripts/call-handoff-eval scripts/call-handoff-eval

@@ -31,7 +31,8 @@ internal fun cancelPlaybackControl(packet: JSONObject): JSONObject =
 /** Owns local voice playback; ordered receipts remain in FormalReplies. */
 class VoicePlayback(private val context: Context, private val scope: CoroutineScope,
     private val replies: () -> FormalReplies?, private val send: (JSONObject) -> Unit,
-    private val onError: (Exception) -> Unit) {
+    private val onError: (Exception) -> Unit,
+    private val onPlayback: (JSONObject, Boolean) -> Unit = { _, _ -> }) {
     private val queued = mutableListOf<Pair<JSONObject, File>>()
     private val receiving = mutableMapOf<Job, JSONObject>()
     private val cancellation = Mutex()
@@ -77,9 +78,9 @@ class VoicePlayback(private val context: Context, private val scope: CoroutineSc
                     val item = queued.firstOrNull { authority.canPlay(it.first) } ?: break
                     queued.remove(item); playing = item.first
                     try {
-                        play(item.second)
+                        play(item.second, item.first)
                         if (replies() === authority && authority.canPlay(item.first)) send(authority.played(item.first))
-                    } finally { authority.releaseVoice(item.first); playing = null }
+                    } finally { authority.releaseVoice(item.first); onPlayback(item.first, false); playing = null }
                 }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { onError(error) }
@@ -139,7 +140,16 @@ class VoicePlayback(private val context: Context, private val scope: CoroutineSc
         } finally { if (!retained) file.delete() }
     }
 
-    private suspend fun play(file: File) {
+    /** Authenticated server history generation; also remove audio orphaned by an earlier process exit. */
+    suspend fun retireHistory() {
+        cancel()
+        withContext(Dispatchers.IO) {
+            context.cacheDir.listFiles()?.filter { it.isFile && it.name.startsWith("voice-") && it.extension == "wav" }
+                ?.forEach { check(it.delete()) }
+        }
+    }
+
+    private suspend fun play(file: File, packet: JSONObject) {
         try {
             withContext(Dispatchers.Main) {
                 val player = MediaPlayer()
@@ -150,7 +160,7 @@ class VoicePlayback(private val context: Context, private val scope: CoroutineSc
                     suspendCancellableCoroutine<Unit> { done ->
                         player.setOnPreparedListener {
                             if (done.isActive) {
-                                try { it.start() }
+                                try { it.start(); onPlayback(packet, true) }
                                 catch (error: Exception) { done.resumeWithException(error) }
                             }
                         }

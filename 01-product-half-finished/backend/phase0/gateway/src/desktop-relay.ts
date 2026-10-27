@@ -1,3 +1,4 @@
+import {watchPresentationContext} from './presentation-context.ts';
 import {readFileSync} from 'node:fs';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
@@ -20,6 +21,9 @@ import {createTerminalWire,type WireExtension,type WireAttachment} from './perso
 import {createDesktopFiles,DESKTOP_FILE_TOPIC,type DesktopTransfer} from './desktop-files.ts';
 import {consumeBoundedByteStream} from './sdk-room.ts';
 import {desktopPackage,type PackageCatalogPort} from '../../../../../capability/packages/desktop/server/package.ts';
+import {presentationSchema,presentationTools,validatePresentationInput,type DesktopTargetBinding} from './presentation-validate.ts';
+import type {PresentationAction,PresentationInputs} from '../../../../../capability/contracts/presentation.ts';
+import {presentationResult} from './presentation-relay.ts';
 
 // SDK 1.25.3 expects this fetch alias; Node exposes RequestInit but omits the alias.
 declare global {type HeadersInit=NonNullable<RequestInit['headers']>}
@@ -39,11 +43,13 @@ const bytes=readFileSync(new URL('../../../../../integrations/contracts/desktop-
 check(createHash('sha256').update(bytes).digest('hex')==='1e11cfdba142bee678fddb82a4ad8484f8274be408ef8221ed44ef35e9434d68','DESKTOP_TOOLS_CONTRACT_CHANGED');
 const manifest=JSON.parse(bytes.toString('utf8')),ajv=new Ajv({strict:true});addFormats.default(ajv,['date-time']);
 const tools=new Map<string,{tool:any;validate:ReturnType<Ajv['compile']>}>(manifest.tools.map((tool:any)=>[tool.name,{tool,validate:ajv.compile(tool.inputSchema)}]));
+ajv.addSchema(presentationSchema);for(const tool of presentationTools)tools.set(tool.name,{tool,validate:ajv.compile(tool.inputSchema)});
+const presentationHash=digest([...manifest.tools,...presentationTools]),presentationNames=new Set<string>(presentationTools.map((tool:any)=>tool.name));
 const toolsHash=digest(manifest.tools),messages:Record<string,string>={DESKTOP_CAPTURE_INVALID:'电脑返回的窗口截图无效',DESKTOP_VISION_FAILED:'暂时无法分析共享窗口，请稍后再试',DESKTOP_OFFLINE:'电脑现在不在线',DESKTOP_VERSION_MISMATCH:'电脑上的依米需要更新',DESKTOP_BUSY:'电脑正在处理其他操作，稍后再试',DESKTOP_TIMEOUT:'电脑没有及时回应，结果未知',DESKTOP_CANCELLED:'操作已取消',DESKTOP_REVOKED:'这台电脑已解除配对',DESKTOP_FRAME_TOO_LARGE:'结果太大',DESKTOP_PAUSED:'主人暂停了依米操作电脑',TRANSFER_DISABLED:'传输被关闭',TRANSFER_TOO_LARGE:'文件太大',TRANSFER_QUOTA:'今日额度用完',TRANSFER_INTEGRITY:'校验失败',WORKSHOP_PATH_INVALID:'工坊路径无效',WORKSHOP_UNAVAILABLE:'工坊不可用',WORKSHOP_FILE_UNREADABLE:'工坊文件不可读，请以0644权限重新保存'};
 type Files=Awaited<ReturnType<typeof createDesktopFiles>>;
-type Call={key:string;tool:string;id:RequestId;server:Server;abort:AbortController;timer?:ReturnType<typeof setTimeout>;input:number;output:number;delivery?:Promise<void>;upload?:ReturnType<ReturnType<Files['attach']>['expectUpload']>;download?:Awaited<ReturnType<Files['prepareDownload']>>};
+type Call={key:string;tool:string;id:RequestId;server:Server|undefined;abort:AbortController;timer?:ReturnType<typeof setTimeout>;input:number;output:number;delivery?:Promise<void>;upload?:ReturnType<ReturnType<Files['attach']>['expectUpload']>;download?:Awaited<ReturnType<Files['prepareDownload']>>};
 type Peer={ctx:WireAttachment;client:Client;active:boolean;paused:boolean;state:'initializing'|'ready'|'version_mismatch';listHash?:string;ids:Map<RequestId,{method:string;call?:Call}>;calls:Set<Call>;file:ReturnType<Files['attach']>;stop:(code:string,reason:string)=>void;setPaused:(paused:boolean)=>void};
-export async function createDesktopRelay(options:{config:unknown;analyzeVision:HermesClient['analyzeVision'];runtime:Pick<PersonalAIOSRuntime,'terminals'|'desktopReady'>;sources:Pick<FormalTerminalSources,'revalidate'>;pool:Parameters<typeof readActivePairedDevices>[0];http:Parameters<typeof import('../../../services/personal-aios-integration/src/server.ts').createPersonalAIOSServer>[1];onError:(error:unknown)=>void;files?:Files;capabilityCatalog?:PackageCatalogPort}) {
+export async function createDesktopRelay(options:{config:unknown;analyzeVision:HermesClient['analyzeVision'];runtime:Pick<PersonalAIOSRuntime,'terminals'|'desktopReady'|'time_zone'>&Partial<Pick<PersonalAIOSRuntime,'meetingDesktopContext'|'meetingDesktopDisconnected'>>;sources:Pick<FormalTerminalSources,'revalidate'>;pool:Parameters<typeof readActivePairedDevices>[0];http:Parameters<typeof import('../../../services/personal-aios-integration/src/server.ts').createPersonalAIOSServer>[1];onError:(error:unknown)=>void;files?:Files;capabilityCatalog?:PackageCatalogPort}) {
   const config=desktopConfiguration(options.config);if(!config?.enabled)return undefined;
   const capability=desktopPackage(options.capabilityCatalog);
   const files=options.files??await createDesktopFiles({...config.files,inbox:'/var/lib/paios/desktop-in',workshop:'/var/lib/paios/desktop-out',onError:options.onError});
@@ -56,13 +62,14 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     if(!hasTerminalCapability(ctx.device,'desktop_tools'))return()=>{};
     check(ctx.device.device_type==='mac','TERMINAL_CAPABILITY_DENIED',403);peers.get(ctx.device.device_id)?.stop('DESKTOP_TIMEOUT','replaced');
     const client=new Client({name:'paios-desktop-relay',version:'1'},{capabilities:{elicitation:{form:{}}}}),readers=new Set<ReturnType<typeof consumeBoundedByteStream>>(),responses=new Map<RequestId,Call>();
+    let stopPresentation=()=>{};
     const peerId=randomUUID(),transition=(state:string,code?:string,reason?:string)=>process.stderr.write(JSON.stringify({route:'desktop_peer',transition:state,peer_id:peerId,device_id:ctx.device.device_id,identity:ctx.identity,topic:DESKTOP_MCP_TOPIC,...(code?{code,reason}:{}),at:Date.now()})+'\n');
     const current=()=>peer.active&&ctx.current(),authorize=()=>options.sources.revalidate(ctx.device);
     const file=files.attach({principal:ctx.device.principal_id,deviceType:'mac',capabilities:ctx.device.capabilities!,identity:ctx.identity,current,authorize,room:ctx.room as never});
     const peer:Peer={ctx,client,file,active:true,paused:false,state:'initializing',ids:new Map(),calls:new Set(),stop:(code,reason)=>{retire(code,reason);void client.close().catch(options.onError);},
-      setPaused:paused=>{peer.paused=paused;if(paused)for(const call of peer.calls)call.abort.abort(new ContractError('DESKTOP_PAUSED',409));changed(ctx.device.principal_id);}};
+      setPaused:paused=>{peer.paused=paused;if(paused){for(const call of peer.calls)call.abort.abort(new ContractError('DESKTOP_PAUSED',409));void options.runtime.meetingDesktopDisconnected?.(ctx.device,'DESKTOP_PAUSED').catch(options.onError);}changed(ctx.device.principal_id);}};
     const left=(remote:unknown)=>{if((remote as {identity?:string})?.identity===ctx.identity)peer.stop('DESKTOP_TIMEOUT','participant_disconnected');};
-    const retire=(code:string,reason:string)=>{if(!peer.active)return;peer.active=false;transition('stopped',code,reason);for(const call of peer.calls)call.abort.abort(new ContractError(code,409));
+    const retire=(code:string,reason:string)=>{if(!peer.active)return;peer.active=false;stopPresentation();void options.runtime.meetingDesktopDisconnected?.(ctx.device,code).catch(options.onError);transition('stopped',code,reason);for(const call of peer.calls)call.abort.abort(new ContractError(code,409));
       responses.clear();for(const reader of readers)reader.cancel();ctx.room.unregisterByteStreamHandler!(DESKTOP_MCP_TOPIC);file.close();ctx.room.off?.(RoomEvent.ParticipantDisconnected,left);
       if(peers.get(ctx.device.device_id)===peer)peers.delete(ctx.device.device_id);changed(ctx.device.principal_id);};
     let disconnected=false;
@@ -108,7 +115,7 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     client.fallbackNotificationHandler=async notification=>{if(notification.method!=='notifications/paios/state'){dropped++;return;}check(typeof notification.params?.paused==='boolean'&&Object.keys(notification.params).length===1,'DESKTOP_STATE_INVALID');peer.setPaused(notification.params.paused);};
     client.setRequestHandler(ElicitRequestSchema,async request=>{const related=request.params._meta?.['paios/relatedRequestId'];
       const call=(typeof related==='string'||typeof related==='number')?peer.ids.get(related)?.call:undefined;
-      if(!call||call.tool!=='trash'||call.abort.signal.aborted||!current())throw new McpError(ErrorCode.InvalidParams,'Only a live trash call may request consent');arm(call,300000);
+      if(!call?.server||call.tool!=='trash'||call.abort.signal.aborted||!current())throw new McpError(ErrorCode.InvalidParams,'Only a live trash call may request consent');arm(call,300000);
       return call.server.elicitInput(request.params,{relatedRequestId:call.id,signal:call.abort.signal,timeout:300000});});
     let inboundBytes=0,excess=0;
     ctx.room.registerByteStreamHandler!(DESKTOP_MCP_TOPIC,(reader,sender)=>{
@@ -131,8 +138,8 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     });
     peers.set(ctx.device.device_id,peer);ctx.room.on?.(RoomEvent.ParticipantDisconnected,left);transition('attached');
     void (async()=>{
-      await client.connect(transport,{timeout:30000});await client.listTools(undefined,{timeout:30000});if(!current())return;
-      if(peer.listHash!==toolsHash){peer.state='version_mismatch';transition(peer.state);changed(ctx.device.principal_id);return;}
+      await client.connect(transport,{timeout:30000});const listing=await client.listTools(undefined,{timeout:30000});if(!current())return;
+      if(peer.listHash!==toolsHash&&peer.listHash!==presentationHash){peer.state='version_mismatch';transition(peer.state);changed(ctx.device.principal_id);return;}
       const source=await authorize();if(!current())return;
       peer.state='ready';transition(peer.state);changed(ctx.device.principal_id);
       await client.notification({method:'notifications/paios/ready',params:{ready:true}});
@@ -140,16 +147,19 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     })().catch(error=>{if(peer.active){options.onError(error);peer.stop('DESKTOP_TIMEOUT','initialization_failed');disconnect();}});
     return()=>peer.stop('DESKTOP_TIMEOUT','detached');
   }
-  async function callTool(session:{server:Server;calls:Map<RequestId,Call>},request:CallToolRequest,extra:{requestId:RequestId;signal:AbortSignal}) {
+  async function callTool(session:{server:Server|undefined;calls:Map<RequestId,Call>},request:CallToolRequest,extra:{requestId:RequestId;signal:AbortSignal},binding?:DesktopTargetBinding) {
     const found=tools.get(request.params.name);if(!found||!found.validate(request.params.arguments??{}))throw new McpError(ErrorCode.InvalidParams,'Invalid desktop tool or arguments');
+    if(presentationNames.has(found.tool.name)&&!binding)throw new McpError(ErrorCode.InvalidParams,'Presentation calls require platform target binding');
     const start=Date.now(),call:Call={key:randomUUID(),tool:found.tool.name,id:extra.requestId,server:session.server,abort:new AbortController(),input:0,output:0};let peer:Peer|undefined,outcome='error',errorCode:string|undefined,lastSeen:string|undefined;
-    const cancelled=()=>call.abort.abort(new ContractError('DESKTOP_CANCELLED',409));extra.signal.addEventListener('abort',cancelled,{once:true});session.calls.set(call.id,call);calls.set(call.key,call);arm(call,found.tool['x-paios'].timeout_ms);
-    try{const rows=await readActivePairedDevices(options.pool),principal=rows[0]?.userId,candidates=[...peers.values()].filter(peer=>peer.ctx.device.principal_id===principal&&peer.active&&peer.ctx.current()),ready=candidates.filter(peer=>peer.state==='ready');
+    const cancelled=()=>call.abort.abort(new ContractError('DESKTOP_CANCELLED',409));extra.signal.addEventListener('abort',cancelled,{once:true});if(extra.signal.aborted)cancelled();session.calls.set(call.id,call);calls.set(call.key,call);arm(call,found.tool['x-paios'].timeout_ms);
+    try{const rows=await readActivePairedDevices(options.pool),principal=binding?.principal_id??rows[0]?.userId,candidates=[...peers.values()].filter(peer=>peer.ctx.device.principal_id===principal&&peer.active&&peer.ctx.current()&&(!binding||peer.ctx.device.device_id===binding.target_device_id)),ready=candidates.filter(peer=>peer.state==='ready');
+      if(binding)check(rows.some(row=>row.userId===principal&&row.deviceId===binding.target_device_id&&row.deviceType==='mac'),'DESKTOP_REVOKED',403);
       const seen=rows.filter(row=>row.userId===principal&&row.deviceType==='mac').map(row=>wire.seen(row.deviceId)).filter((at):at is string=>at!==undefined).sort();lastSeen=seen.at(-1);
-      peer=options.runtime.terminals(principal??'').map(source=>ready.find(peer=>peer.ctx.device.device_id===source.device_id)).find(Boolean)??ready.at(-1);
+      peer=binding?ready.find(peer=>peer.ctx.device.device_id===binding.target_device_id):options.runtime.terminals(principal??'').map(source=>ready.find(peer=>peer.ctx.device.device_id===source.device_id)).find(Boolean)??ready.at(-1);
       check(peer,candidates.some(peer=>peer.state==='version_mismatch')?'DESKTOP_VERSION_MISMATCH':'DESKTOP_OFFLINE',409);
+      if(presentationNames.has(found.tool.name))check(peer.listHash===presentationHash,'DESKTOP_VERSION_MISMATCH',409);
       check(!peer.paused,'DESKTOP_PAUSED',409);check(peer.calls.size<config!.relay.max_inflight_per_device,'DESKTOP_BUSY',429);peer.calls.add(call);
-      try{const source=await options.sources.revalidate(peer.ctx.device);check(source.principal_id===principal&&source.device_type==='mac'&&hasTerminalCapability(source,'desktop_tools'),'DESKTOP_REVOKED',403);}
+      try{const source=await options.sources.revalidate(peer.ctx.device);check(source.principal_id===principal&&source.device_id===peer.ctx.device.device_id&&source.device_type==='mac'&&hasTerminalCapability(source,'desktop_tools'),'DESKTOP_REVOKED',403);}
       catch(error){if((error as {status?:number}).status===403||(error as {status?:number}).status===401){peer.stop('DESKTOP_REVOKED','authorization_failed');throw new ContractError('DESKTOP_REVOKED',403);}throw error;}
       check(peer.active&&peer.ctx.current(),'DESKTOP_REVOKED',403);check(!peer.paused,'DESKTOP_PAUSED',409);
       if(request.params.name==='upload_to_workshop')check(config!.files.enabled&&config!.files.upload_enabled,'TRANSFER_DISABLED',403);
@@ -169,7 +179,7 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     }catch(error){const failure=call.abort.signal.aborted?call.abort.signal.reason:error;if(!(failure instanceof ContractError))throw failure;
       errorCode=failure.code;outcome=errorCode==='DESKTOP_TIMEOUT'?'timeout':['DESKTOP_CANCELLED','DESKTOP_PAUSED','DESKTOP_REVOKED'].includes(errorCode)?'cancelled':'error';
       const errorBody={code:errorCode,retryable:['DESKTOP_BUSY','DESKTOP_TIMEOUT','DESKTOP_OFFLINE'].includes(errorCode),...(errorCode==='DESKTOP_OFFLINE'&&lastSeen?{last_seen_at:lastSeen}:{})};
-      const last=errorCode==='DESKTOP_OFFLINE'&&lastSeen?`（最后在线 ${new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(lastSeen))}）`:'';
+      const last=errorCode==='DESKTOP_OFFLINE'&&lastSeen?`（最后在线 ${new Intl.DateTimeFormat('zh-TW',{timeZone:options.runtime.time_zone,hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(lastSeen))}）`:'';
       return {isError:true,content:[{type:'text' as const,text:found.tool.name==='window_capture'?`${messages[errorCode]}${last}`:`${errorCode}：${messages[errorCode]}${last}`}],structuredContent:{error:errorBody}};
     }finally{clearTimeout(call.timer);extra.signal.removeEventListener('abort',cancelled);session.calls.delete(call.id);calls.delete(call.key);peer?.calls.delete(call);if(call.upload)call.abort.abort(new ContractError('DESKTOP_CANCELLED',409));for(const [id,pending] of peer?.ids??[])if(pending.call===call)peer!.ids.delete(id);await call.download?.close();
       process.stderr.write(JSON.stringify({route:'desktop',tool:found.tool.name,device_id:peer?.ctx.device.device_id??null,outcome,...(errorCode?{error_code:errorCode}:{}),ms:Date.now()-start,bytes_in:call.input,bytes_out:call.output})+'\n');}
@@ -202,7 +212,14 @@ export async function createDesktopRelay(options:{config:unknown;analyzeVision:H
     if(reply.body)await pipeline(Readable.fromWeb(reply.body as Parameters<typeof Readable.fromWeb>[0]),response);else response.end();
   };
   options.http.desktop=handler;
+  /** Only platform composition holds this port. Model-visible desktop tools remain unchanged. */
+  const invokePresentation=async<A extends PresentationAction>(binding:DesktopTargetBinding,action:A,args:PresentationInputs[A],signal:AbortSignal=new AbortController().signal)=>{
+    const target=structuredClone(binding),input=structuredClone(args);validatePresentationInput(action,input,target);
+    const result=await callTool({server:undefined,calls:new Map()},{method:'tools/call',params:{name:action,arguments:input}},
+      {requestId:randomUUID(),signal},target) as CallToolResult;
+    return presentationResult(action,input,result);
+  };
   const extension:WireExtension={inputs:{},outputs:{},handle:async()=>{},attach};
-  return {handler,extensions:[wire.extension,extension],...controls,changed:wire.changed,get dropped(){return dropped;},
+  return {handler,invokePresentation,extensions:[wire.extension,extension],...controls,changed:wire.changed,get dropped(){return dropped;},
     close:async()=>{clearInterval(timer);wire.close();for(const peer of [...peers.values()])peer.stop('DESKTOP_TIMEOUT','relay_closed');await Promise.all([...sessions.values()].map(session=>session.server.close()));await files.close();if(options.http.desktop===handler)delete options.http.desktop;}};
 }

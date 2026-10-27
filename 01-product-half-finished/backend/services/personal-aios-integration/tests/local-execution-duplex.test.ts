@@ -4,6 +4,8 @@ import {promises as fs} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {LocalMediaExecution, type LocalMediaCommand} from '../src/media/local-execution.ts';
+import {childPid} from './child-pid-fixture.ts';
+import {timeoutClock} from './timeout-clock-fixture.ts';
 const signal = () => new AbortController().signal;
 const command = (source: string, root: string, overrides: Partial<LocalMediaCommand> = {}): LocalMediaCommand => ({
     executable: process.execPath, args:['-e',source], cwd:root,
@@ -85,21 +87,18 @@ test('input/stdout/stderr bounds and callback failures kill and join',async t=>{
 
 test('abort/release/owner close/timeout settle blocked write and join actual child',async t=>{
     const {root,owner}=await fixture(t);
+    const clock=timeoutClock(t);t.mock.method(performance,'now',()=>0);
     for(const mode of ['abort','release','close','timeout'] as const){
         const local=mode==='close'?await LocalMediaExecution.create({runtime:root,slots:1,vad_slots:1}):owner;
         const abort=new AbortController();const held=await local.reserve('vad',abort.signal,mode==='timeout'?500:3000);
-        const marker=join(root,`${mode}.pid`);
-        const exchange=held.open(command(`require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000);`,root,{stdin_limit_bytes:4_000_000}),()=>{});
+        const child=childPid(t,root,`${mode}.pid`);
+        const exchange=held.open(command(child.source+'setInterval(()=>{},1000);',root,{stdin_limit_bytes:4_000_000}),()=>{});
         const writing=assert.rejects(exchange.write(Buffer.alloc(4_000_000)),mode==='abort'?/MEDIA_CANCELLED/:mode==='timeout'?/TIMEOUT/:/CLOSED/);
         const done=assert.rejects(exchange.done,mode==='abort'?/MEDIA_CANCELLED/:mode==='timeout'?/TIMEOUT/:/CLOSED/);
-        let pid=0;
-        for(let i=0;i<100;i++){
-            const text=await fs.readFile(marker,'utf8').catch(()=> '');
-            if(/^[1-9][0-9]*$/u.test(text)){pid=Number(text);break;}
-            await new Promise(r=>setTimeout(r,5));
-        }
+        const pid=await child.ready;
         assert(Number.isSafeInteger(pid)&&pid>0,'child must publish a complete positive PID');
         if(mode==='abort')abort.abort();else if(mode==='release')await held.release();else if(mode==='close')await local.close();
+        else clock.tick(500);
         await Promise.all([writing,done]);await held.release();
         assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
         assert.equal(await owner.available('vad'),true);

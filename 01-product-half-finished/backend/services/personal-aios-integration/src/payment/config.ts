@@ -7,7 +7,7 @@ export const DEFAULT_PAYMENT_CONFIG:PaymentConfig={
   max_recards_per_intent:2,request_freshness_s:600,challenge_ttl_s:120,cards:{recent_s:600},card:{max_amount_fen:null},
   voice:{max_order_fen:20000,max_attempts_per_card:2,pay_phrases:['付吧'],carrier_ms:1500,require_same_terminal:true},
   auto:{max_order_fen:5000,max_day_fen:15000,undo_s:5,same_payee_window_s:1800},anomaly:{max_per_day:2},
-  day_timezone:'Asia/Taipei',limits:{max_settable_fen:100000},
+  limits:{max_settable_fen:100000},
   locks:{require_glasses_lock:true,phone_relock_s:60,phone_relock_choices_s:[0,60,300,900],phone_lease_max_s:43200,
     glasses_lease_max_s:43200,glasses_unlock_request_ttl_s:120,glasses_wear_poll_ms:2000},
   enrolment:{request_ttl_s:120,grant_ttl_s:600},notify:{push:false},
@@ -41,8 +41,6 @@ export function parsePaymentConfig(input:unknown={}):PaymentConfig {
   const config=merge(DEFAULT_PAYMENT_CONFIG as unknown as Record<string,unknown>,input,'payment') as unknown as PaymentConfig;
   check(config.locks.phone_relock_choices_s.length<=PAYMENT_MAX_RELOCK_CHOICES&&config.locks.phone_relock_choices_s.includes(config.locks.phone_relock_s),'PAYMENT_CONFIG_INVALID');
   check(config.card_ttl_s<=300&&config.grant_ttl_s<=60&&config.request_freshness_s<=600&&config.locks.glasses_lease_max_s<=43200,'PAYMENT_CONFIG_INVALID');
-  // Validate the timezone at provisioning; Intl is also the sole timezone source for day accounting.
-  new Intl.DateTimeFormat('en-US',{timeZone:config.day_timezone}).format(0);
   check(!config.enabled||Boolean(config.executor_key_file),'PAYMENT_CONFIG_EXECUTOR_KEY_REQUIRED');
   return config;
 }

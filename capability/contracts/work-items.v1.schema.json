@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:yimi:work-items:1",
+  "type": "array",
+  "maxItems": 64,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "id",
+      "label",
+      "state",
+      "effect_refs"
+    ],
+    "properties": {
+      "id": {
+        "$ref": "#/$defs/id"
+      },
+      "label": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      },
+      "state": {
+        "enum": [
+          "accepted",
+          "running",
+          "waiting",
+          "succeeded",
+          "partial",
+          "unknown",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "effect_refs": {
+        "type": "array",
+        "maxItems": 64,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "slide_id": {
+        "$ref": "#/$defs/id"
+      },
+      "slide_number": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+    }
+  }
+}

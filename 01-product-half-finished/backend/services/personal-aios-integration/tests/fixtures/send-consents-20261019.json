@@ -1,0 +1,22 @@
+[
+  {
+    "principal_id": "owner-fixture",
+    "kind": "send",
+    "task_type": "wechat_reply_text",
+    "recipient": "wechat:测试联系人",
+    "confirmation_id": "fixture-confirmation-text",
+    "confirmed_by": "owner-fixture",
+    "surface": {"device_id": "fixture-phone", "device_type": "phone"},
+    "confirmed_at": "2026-10-19T02:00:00.000Z"
+  },
+  {
+    "principal_id": "owner-fixture",
+    "kind": "send",
+    "task_type": "wechat_file_send",
+    "recipient": "wechat:测试联系人",
+    "confirmation_id": "fixture-confirmation-file",
+    "confirmed_by": "owner-fixture",
+    "surface": {"device_id": "fixture-phone", "device_type": "phone"},
+    "confirmed_at": "2026-10-19T02:01:00.000Z"
+  }
+]

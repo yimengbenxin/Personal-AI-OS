@@ -58,6 +58,117 @@ final class AssistantModelSettingsTests: XCTestCase {
         XCTAssertEqual(f.model.snapshot?.desired, 2)
     }
 
+    func testInitialAttachmentAndExplicitOpenReadOnceAndWatchOnce() async throws {
+        let f = ModelSettingsFixture(); await f.load(); await f.settle()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 2)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 1)
+        await f.model.open()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 2)
+        await f.model.refresh()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 4)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 1)
+    }
+
+    func testReceiptAndStateBurstUpdatesActivationWithoutReadingRoutes() async throws {
+        let f = ModelSettingsFixture(); await f.load(); await f.settle()
+        let operations = f.operations, roles = f.model.snapshot?.roles
+        for _ in 0..<20 {
+            f.model.receive(.output(try f.state(desired: 2)))
+            f.model.receive(.output(try f.receipt()))
+        }
+        await f.settle()
+        XCTAssertEqual(f.operations, operations)
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+        XCTAssertEqual(f.model.snapshot?.groups["brain"]?.status, "pending")
+        XCTAssertEqual(f.model.snapshot?.revision, 1)
+        XCTAssertEqual(f.model.snapshot?.roles, roles)
+        XCTAssertEqual(f.model.snapshot?.activationText, "已保存，当前任务结束后生效")
+        f.model.receive(.output(try f.state(desired: 1)))
+        f.model.receive(.output(try f.state(desired: 9, environment: "other")))
+        f.model.receive(.output(try f.state(desired: 9, session: "other")))
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+    }
+
+    func testLaterOpenReadsRemoteDesiredRevisionOnceAndThenUsesCache() async throws {
+        let f = ModelSettingsFixture(); await f.load(); await f.settle()
+        let operations = f.operations
+        f.revision = 2
+        f.model.receive(.output(try f.state(desired: 2)))
+        await f.settle()
+        XCTAssertEqual(f.operations, operations)
+        XCTAssertEqual(f.model.snapshot?.revision, 1)
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+        await f.model.open()
+        XCTAssertEqual(f.model.snapshot?.revision, 2)
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 4)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 1)
+        let refreshed = f.operations
+        await f.model.open(); await f.settle()
+        XCTAssertEqual(f.operations, refreshed)
+    }
+
+    func testRepeatedAttachmentKeepsReviewAndReconnectRegistersNewWatch() async throws {
+        let f = ModelSettingsFixture(); await f.load(); await f.settle()
+        await f.model.prepareResume()
+        let review = try XCTUnwrap(f.model.review), operations = f.operations
+        f.attach(); await f.settle()
+        XCTAssertEqual(f.model.review?.draft.draft_id, review.draft.draft_id)
+        XCTAssertEqual(f.operations, operations)
+        f.model.receive(.detached)
+        f.model.receive(.output(try f.state(desired: 9)))
+        XCTAssertNil(f.model.snapshot)
+        f.attach(); await f.settle()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 2)
+        XCTAssertEqual(f.model.snapshot?.desired, 1)
+    }
+
+    func testImmediateWatchPushDoesNotStartReadWatchFeedback() async throws {
+        let f = ModelSettingsFixture()
+        f.beforeReply = { operation in
+            if operation == "model_settings_watch" {
+                f.model.receive(.output(try f.state(desired: 2)))
+            }
+        }
+        await f.load(); await f.settle()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 1)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 2)
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+        XCTAssertEqual(f.model.snapshot?.revision, 1)
+    }
+
+    func testStateDuringPagedReadSurvivesWithoutAnotherRead() async throws {
+        let f = ModelSettingsFixture()
+        f.beforeReply = { operation in
+            if operation == "model_settings_read" {
+                f.model.receive(.output(try f.state(desired: 2)))
+            }
+        }
+        await f.load(); await f.settle()
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 2)
+        XCTAssertEqual(f.model.snapshot?.revision, 1)
+        XCTAssertEqual(f.model.snapshot?.desired, 2)
+        XCTAssertEqual(f.model.snapshot?.roles.last?.model_id, "original-model")
+    }
+
+    func testDetachedReadCannotPublishAfterSameBindingReattaches() async throws {
+        let f = ModelSettingsFixture()
+        var interrupted = false
+        f.beforeReply = { operation in
+            if operation == "model_settings_read", !interrupted {
+                interrupted = true
+                f.model.receive(.detached)
+                f.attach()
+            }
+        }
+        await f.load(); await f.settle()
+        XCTAssertTrue(interrupted)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_watch" }.count, 2)
+        XCTAssertEqual(f.operations.filter { $0 == "model_settings_read" }.count, 3)
+        XCTAssertEqual(f.model.snapshot?.revision, 1)
+        XCTAssertNil(f.model.error)
+    }
+
     func testActivationFailureAndUndoRequireRealKeyReentry() async throws {
         let f = ModelSettingsFixture(); f.failedActivation = true; await f.load()
         XCTAssertEqual(f.model.snapshot?.activationText, "应用失败，仍用原设置")
@@ -170,6 +281,7 @@ private final class ModelSettingsFixture {
     var catalogStatus = "available", deviceClass: String
     var changeOnWatch = false
     var operations: [String] = []
+    var beforeReply: ((String) throws -> Void)?
     var signed: Data?
     var draftRequest: [String: Any] = [:]
     let hash = String(repeating: "a", count: 64)
@@ -179,15 +291,31 @@ private final class ModelSettingsFixture {
     func role(model: String) -> ModelSettingsRole {
         ModelSettingsRole(id: "brain", profile: "owner", provider_ref: "provider", model_id: model, activation_boundary: "brain_idle")
     }
-    func load() async {
+    func attach() {
         model.receive(.attached(CentralTransportBinding(sessionID: "session", deviceID: "device", connectionEpoch: "epoch",
             expectedGatewayIdentity: "gateway", maxPacketBytes: 12288, deviceClass: deviceClass)))
+    }
+    func load() async {
+        attach()
         await model.refresh()
         for _ in 0..<20 { await Task.yield(); if !model.busy { break } }
+    }
+    func settle() async { for _ in 0..<100 { await Task.yield() } }
+    func state(desired: Int, environment: String = "fixture", session: String = "session") throws -> CentralTextPacket {
+        try AssistantCentralTextWire.decode(JSONSerialization.data(withJSONObject: [
+            "schema_version": "paios.central.text-envelope.v1", "operation": "model_settings_state", "session_id": session,
+            "state": ["environment_id": environment, "desired": desired,
+                "groups": ["brain": ["desired": desired, "effective": 1, "status": "pending", "error": NSNull()]]]]))
+    }
+    func receipt() throws -> CentralTextPacket {
+        try AssistantCentralTextWire.decode(JSONSerialization.data(withJSONObject: [
+            "schema_version": "paios.central.text-envelope.v1", "operation": "model_settings_receipt",
+            "session_id": "session", "control_id": "unrelated", "ok": true, "result": [:]]))
     }
     func reply(_ bytes: Data, id: String) throws -> CentralTextPacket {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         let operation = try XCTUnwrap(object["operation"] as? String); operations.append(operation)
+        try beforeReply?(operation)
         let request = object["request"] as? [String: Any] ?? [:]
         var result: [String: Any] = [:], error: String?
         switch operation {

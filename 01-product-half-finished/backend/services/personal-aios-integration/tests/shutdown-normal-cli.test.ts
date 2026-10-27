@@ -12,6 +12,7 @@ import {sha256} from '../src/contracts.ts';
 test('native CLI controlled text result/ACK and original App observation complete before normal SIGTERM lock cleanup',async t=>{
   const dir=await fs.mkdtemp(join(tmpdir(),'paios-close-cli-'));let completed=false,creates=0,modelInput='',grants:string[]=[];
   const native=createServer(async(request,response)=>{
+    if(request.url==='/health/detailed'){response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify({platform:'hermes-agent',readiness:{checks:{session_store:{status:'ok'},model:{status:'ok'}}}}));return;}
     if(request.method==='GET'&&/^\/v1\/runs\/[^/]+\/events$/u.test(request.url??'')){response.writeHead(200,{'Content-Type':'text/event-stream'});response.end();return;}
     if(request.method==='GET'&&request.url?.startsWith('/api/sessions')){response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify({data:[]}));return;}
     if(request.method==='POST'&&request.url==='/v1/runs'){creates++;let body='';for await(const chunk of request)body+=chunk;const accepted=JSON.parse(body);modelInput=accepted.input;grants=accepted.grant_toolsets;}

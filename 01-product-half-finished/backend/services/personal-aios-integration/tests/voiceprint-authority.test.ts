@@ -30,6 +30,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { alignSegment, type ClockMap } from '../src/media/align.ts';
 import type { AudioConsumption } from '../src/media/audio-consumption.ts';
 import {PHONE_CAPABILITIES,GLASSES_CAPABILITIES,StaticFixtureDeviceAuthority} from '../src/source-authority.ts';
+import {fileURLToPath} from 'node:url';
 
 const trusted: TrustedContext = {principal_id: 'owner', device_id: 'glasses', device_type: 'glasses', consent_ref: 'fixture',
   channel: 'fixture', submission: 'observation'};
@@ -67,7 +68,7 @@ async function approvalFixture(t:test.TestContext,timeout=8,scheduled=false,cont
   if(controlledClock)await writeFile(approvalClock,String(Date.now()));
   await writeFile(settings,JSON.stringify({key,port,...(controlledClock?{approval_clock:approvalClock}:{})}));
   await writeFile(join(home,'config.yaml'),`approvals:\n  timeout: ${timeout}\n  mode: manual\npersonal_aios:\n  grantable_toolsets: [desktop, terminal, file]\n`);
-  const child=spawn(python,[new URL('./native-run-fixture.py',import.meta.url).pathname,home,'--approval-http',settings],{
+  const child=spawn(python,[fileURLToPath(new URL('./native-run-fixture.py',import.meta.url)),home,'--approval-http',settings],{
     cwd:source,env:{...process.env,PYTHONPATH:source,PAIOS_NATIVE_CONTRACT_SOURCE_ROOT:source,HERMES_HOME:home,
       HERMES_EXEC_ASK:'1',PYTHONDONTWRITEBYTECODE:'1',TMPDIR:directory,API_SERVER_HOST:'127.0.0.1',API_SERVER_PORT:String(port)},
     stdio:['ignore','pipe','pipe']});
@@ -204,7 +205,7 @@ for(const choice of ['deny','timeout'] as const)test(`real native ${choice} sett
   assert.equal((await f.wait(()=>f.run(third),run=>run.status==='completed')).approval_results?.at(-1)?.choice,'deny');
 });
 
-async function fixture(t: test.TestContext, segments: Segment[] | (() => WorkerPort), options: {directed?: boolean; override?:boolean; capability?: Capability; ttl_ms?: number; finish?: boolean; owner_data?: boolean; care?: boolean;realtime_busy?:()=>boolean;capability_grants?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['capability_grants']} = {}) {
+async function fixture(t: test.TestContext, segments: Segment[] | (() => WorkerPort), options: {time_zone?:string;directed?: boolean; override?:boolean; capability?: Capability; ttl_ms?: number; finish?: boolean; owner_data?: boolean; care?: boolean;realtime_busy?:()=>boolean;capability_grants?:ConstructorParameters<typeof PersonalAIOSRuntime>[0]['capability_grants']} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'paios-voiceprint-authority-'));
   const storage = new PosixStorage(directory);
   const ownerOverride=new OwnerOverride({storage,secret_root:directory,ttl_s:0});t.after(()=>ownerOverride.close());
@@ -230,7 +231,7 @@ async function fixture(t: test.TestContext, segments: Segment[] | (() => WorkerP
   const health = options.owner_data ? HealthStore.open(join(directory, 'health')) : undefined;
   const contacts = options.owner_data ? ContactsStore.open(join(directory, 'contacts')) : undefined;
   const notices: string[] = [], care = options.care ? CareAuthority.open(join(directory, 'care')) : undefined;
-  const runtime = new PersonalAIOSRuntime({storage, archive, admission, native, output: new OutputAuthority(storage), media: service,owner_override:ownerOverride,
+  const runtime = new PersonalAIOSRuntime({...(options.time_zone?{time_zone:options.time_zone}:{}),storage, archive, admission, native, output: new OutputAuthority(storage), media: service,owner_override:ownerOverride,
     ...(options.realtime_busy?{realtime_busy:options.realtime_busy}:{}),
     ...(options.capability_grants?{capability_grants:options.capability_grants}:{}),
     ...(health ? {health} : {}), ...(contacts ? {contacts} : {}), ...(care ? {care, notify: async ({body}: {body: string}) => {notices.push(body);}} : {}),
@@ -483,7 +484,7 @@ test('positive Watch fall bypasses a busy bulk page, commits before ACK and arms
 
 test('health and contacts ingress bind the paired principal and only owner runs may query them', async t => {
   for (const speaker of ['owner', 'owner_uncertain', 'speaker:7']) {
-    const f = await fixture(t, whole(speaker, speaker === 'owner_uncertain' ? 0.5 : 0.9), {owner_data: true});
+    const f = await fixture(t, whole(speaker, speaker === 'owner_uncertain' ? 0.5 : 0.9), {owner_data: true,time_zone:'America/Los_Angeles'});
     const batch = {control_id: 'health-page', metric: 'restingHeartRate', unit: 'count/min', tz: 'UTC', sources: ['Watch'],
       samples: [{id: '00000000-0000-4000-8000-000000000001', s: Date.now() - 1000, e: Date.now() - 500, src: 0, v: 61}], deleted: []};
     assert.deepEqual(await f.runtime.ingestHealth(f.phone, batch, 'session'), {stored: 1, deleted: 0});
@@ -501,7 +502,10 @@ test('health and contacts ingress bind the paired principal and only owner runs 
     const entry = [...(f.admission as unknown as {entries: Map<string, {record: {run_id?: string}}>}).entries.values()][0]!;
     for (let i = 0; i < 400 && !entry.record.run_id; i++) await new Promise(r => setTimeout(r, 5));
     const call = {context: {run_id: entry.record.run_id!, session_id: 'session', tool_call_id: 'health-query'}, args: {metric: 'resting_heart_rate'}};
-    if (speaker === 'owner') assert.match(JSON.stringify(await f.runtime.tool('paios_health_query', call)), /61/);
+    if (speaker === 'owner') {
+      const result=await f.runtime.tool('paios_health_query', call);
+      assert.match(JSON.stringify(result), /61/);assert.equal((result as {tz:string}).tz,'America/Los_Angeles');
+    }
     else await assert.rejects(f.runtime.tool('paios_health_query', call), /RUN_SCOPE_TOOL_DENIED/);
     const search = {...call, args: {relation: '妈妈'}};
     if (speaker === 'owner') {

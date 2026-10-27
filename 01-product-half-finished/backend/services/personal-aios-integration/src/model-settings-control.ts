@@ -43,6 +43,7 @@ export class ModelSettingsControl {
     }
     await keys.assertModelSettings(source);
     if(operation==='model_settings_challenge')return keys.challenge(source,'model_settings');
+    if(operation==='model_settings_local_catalog')return authority.localCatalog(body.request as {offset?:number}|undefined);
     const request=body.request as Record<string,unknown>;
     if(operation==='model_settings_draft'){
       if(request.action==='authorize_mac'){
@@ -57,7 +58,7 @@ export class ModelSettingsControl {
     if(operation==='model_settings_test')return authority.testConnection(source,request as {draft_id:string;profile:string;role:string});
     if(operation==='model_settings_set_key'&&request.key!==undefined)
       return authority.keyDraft(source,request as {expected_revision:number;credential_ref:string;key:string});
-    check(['commit','undo','authorize_mac','set_key','pause','resume'].some(action=>operation===`model_settings_${action}`),'MODEL_SETTINGS_OPERATION_INVALID');
+    check(['commit','undo','authorize_mac','set_key','pause','resume','switch_local'].some(action=>operation===`model_settings_${action}`),'MODEL_SETTINGS_OPERATION_INVALID');
     const input:SignedInput={statement_b64:body.statement_b64 as string,signature_b64:body.signature_b64 as string};
     check(typeof input.statement_b64==='string'&&typeof input.signature_b64==='string','PAYMENT_SIGNATURE_REQUIRED',403);
     let statement:Record<string,unknown>;
@@ -71,10 +72,16 @@ export class ModelSettingsControl {
       if(statement.action==='authorize_mac'){
         const draft=authority.getDraft(source,draftId),target=(await this.options.devices(source.principal_id)).find(device=>device.device_id===draft.payload.device_id);
         check(target,'MODEL_SETTINGS_MAC_TARGET_INVALID',403);
-        if(!keys.registered(target,'model_settings')){
+        const currentApproval=()=>{
+          const approval=authority.latestMacAuthorization(source.principal_id,target.device_id);
+          check(approval?.revision===cached.desired&&approval.public_x963_b64===draft.payload.public_x963_b64,
+            'MODEL_SETTINGS_MAC_AUTHORIZATION_SUPERSEDED',409);
+        };
+        currentApproval();
+        if(keys.registered(target,'model_settings')?.public_x963_b64!==draft.payload.public_x963_b64){
           const expected=Object.fromEntries(['action','draft_id','expected_revision','change_sha256','expires_at_ms','principal_id'].map(field=>[field,statement[field]]));
           const verified=await keys.verify(source,'model_settings',input,expected,nonce);
-          await keys.registerModelSettings(source,target,draft.payload.public_x963_b64 as string,verified);
+          await keys.registerModelSettings(source,target,draft.payload.public_x963_b64 as string,verified,undefined,currentApproval);
         }
       }
       return modelSettingsState(authority);

@@ -37,12 +37,26 @@ async function fixture(t: any) {
   const authority = new Authority(), calls: string[] = [];
   const outcomes = new Map<string, {total: number; failed: number; unknown: number}>();
   const runner = new OfflineRegistrationRunner(python);
-  let healthy = true;
-  const registry = new CapabilityRegistry(root, authority, {check: dir => runner.check(dir), health: async () => healthy},
+  let healthy: boolean | Error = true;
+  const registry = new CapabilityRegistry(root, authority, {check: dir => runner.check(dir), health: async () => {
+    if (healthy instanceof Error) throw healthy; return healthy;
+  }},
     {outcomes: async (_principal, _name, digest) => outcomes.get(digest) ?? {total: 0, failed: 0, unknown: 0}},
     {hub: async query => {calls.push('hub'); return {query};}, mcp: async query => {calls.push('mcp'); return {query};}});
-  return {root, authority, registry, runner, calls, outcomes, unhealthy: () => {healthy = false;}, files: await readPackage(template)};
+  return {root, authority, registry, runner, calls, outcomes, unhealthy: () => {healthy = false;},
+    unavailable: () => {healthy = new Error('fictional network timeout');}, files: await readPackage(template)};
 }
+
+test('a health transport exception is unavailable, while a definitive failed health still rolls back',async t=>{
+  const {registry,authority,files,unavailable,unhealthy}=await fixture(t);
+  t.mock.method(console,'warn',()=>{});
+  const checked=await registry.check(context,files);await registry.publish(context,checked.candidate_id);
+  unavailable();const result=await registry.monitor(context,'yimi-capability-template');
+  assert.equal(result.health,null);assert.equal(result.rollback,null);
+  assert.equal(authority.current.get('yimi-capability-template')!.digest,checked.digest);
+  unhealthy();assert.equal((await registry.monitor(context,'yimi-capability-template')).rollback?.reason,'health_failed');
+  assert.equal(authority.current.size,0);
+});
 
 test('template passes both implementations; direct publish, restart recovery, latest rollback removes initial package', async t => {
   const {registry, authority, files, root, runner} = await fixture(t);

@@ -39,7 +39,7 @@ const proofShape=ajv.getSchema(shape.$id+'#/$defs/proof')!;
 export interface NativeConsumerScope {conversation_session_id: string; profile_home?: string}
 export interface NativeRunEvent {
   event:string;run_id:string;timestamp:number;seq?:number;run?:NativeRun;activity_events?:NativeRunEvent[];
-  text?:string;subagent_id?:string;goal?:string;status?:string;error?:boolean;
+  text?:string;subagent_id?:string;child_session_id?:string;goal?:string;status?:string;error?:boolean;
   tool_call_id?:string;public_intent?:string;progress?:number;total?:number;
   exit_reason?:string;outcome?:'succeeded'|'partial'|'failed'|'cancelled';outcome_reason?:string;
 }
@@ -107,6 +107,7 @@ export function nativeConversationSession(native: NativeRun): string {
 const HISTORY_READ_BYTES = 2 * 1024 * 1024;
 // HTTP conversion only. Logical identities, admission and side effects belong to their authorities.
 export class HermesClient {
+  get hookProfile():string {return this.profile??'default';}
   private readonly baseUrl: string; private readonly token: string; private readonly timeoutMs: number; private readonly profile: string | undefined; private readonly maximumBytes: number; private readonly fetcher: typeof fetch;
   constructor(baseUrl: string, token: string, timeoutMs: number, maximumBytes: number, profile?: string, fetcher: typeof fetch = fetch) {
     const url = new URL(baseUrl);
@@ -351,6 +352,12 @@ export class HermesClient {
     check(Array.isArray(page?.data), 'HERMES_INVALID_RESPONSE', 502);
     return (page.data as {id?: unknown;_lineage_root_id?:unknown}[]).filter(s => typeof s?.id === 'string')
       .map(s => ({id: typeof s._lineage_root_id==='string'?s._lineage_root_id:s.id as string}));
+  }
+  async session(sessionId:string):Promise<{id:string;ended_at:number|null;end_reason:string|null}> {
+    const page=await this.read(`/v1/paios/sessions/${encodeURIComponent(sessionId)}/state`) as {session?:{id:string;ended_at:number|null;end_reason:string|null}};
+    check(typeof page.session?.id==='string'&&(page.session.ended_at===null||typeof page.session.ended_at==='number'&&Number.isFinite(page.session.ended_at)),
+      'HERMES_SESSION_STATE_INVALID',502);
+    return page.session;
   }
   async messages(sessionId: string, limit: number, signal?: AbortSignal, offset = 0): Promise<{role: string; content?: unknown; timestamp?: unknown; tool_calls?: unknown; tool_name?: unknown; tool_call_id?: unknown; finish_reason?: unknown}[]> {
     const page = await this.read(`/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=${Math.max(1, Math.min(200, Math.trunc(limit)))}${offset ? `&offset=${Math.trunc(offset)}` : ''}`, signal) as {data?: unknown};

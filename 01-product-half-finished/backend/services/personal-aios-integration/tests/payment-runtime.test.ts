@@ -25,7 +25,7 @@ import {parseErrandResult,errandNotice} from '../../../phase0/gateway/src/errand
 import type {ErrandResult} from '../src/runtime.ts';
 import {provisionCentralResources,type CentralProvisionConfiguration} from '../src/main.ts';
 
-async function fixture(t:test.TestContext,realPayment=false,enabled=true,pollInterval=realPayment?5:10000,withEnrollment=false){
+async function fixture(t:test.TestContext,realPayment=false,enabled=true,pollInterval=realPayment?5:10000,withEnrollment=false,voiceModelCurrent?:()=>boolean){
   const directory=await mkdtemp(join(tmpdir(),'payment-runtime-')),storage=new PosixStorage(directory);
   let count=0,ports:PaymentPorts|undefined,lease=true,terminalChanges=0,authorityInputs=0,authorityWatches=0;
   const rejections:{source:unknown;error:unknown}[]=[];
@@ -50,7 +50,8 @@ async function fixture(t:test.TestContext,realPayment=false,enabled=true,pollInt
   const rejectedSources=new WeakSet<object>(),registry=new StaticFixtureDeviceAuthority([device,{...device,device_id:'glasses',device_type:'glasses',capabilities:['display','microphone','wear_state'],token_sha256:sha256('glasses-token')}]);
   const speech=withEnrollment?controlledEngine():undefined,voiceprint=speech?new VoiceprintRegistry(storage,{...speech.speaker_model,dim:16}):undefined;
   const runtime=new PersonalAIOSRuntime({storage,archive:new RawArchive(storage,10000),admission,native,output:new OutputAuthority(storage),
-    ...(speech?{voiceprint,speech:async()=>speech}:{}),
+    ...(voiceModelCurrent?{voice_model_current:voiceModelCurrent}:{}),
+    ...(voiceprint?{voiceprint}:{}),...(speech?{speech:async()=>speech}:{}),
     payment_devices:async principal=>paired.filter(d=>d.principal_id===principal),
     sourceAuthority:{authenticate:c=>registry.authenticate(c),revalidate:async s=>{if(rejectedSources.has(s))throw new ContractError('SOURCE_BINDING_INACTIVE',403);return registry.revalidate(s);}},skill:'test',max_read_bytes:10000,payment});
   const source=await runtime.authenticate('phone-token');
@@ -68,6 +69,34 @@ async function fixture(t:test.TestContext,realPayment=false,enabled=true,pollInt
   return {runtime,payment,storage,directory,nativeInputs,detach:(run:string)=>detached.add(run),settle:(run:string)=>runtime.reconcile(source,'session',events.get(run)!),complete:(run:string,text:string)=>completed.set(run,text),result:(run:string,sealed=false)=>runtime.result(source,'session',events.get(run)!,sealed?{text_replay:'sealed'}:{}),requests,source,submit,rejections,setPaired:(devices:typeof paired)=>{paired=devices;},rejectHandle:(s:object)=>rejectedSources.add(s),authorityCalls:()=>({input:authorityInputs,watch:authorityWatches}),terminalChanges:()=>terminalChanges,ports:()=>ports!,relock:()=>{lease=false;}};
 }
 const args={action:'request',purpose:'午饭',app:'千问',budget_yuan:16.6};
+test('payment owner facts reject model retirement while channel readiness is in flight',async t=>{
+  let current=true;
+  const f=await fixture(t,false,true,10000,true,()=>current),registry=f.runtime.voiceprintRegistry();
+  await registry.enrollOwner({speaker_model:registry.model,channel:'phone_app',mode:'replace',
+    samples:Array.from({length:5},()=>({embedding:Float32Array.from({length:registry.model.dim},(_,i)=>Number(i===0)),speech_ms:2000}))});
+  assert.deepEqual(await f.ports().owner('owner'),{live:true,phone_app:true,glasses:false});
+  let release!:()=>void,entered!:()=>void;
+  const began=new Promise<void>(resolve=>{entered=resolve;}),pending=new Promise<void>(resolve=>{release=resolve;});
+  const ready=registry.paymentReady.bind(registry);
+  t.mock.method(registry,'paymentReady',async(channel?:Parameters<typeof ready>[0])=>{
+    if(channel==='phone_app'){entered();await pending;}return ready(channel);
+  });
+  const checking=f.ports().owner('owner');await began;current=false;release();
+  assert.deepEqual(await checking,{live:false,phone_app:false,glasses:false});
+});
+
+test('runtime approved-model hook clears trust and cascades persisted payment owners',async t=>{
+  const f=await fixture(t,true,true,10000,true,()=>false),registry=f.runtime.voiceprintRegistry();
+  const clear=t.mock.method(registry,'clearTrustWindows');
+  for(const principal of ['owner','disconnected-owner'])f.payment.store.setPolicy({...f.payment.store.policy(principal),voice_enabled:true,auto_enabled:true});
+  await f.runtime.invalidatePaymentVoice();
+  assert.equal(clear.mock.callCount(),1);
+  for(const principal of ['owner','disconnected-owner']){
+    assert.equal(f.payment.store.policy(principal).voice_enabled,false);
+    assert.equal(f.payment.store.policy(principal).auto_enabled,false);
+  }
+});
+
 test('detached task payment checkpoint pushes an owner confirmation card during a newer owner turn',async t=>{
   const f=await fixture(t,true),frames:Record<string,unknown>[]=[],run=await f.submit('detached-payment',true);
   f.detach(run);await f.settle(run);

@@ -36,7 +36,20 @@ def transport(directory, definition, home, environ):
     return result
 
 
-def load_packages(root, product, home, *, staging=False, single_host=False, environ=None):
+def bind_runtime(definition, binding, secret_names=(), environ=None):
+    """The host supplies deployment paths; packages name the secret files they consume."""
+    result = copy.deepcopy(definition)
+    values = {**(environ or {}), **binding.get('env', {})}
+    result.update({key: binding[key] for key in ('command', 'cwd', 'timeout', 'connect_timeout') if key in binding})
+    result['env'] = {key: (Template(value).substitute(values) if binding else Template(value).safe_substitute(values))
+                     for key, value in {**binding.get('env', {}), **result.get('env', {})}.items()}
+    for name in secret_names:
+        if name in values:
+            result['env'][name] = str(Path(values[name]).expanduser())
+    return result
+
+
+def load_packages(root, product, home, *, staging=False, single_host=False, environ=None, runtime_bindings=None):
     from tools.mcp_tool_schema import mcp_prefixed_tool_name
     environ = dict(environ or {})
     servers, skills, tools, shared = {}, [], [], []
@@ -67,6 +80,9 @@ def load_packages(root, product, home, *, staging=False, single_host=False, envi
             if Path(definition['command']).name.startswith('python'):
                 definition['command'] = '/opt/hermes/.venv/bin/python'
         definition = transport(directory, definition, home, environ)
+        if not staging:
+            definition = bind_runtime(definition, (runtime_bindings or {}).get(server, {}),
+                                      [secret['name'] for secret in extension['secrets']], environ)
         definition.update({key: extension['runtime'][key] for key in ('lazy', 'idle_timeout_seconds')})
         if staging:
             definition['env']['PAIOS_FAKE_' + server.upper() + '_LOG'] = str(home / ('fake-' + server + '.jsonl'))

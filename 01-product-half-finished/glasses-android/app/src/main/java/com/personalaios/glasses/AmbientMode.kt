@@ -111,7 +111,7 @@ fun microphone(state: HudState, now: Long = monotonicMillis(), wakeCallId: Strin
     state.callId != null && state.micMuted -> Microphone.Muted
     state.recording -> Microphone.On
     state.callId != null || state.voiceEnrollment.phase in enrolmentWindow ||
-        state.payment?.let { it.state == "awaiting_owner" && it.voiceHint && it.until > now } == true -> Microphone.On
+        state.payment?.capturesVoice(now) == true -> Microphone.On
     ambientStatus(state) in setOf(AmbientStatus.Active, AmbientStatus.NotWorn) -> Microphone.On
     else -> Microphone.Off
 }

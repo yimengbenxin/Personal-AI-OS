@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {OwnerOverride,createOwnerOverrideSecret} from '../src/owner-override.ts';
 import {PosixStorage} from '../src/storage.ts';
+import {fileURLToPath} from 'node:url';
 
 const PASSPHRASE='private test passphrase α';
 async function fixture(t:{after:(work:()=>unknown)=>void},ttl_s=2){
@@ -83,7 +84,7 @@ test('expiry timer notifies subscribers and close removes its timer',async t=>{
 });
 function cli(root:string,input:string,args:string[]=[]):Promise<{code:number|null;out:string;err:string}>{
   return new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[new URL('../tools/provision-owner-override.ts',import.meta.url).pathname,...args],
+    const child=spawn(process.execPath,[fileURLToPath(new URL('../tools/provision-owner-override.ts',import.meta.url)),...args],
       {env:{...process.env,PAIOS_SECRET_ROOT:root},stdio:['pipe','pipe','pipe']});
     let out='',err='';child.stdout.on('data',chunk=>out+=chunk);child.stderr.on('data',chunk=>err+=chunk);
     child.on('error',reject);child.on('close',code=>resolve({code,out,err}));child.stdin.on('error',()=>{});child.stdin.end(input);

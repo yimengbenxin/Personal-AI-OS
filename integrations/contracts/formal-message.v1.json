@@ -1717,6 +1717,64 @@
           }
         }
       ]
+    },
+    "scope_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grant_request",
+        "preview_items"
+      ],
+      "properties": {
+        "grant_request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope_session_id",
+            "target_id",
+            "target_device_id",
+            "expires_at",
+            "allowed_operation_kinds"
+          ],
+          "properties": {
+            "scope_session_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            "target_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            "target_device_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "paios-utc"
+            },
+            "allowed_operation_kinds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.:-]{0,99}$"
+              }
+            }
+          }
+        },
+        "preview_items": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        }
+      }
     }
   },
   "version": 1,
@@ -3449,6 +3507,10 @@
         "session_id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "history_epoch": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
         }
       }
     },
@@ -4886,8 +4948,33 @@
                   "mac",
                   "watch"
                 ]
+              },
+              "scope_confirmation": {
+                "$ref": "#/$defs/scope_confirmation"
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope_confirmation": {}
+                  },
+                  "required": [
+                    "scope_confirmation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "kind": {
+                      "const": "native_approval"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              }
+            ]
           }
         }
       }
@@ -6511,7 +6598,7 @@
     {
       "contract": "model-settings.v1.json",
       "version": 1,
-      "sha256": "d826317396dac6ccf28f68c0086b4e83ca7e5dbeb1d0453731dd90217d444f4f"
+      "sha256": "bb596337017c289629093781b9278841cba55fc54b8bae83ecb23df400f117fc"
     }
   ]
 }

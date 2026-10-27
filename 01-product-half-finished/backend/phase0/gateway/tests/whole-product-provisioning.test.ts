@@ -28,7 +28,7 @@ const SKILL='controlled fixed skill: actual receipt required';
 test('expand renders guarded FRP loopback and contract preserves direct TLS routes',async t=>{
   const root=await fs.mkdtemp(join(tmpdir(),'cloud-expand-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
-  for(const path of ['prepare-build.py','staging_config.py','cloud.json','front.conf.in','paios_roaming_guard.js.in']){
+  for(const path of ['prepare-build.py','staging_config.py','cloud.json','front.conf.in','paios_roaming_guard.js.in','paios-staging-snapshot.timer']){
     await fs.mkdir(join(root,'deploy/cloud'),{recursive:true});
     await fs.copyFile(new URL('../../../../../deploy/cloud/'+path,import.meta.url),join(root,'deploy/cloud',path));
   }
@@ -87,7 +87,7 @@ test('rendered cloud production and staging reach formal provisioning with optio
   await fs.mkdir(scratch,{recursive:true});
   const root=await fs.mkdtemp(join(scratch.pathname,'d5-cloud-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
-  for(const path of ['deploy/cloud/prepare-build.py','deploy/cloud/staging_config.py','deploy/cloud/cloud.json','deploy/cloud/front.conf.in','deploy/cloud/paios_roaming_guard.js.in']){
+  for(const path of ['deploy/cloud/prepare-build.py','deploy/cloud/staging_config.py','deploy/cloud/cloud.json','deploy/cloud/front.conf.in','deploy/cloud/paios_roaming_guard.js.in','deploy/cloud/paios-staging-snapshot.timer']){
     await fs.mkdir(join(root,path,'..'),{recursive:true});
     await fs.copyFile(new URL('../../../../../'+path,import.meta.url),join(root,path));
   }

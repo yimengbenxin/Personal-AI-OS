@@ -18,11 +18,13 @@ def now():
 
 
 def project(record, *, job_id, revision):
-    reason = record.get("terminal_reason") or record.get("error_code") or record.get("status") or record.get("state", "")
-    uncertain = any(record.get(key) in {"timed_out", "interrupted", "retryable", "PHONE_DISCONNECTED", "PAYMENT_ORDER_CHECK_REQUIRED"}
+    if "jobs" in record:
+        return receipt("succeeded", next={"retry": "allowed"})
+    reason = record.get("error_code") or record.get("terminal_reason") or record.get("status") or record.get("state", "")
+    uncertain = any(record.get(key) in {"timed_out", "interrupted", "retryable", "PHONE_DISCONNECTED", "PAYMENT_ORDER_CHECK_REQUIRED", "PHONE_LOCAL_RESOURCE_UNAVAILABLE"}
                     for key in ("terminal_reason", "error_code", "status", "state"))
-    login = record.get("error_code") == "APP_LOGIN_REQUIRED"
-    state = ("unknown" if uncertain else "waiting" if login else
+    owner_wait = record.get("error_code") in {"APP_LOGIN_REQUIRED", "PAYMENT_LINEAGE_OWNER_CHECK_REQUIRED"}
+    state = ("unknown" if uncertain else "waiting" if owner_wait else
              "cancelled" if reason == "cancelled_by_user" else
              "running" if reason in {"running", "stopping", "already_running"} else
              "accepted" if reason in {"waiting", "started", "busy"} else
@@ -58,6 +60,9 @@ def project(record, *, job_id, revision):
     if payment == "unknown" or record.get("payment_intent") and not payment:
         unknowns.append(unknown_fact("payment_state", "付款结果尚未按原订单核对"))
         state = "unknown"
+    if record.get('error_code') == 'PAYMENT_LINEAGE_OWNER_CHECK_REQUIRED':
+        state = 'waiting'
+        unknowns.append(unknown_fact('payment_state', '付款结果尚未核实，需要主人核对原订单'))
     if state == "unknown":
         unknowns.append(unknown_fact("outcome", str(reason or "没有可核验的执行结果")))
     for text in record.get("partial_findings", {}).get("not_verified", []):
@@ -72,15 +77,16 @@ def project(record, *, job_id, revision):
     retry = "after_check" if state in {"unknown", "partial", "failed"} else "forbidden"
     if record.get("status") == "rejected":
         retry = "forbidden"
-    waiting = "owner" if login else "external" if state in {"accepted", "running"} else "none"
+    waiting = "owner" if owner_wait else "external" if state in {"accepted", "running"} else "none"
     return receipt(state, status={**({"reason_code": str(reason)} if reason else {}),
         **({"progress": {"done": record["step"], "total": record["max_steps"], "unit": "step"}}
            if "step" in record and "max_steps" in record else {}),
         **({"started_at": record["started_at"]} if record.get("started_at") else {}),
         **({"ended_at": record["finished_at"]} if record.get("finished_at") else {})},
         effects=effects, values=values, content=content, unknowns=unknowns,
-        next={"retry": retry, "check_with": CHECK, "waiting_on": waiting},
-        job={"id": job_id, "revision": revision})
+        next={"retry": retry, "check_with": "phone_check" if retry == "after_check" else CHECK,
+              "waiting_on": waiting},
+        job={"id": job_id, "revision": revision} if job_id else None)
 
 
 def stamp(job_id, record, running=None):

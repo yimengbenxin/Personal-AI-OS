@@ -61,21 +61,23 @@ export class ColdStorage {
     const existing=this.flights.get(key);if(existing)return existing as Promise<T>;
     const work=this.job(task).finally(()=>{this.flights.delete(key);});this.flights.set(key,work);return work;
   }
-  private async http(ref:string,method='GET',body?:Uint8Array,range?:[number,number],bound=WIRE,expected?:number,destination?:Buffer,beforeUpload?:(bytes:number)=>void){
+  private async http(ref:string,method='GET',body?:Uint8Array,range?:[number,number],bound=WIRE,expected?:number,destination?:Buffer,beforeUpload?:(bytes:number)=>void,uploadChunk?:(bytes:number)=>Promise<void>){
     check((method==='MKCOL'&&ref==='backups')||/^(?:[a-f0-9]{64}\.l5pack|backups\/[A-Za-z0-9][A-Za-z0-9_.-]{0,199}|originals\/\d{4}-\d{2}-\d{2}\/[a-zA-Z0-9_-]+\.jpg)$/u.test(ref),'COLD_REFERENCE_INVALID');
     const password=(await fs.readFile(this.config.password_file,'utf8')).trimEnd();
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.deadline);
     try{
-      let offset=0;
-      const upload=body?new ReadableStream<Uint8Array>({pull(stream){
+      let offset=0,uploadError:unknown;
+      const upload=body?new ReadableStream<Uint8Array>({async pull(stream){
         if(offset===body.byteLength){stream.close();return;}
-        const end=Math.min(offset+64*1024,body.byteLength);stream.enqueue(body.subarray(offset,end));offset=end;
-      }}):undefined;
+        const end=Math.min(offset+16*1024,body.byteLength);
+        try{await uploadChunk?.(end-offset);stream.enqueue(body.subarray(offset,end));offset=end;}
+        catch(error){uploadError=error;stream.error(error);}
+      }},{highWaterMark:0}):undefined;
       if(body)beforeUpload?.(body.byteLength);
       const response=await fetch(`${this.config.url.replace(/\/$/u,'')}/${ref}`,{method,redirect:'error',signal:controller.signal,
         headers:{Authorization:`Basic ${Buffer.from(`${this.config.username}:${password}`).toString('base64')}`,
           ...(range?{Range:`bytes=${range[0]}-${range[1]}`}:{ }),...(body?{'Content-Length':String(body.byteLength)}:{})},
-        ...(upload?{body:upload,duplex:'half' as const}:{})});
+        ...(upload?{body:upload,duplex:'half' as const}:{})}).catch(error=>{throw uploadError??error;});
       check(method==='MKCOL'?[201,405].includes(response.status):response.ok||(method==='DELETE'&&response.status===404),'COLD_HTTP_FAILED',503);
       if(range)check(response.status===206&&response.headers.get('content-range')?.startsWith(`bytes ${range[0]}-${range[1]}/`),'COLD_RANGE_INVALID',502);
       const length=expected??(range?range[1]-range[0]+1:undefined);
@@ -162,7 +164,7 @@ export class ColdStorage {
   async verifiedRecords(selection?:Pick<ColdRecord,'namespace'|'key'>[]){
     const rows=await this.locations(selection);for(const key of new Set(rows.map(r=>r.pack)))await this.records(key);return rows;
   }
-  async move(records:ColdRecord[],beforeUpload?:(bytes:number)=>void):Promise<{pack:string;bytes:number}>{check(this.queued===0,'COLD_BUDGET_BUSY',503);return this.job(async()=>{
+  async move(records:ColdRecord[],beforeUpload?:(bytes:number)=>void,uploadChunk?:(bytes:number)=>Promise<void>):Promise<{pack:string;bytes:number}>{check(this.queued===0,'COLD_BUDGET_BUSY',503);return this.job(async()=>{
     this.cache.clear();this.inputBytes=records.reduce((n,r)=>n+r.bytes.length,0);try{
     check(records.length>0&&records.reduce((sum,r)=>sum+r.bytes.length,0)<=DECODE,'COLD_SEGMENT_LIMIT');
     const groups=new Map<string,ColdRecord[]>();for(const r of records){
@@ -176,11 +178,12 @@ export class ColdStorage {
         for await(const part of zipper){size+=part.length;check(size<=WIRE,'COLD_SEGMENT_LIMIT');parts.push(part);}bytes=Buffer.concat(parts,size);
       }else bytes=await this.codec(data,format);
       blocks.push({codec:format==='gzip'?'gzip':'flac',...(format==='gzip'?{}:{format}),offset,size:bytes.length,decoded,hash:sha256(bytes)});encoded.push(bytes);offset+=bytes.length;}
-    const header=await compress(Buffer.from(canonical({schema:'paios.cold.v1',items,blocks}))),prefix=Buffer.alloc(8);prefix.write('L5P1');prefix.writeUInt32BE(header.length,4);
+    const metadata=Buffer.from(canonical({schema:'paios.cold.v1',items,blocks}));check(metadata.length<=HEADER,'COLD_HEADER_LIMIT');
+    const header=await compress(metadata),prefix=Buffer.alloc(8);prefix.write('L5P1');prefix.writeUInt32BE(header.length,4);
     check(header.length+8<=HEADER&&header.length+8+offset<=WIRE,'COLD_SEGMENT_LIMIT');
     const data=Buffer.concat([prefix,header,...encoded]);encoded.length=0;const key=sha256(data),size=data.length;
     const db=await this.index();db.prepare('INSERT OR IGNORE INTO packs(key,size) VALUES(?,?)').run(key,size);
-    await this.http(`${key}.l5pack`,'PUT',data,undefined,HEADER,undefined,undefined,beforeUpload);
+    await this.http(`${key}.l5pack`,'PUT',data,undefined,HEADER,undefined,undefined,beforeUpload,uploadChunk);
     const copied=await this.http(`${key}.l5pack`,'GET',undefined,undefined,WIRE,size,data);check(sha256(copied)===key,'COLD_COPY_INTEGRITY',500);
     const parsed=await this.header(key,size,copied);for(let n=0;n<blocks.length;n++)await this.block(key,parsed.pack,parsed.end,n,copied);
     db.exec('BEGIN IMMEDIATE');try{

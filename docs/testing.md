@@ -2,7 +2,7 @@
 
 Personal-AI-OS lets people self-host their own personal assistant, Yimi (依米). Tests should show which part of that experience works. Public CI checks local contracts and synthetic behavior. It needs no model credentials, real account, user data, device or Apple toolchain. A passing public suite does not establish production or real-device acceptance.
 
-先按 [first-run.md](first-run.md)准备开发环境。以下命令都从公开仓库根目录执行，除非明确说明进入包目录。使用 Node **24.19.0**、Python **3.12**；产品支持范围以各包的声明为准。安装系统的 `ffmpeg`，确认同一目录中还有 `ffprobe`。快照加密测试还需要 `age` 和 `age-keygen`。安装脚本会为 Python 媒体测试准备 Pillow、NumPy 和 headless OpenCV。Linux 的中文图像夹具使用 `fonts-wqy-zenhei`，可将 `PAIOS_TEST_CJK_FONT` 指向该字体文件。
+先按 [first-run.md](first-run.md)准备开发环境。以下命令都从公开仓库根目录执行，除非明确说明进入包目录。使用 Node **24.19.0**、Python **3.12**；产品支持范围以各包的声明为准。安装系统的 `ffmpeg`，确认同一目录中还有 `ffprobe`。快照加密测试还需要 `age` 和 `age-keygen`。桌面模拟器的 PDF 测试需要 `pdftotext`（Linux 安装 `poppler-utils`，macOS 安装 `poppler`）。安装脚本会为 Python 媒体测试准备 Pillow、NumPy 和 headless OpenCV。Linux 的中文图像夹具使用 `fonts-wqy-zenhei`，可将 `PAIOS_TEST_CJK_FONT` 指向该字体文件。
 
 ## Reproduce public CI
 

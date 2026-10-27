@@ -1,3 +1,5 @@
+import {mergeWorkItemRevision} from './work-items.ts';
+import type {WorkItemReceipt} from '../../../../../../capability/contracts/work-items.ts';
 import {canonical, check, digest} from '../contracts.ts';
 import type {StoragePort} from '../storage.ts';
 import {admitReceipt} from './receipt.ts';
@@ -6,7 +8,7 @@ import type {Receipt} from '../../../../../../capability/sdk/ts/receipt.ts';
 export interface RunBinding {principal_id: string; run_id: string}
 export interface ReceiptRecord {
   id: string; task_id: string; tool_call_id: string; tool: string; invocation: string;
-  fingerprint: string; receipt: Receipt;
+  fingerprint: string; receipt: WorkItemReceipt;
   call_id?:string; phase?:'waiting'|'result'; origin_run?:string;
   package?:string; version_digest?:string;
   target?:string;check_for?:string;
@@ -15,6 +17,7 @@ interface RunLedger {receipts: ReceiptRecord[]; observations: Record<string, unk
 export interface Fact {
   id: string; kind: string; text: string; voice: string;
   labels?: string[]; state?: Receipt['status']['state']; value?: Receipt['values'][number];
+  summary?:boolean; quantities?:{value:number;unit:string}[];
 }
 const namespace = 'capability-ledger';
 /** One durable store. Per-run snapshots record returns; per-principal delivery sets record told facts. */
@@ -56,7 +59,7 @@ export class ReceiptLedger {
       const prior = run.receipts.find(record => record.id === callId);
       if (prior) {check(prior.fingerprint === fingerprint, 'CAPABILITY_RECEIPT_REPLAY_CONFLICT', 409); return prior;}
       const record:ReceiptRecord = {id: callId, task_id: call.task_id, tool_call_id: call.tool_call_id,
-        tool: call.tool_name, invocation: call.invocation??digest([call.tool_name, call.args]), fingerprint, receipt: admitReceipt(raw),
+        tool: call.tool_name, invocation: call.invocation??digest([call.tool_name, call.args]), fingerprint, receipt: mergeWorkItemRevision(admitReceipt(raw),run.receipts),
         call_id:logicalId,origin_run:binding.run_id,...(call.phase?{phase:call.phase}:{}),
         ...(call.package?{package:call.package}:{}),...(call.version_digest?{version_digest:call.version_digest}:{})};
       if(call.target)record.target=call.target;

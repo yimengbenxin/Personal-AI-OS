@@ -66,6 +66,14 @@ final class AssistantViewModel: ObservableObject {
     @Published private var sessionSnapshot: AssistantSessionSnapshot?
 
     var sessionState: AssistantSessionState { sessionSnapshot?.state ?? .idle }
+    var watchSessionChanges: AnyPublisher<Void, Never> {
+        Publishers.MergeMany([
+            $sessionSnapshot.map { $0?.state.isActive ?? false }.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            $sessionSnapshot.map { $0?.rideOwnerIdentity }.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            $sessionSnapshot.map { $0?.rideMetrics }.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            $sessionSnapshot.map { $0?.rideFeedback }.removeDuplicates().map { _ in () }.eraseToAnyPublisher()
+        ]).eraseToAnyPublisher()
+    }
     var watchRideMetrics: WatchYimiRideMetrics? {
         guard let identity = sessionSnapshot?.rideOwnerIdentity, identity == ownerProjectionIdentity,
               ownerSessionIdentity.matches(identity) else { return nil }
@@ -526,6 +534,13 @@ final class AssistantViewModel: ObservableObject {
             let writableCache = cacheReadable ? cacheURL : nil
             await self.coordinator.setTerminalObserver { [weak self] state in
                 Task { @MainActor in
+                    guard state.historyGeneration >= (self?.terminalState.historyGeneration ?? 0) else { return }
+                    if let reset = state.historyResetID, reset != self?.terminalState.historyResetID {
+                        self?.call = CentralCall(); self?.voiceTurn = CentralVoiceTurn()
+                        self?.errands = []; self?.activities = []; self?.ambientReplies = []
+                        self?.questionCard = nil; self?.careCheckins = []; self?.centralMemoryProposals = []
+                        self?.centralPresentation = nil
+                    }
                     self?.terminalState = state
                     self?.syncAmbientLocation()
                     await self?.requestGlassesStandbyAuthorization()

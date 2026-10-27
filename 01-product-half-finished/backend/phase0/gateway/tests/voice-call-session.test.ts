@@ -388,6 +388,30 @@ const ownerInterrupt=async(call:ReturnType<typeof createVoiceCallSession>)=>{
   call.pushPcm(new Int16Array(512));await new Promise(r=>setImmediate(r));
 };
 
+test('only owner dial wires unknown speech to the existing paired-device biometric confirmation',async()=>{
+  for(const intent of ['dial','automatic'] as const){
+    const confirmations:{call_id:string;trust_call?:boolean}[]=[],errors:unknown[]=[];let requests=0;
+    const call=createVoiceCallSession({...ownerSpeech(),greeting:{enabled:false},room:()=>({}),
+      identifySpeech:async()=>({verdict:'unknown'}),transcribeSpeech:async()=> '依米帮我查天气',
+      classifySpeech:async()=>({stop:false,guests:'unchanged',directed:true}),
+      confirmSpeech:async(_source,_session,turn)=>{confirmations.push(turn);return false;},
+      createPlayout:()=>({open:async()=>{},push:()=>{},playedSamples:()=>0,interrupt:()=>{},drain:async()=>{},close:async()=>{}}),
+      createFront:()=>({connect:async()=>{},appendAudio:()=>{},appendImage:()=>{},respond:async()=>{},context:async()=>{},close:()=>{},
+        clearInput:()=>{},commitInput:()=>{},requestReply:async()=>{requests++;return {completed:true};}}),
+      onState:()=>{},onTranscript:()=>{},onTurn:()=>{},onError:error=>errors.push(error)});
+    try{
+      await call.open(`bootstrap-${intent}`,{mode:'ambient',intent,continuity:'paired-session',
+        source:{principal_id:'owner',device_id:'phone',device_type:'phone'} as never});
+      const archive=Promise.resolve({event:{raw_ref:`l5:${'a'.repeat(64)}`,archive_revision:'b'.repeat(64)},chunk:{}} as never);
+      const push=async(value:number)=>{call.pushPcm(new Int16Array(512).fill(value),archive);await new Promise(r=>setImmediate(r));};
+      for(let turn=0;turn<2;turn++){await push(0);for(let n=0;n<42;n++)await push(1000);await push(0);
+        for(let n=0;n<20;n++)await new Promise(r=>setImmediate(r));}
+      assert.equal(confirmations.length,intent==='dial'?1:0);assert.equal(requests,0);assert.deepEqual(errors,[]);
+      if(intent==='dial')assert.equal(confirmations[0]!.trust_call,true,'the existing call intent remains the biometric trust authority');
+    }finally{await call.closeAll();}
+  }
+});
+
 test('a side remark the front observes before the thinking delay stays silent',async t=>{
   t.mock.timers.enable({apis:['setTimeout','Date'],now:1000000});
   const audio:Int16Array[]=[],errors:unknown[]=[],requested=Promise.withResolvers<void>(),decision=Promise.withResolvers<void>();
@@ -670,19 +694,26 @@ test('false wakes expire while verified owner speech renews the automatic 25 sec
 });
 
 test('nonowner speech uses one sourced observation without a reply; false wakes keep no transcript',async()=>{
-  for(const wake_word of [false,true])for(const uncertain of [false,true]){
-    const turns:import('../src/voice-call-session.ts').CallTurn[]=[],errors:unknown[]=[];let replies=0,final=-1;
+  for(const wake_word of [false,true])for(const verdict of ['guest','unknown','uncertain'] as const){
+    const turns:import('../src/voice-call-session.ts').CallTurn[]=[],errors:unknown[]=[],transcripts:string[]=[];
+    const fronts:Parameters<Parameters<typeof createVoiceCallSession>[0]['createFront']>[0][]=[];let replies=0,final=-1;
     const call=createVoiceCallSession({...ownerSpeech(),greeting:{enabled:false},room:()=>({}),
-      identifySpeech:async()=>uncertain?{verdict:'uncertain' as const,score:.5}:false,transcribeSpeech:async()=> '电视里说拜拜',
+      identifySpeech:async()=>({verdict,score:.5}),transcribeSpeech:async()=> '电视里说拜拜',
       createPlayout:()=>({open:async()=>{},push:()=>{},playedSamples:()=>0,interrupt:()=>{},drain:async()=>{},close:async()=>{}}),
-      createFront:()=>({connect:async()=>{},appendAudio:()=>{},appendImage:()=>{},respond:async()=>{},context:async()=>{},close:()=>{},
-        clearInput:()=>{},commitInput:()=>{},requestReply:async()=>{replies++;return {completed:true};}}),
-      onState:()=>{},onTranscript:()=>{},onSealed:(_id,_reason,turn)=>{final=turn;},onTurn:turn=>{turns.push(turn);},onError:error=>errors.push(error)});
+      createFront:callbacks=>{fronts.push(callbacks);return {connect:async()=>{},appendAudio:()=>{},appendImage:()=>{},respond:async()=>{},context:async()=>{},close:()=>{},
+        clearInput:()=>{},commitInput:()=>{},requestReply:async()=>{replies++;return {completed:true};}};},
+      onState:()=>{},onTranscript:(_id,_turn,_role,text)=>{transcripts.push(text);},onSealed:(_id,_reason,turn)=>{final=turn;},onTurn:turn=>{turns.push(turn);},onError:error=>errors.push(error)});
     try{
-      await call.open('observed',{wake_word});await ownerInterrupt(call);await call.close('observed','button');await call.closeAll();
+      await call.open('observed',{wake_word});await ownerInterrupt(call);
+      assert.deepEqual(transcripts,!wake_word&&verdict==='uncertain'?['电视里说拜拜']:[],
+        'unadmitted speech is archived without projecting it as the owner live transcript');
+      if(!wake_word){fronts[0]!.onClose?.();await new Promise(r=>setImmediate(r));
+        assert.ok(fronts[1]!.instructions.includes(`${verdict==='uncertain'?'声音待确认':'未确认说话人'}: 电视里说拜拜`));
+        assert.ok(!fronts[1]!.instructions.includes('你: 电视里说拜拜'),'reconnect history preserves speaker uncertainty');}
+      await call.close('observed','button');await call.closeAll();
       assert.equal(replies,0);assert.deepEqual(errors,[]);
       assert.deepEqual(turns.map(({user,speaker,route})=>({user,speaker,route})),wake_word?[]:[{
-        user:'电视里说拜拜',speaker:uncertain?'owner_uncertain':'unknown',route:'front_only'}]);
+        user:'电视里说拜拜',speaker:verdict==='uncertain'?'owner_uncertain':'unknown',route:'front_only'}]);
       assert.equal(final,wake_word?-1:turns[0]!.turn);
     }finally{await call.closeAll();}
   }

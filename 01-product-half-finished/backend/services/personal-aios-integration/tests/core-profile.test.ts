@@ -9,7 +9,7 @@ import {migrateNativeMemory, projectCoreProfile, refreshCoreProfile, CoreProfile
 import {projectNativeMemoryForRollback as projectRollback} from '../src/memory/core-profile-rollback.ts';
 import {readCoreProfileBaseline} from '../src/memory/core-profile-state.ts';
 import {validateCommand, type L3Assertion, type L3Receipt} from '../src/memory/contracts.ts';
-import {digest} from '../src/contracts.ts';
+import {digest, EVENT_SCHEMA} from '../src/contracts.ts';
 
 const projectNativeMemoryForRollback = (input: Omit<Parameters<typeof projectRollback>[0], 'state_owner'>) =>
   projectRollback({...input, state_owner: {uid: process.getuid!(), gid: process.getgid!()}});
@@ -82,6 +82,25 @@ test('a concurrent legacy edit stops cutover after durable import and leaves sou
     /CORE_PROFILE_MIGRATION_SOURCE_CHANGED/);
   assert.equal(await readFile(path, 'utf8'), 'concurrent');
   await assert.rejects(f.storage.read('core-profile-migrations', digest({profile_home:f.home})), {code:'ENOENT'});
+});
+
+test('the evidence check handed to L3 verifies the cited revision, not a live stream head that moved past it', async t => {
+  const f = await fixture(t), {l3} = memory();
+  await writeFile(join(f.home, 'memories', 'MEMORY.md'), '事实');
+  const trusted = {principal_id: 'owner', device_id: 'phone', device_type: 'phone' as const, consent_ref: 'consent', channel: 'fixture', submission: 'observation' as const};
+  const raw = {schema_version: EVENT_SCHEMA, event_id: 'call-microphone-lane', device_id: 'phone', device_type: 'phone' as const, captured_at: '2026-10-24T00:00:00.000Z',
+    source: {channel: 'fixture'}, media_type: 'audio' as const, mime: 'audio/pcm', representation: 'received_decoded_sample' as const, payload: Buffer.alloc(320)};
+  const chunk = (seq: number) => ({track_id: 'microphone', stream_epoch: 'lane', seq, modality: 'audio' as const, format: 'pcm_s16le:16000:1',
+    source_range: {kind: 'interval' as const, timebase_id: 'received-pcm:lane', stream_epoch: 'lane', start_ms: seq * 10, end_ms: (seq + 1) * 10}});
+  const cited = (await (await f.archive.admitStream(raw, trusted, chunk(0))).commit).event;
+  await (await f.archive.admitStream(raw, trusted, chunk(1))).commit;
+  const commit = l3.commit.bind(l3), seen: boolean[] = [];
+  l3.commit = async (c, context) => {
+    seen.push(await context.evidenceAvailable({event_id: cited.event_id, processed_event_id: 'call-turn', raw_ref: cited.raw_ref, archive_revision: cited.archive_revision}));
+    return commit(c, context);
+  };
+  await migrateNativeMemory({principal_id: 'owner', profile_home: f.home, storage: f.storage, archive: f.archive, l3});
+  assert.deepEqual(seen, [true]);
 });
 
 test('fresh profiles initialize once from an empty source, while existing native facts require offline migration', async t => {

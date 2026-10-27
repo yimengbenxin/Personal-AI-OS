@@ -397,5 +397,15 @@ class Executor(unittest.IsolatedAsyncioTestCase):
             provider.phone.assert_called_once_with(self.binding)
 
 
+class DeploymentTimeZone(unittest.TestCase):
+    def test_simulator_clock_uses_deployment_zone(self):
+        server = fixtures.server
+        for zone in ('America/Los_Angeles', 'UTC', 'Asia/Taipei'):
+            with self.subTest(zone=zone), mock.patch.dict(server.os.environ, {'PAIOS_TIME_ZONE': zone}), \
+                    mock.patch.object(server, '_shell', return_value='us') as shell:
+                server._ensure_cn_identity()
+                self.assertTrue(shell.call_args_list[1].args[0].endswith('alarm 3 s16 ' + zone))
+
+
 if __name__ == '__main__':
     unittest.main()

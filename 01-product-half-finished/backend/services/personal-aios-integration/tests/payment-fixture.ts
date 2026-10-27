@@ -15,20 +15,20 @@ export const passing:VoiceVerdict={verdict:'pass',initiating:{score:0.9,speech_m
 export function keyPair(){const key=generateKeyPairSync('ec',{namedCurve:'prime256v1'}),j=key.publicKey.export({format:'jwk'});return {...key,public_x963_b64:Buffer.concat([Buffer.from([4]),Buffer.from(j.x!,'base64url'),Buffer.from(j.y!,'base64url')]).toString('base64')};}
 export function signed(key:ReturnType<typeof keyPair>,statement:object){const bytes=Buffer.from(JSON.stringify(statement));return {statement_b64:bytes.toString('base64'),signature_b64:sign('sha256',bytes,key.privateKey).toString('base64')};}
 /** Isolated authority fixture. Verifier verdicts are explicit fakes; signatures and SQLite are real. */
-export async function paymentFixture(t:TestContext,overrides:unknown={},phoneLock=true) {
+export async function paymentFixture(t:TestContext,overrides:unknown={},phoneLock=true,time_zone='Asia/Taipei') {
   let now=Date.parse('2026-10-14T04:00:00Z'),serial=0,live=true,paired:RegisteredDevice[]=[phone,glasses];
   const directory=mkdtempSync(join(tmpdir(),'payment-authority-')),terminals=new TerminalCards(()=>now),dev=keyPair(),user=keyPair();
   const updates:{event:string;payment_id:string;extra?:Record<string,unknown>}[]=[],contexts:string[]=[],revoked=new Set<string>();
   const config=parsePaymentConfig({...overrides as Record<string,unknown>,enabled:true,executor_key_file:'/fixture/executor.key'});
   let ownerOverride=false;
-  let payVerdict:VoiceVerdict=passing,initiatingVerdict:VoiceVerdict=passing,verifyPay:Promise<VoiceVerdict>|undefined;
+  let payVerdict:VoiceVerdict=passing,initiatingVerdict:VoiceVerdict=passing,verifyPay:Promise<VoiceVerdict>|undefined,verifyInitiating:Promise<VoiceVerdict>|undefined;
   const verifierCalls={initiating:0,pay:0};
-  const verifier={verifyInitiating:async()=>{verifierCalls.initiating++;return structuredClone(initiatingVerdict);},verifyPay:async()=>{verifierCalls.pay++;return verifyPay??structuredClone(payVerdict);}};
+  const verifier={verifyInitiating:async()=>{verifierCalls.initiating++;return verifyInitiating??structuredClone(initiatingVerdict);},verifyPay:async()=>{verifierCalls.pay++;return verifyPay??structuredClone(payVerdict);}};
   const ports:PaymentPorts={revalidate:async source=>{if(revoked.has(source.device_id))throw Object.assign(new Error('fixture device revoked'),{code:'PAIRED_DEVICE_REVOKED'});return source;},
     devices:async principal=>principal==='owner'?paired.filter(s=>!revoked.has(s.device_id)):[],
     owner:async()=>({live,phone_app:live,glasses:live}),forget:async()=>{live=false;},
     update:async(_i,p,event,extra)=>{updates.push({event,payment_id:p.payment_id,...(extra?{extra}:{})});},context:async(_p,line)=>{contexts.push(line);},enrolment_sentences:['fixture sentence']};
-  let authority=PaymentAuthority.open(directory,{config,now:()=>now,verifier,terminals,owner_override_active:async()=>ownerOverride});authority.attach(ports);
+  let authority=PaymentAuthority.open(directory,{config,time_zone,now:()=>now,verifier,terminals,owner_override_active:async()=>ownerOverride});authority.attach(ports);
   terminals.connect(glasses,'glasses-session');terminals.wear(glasses,true,0);
   t.after(()=>{authority.close();terminals.close();rmSync(directory,{recursive:true,force:true});});
   const register=async(key:typeof dev,role:'device'|'user')=>{
@@ -63,6 +63,7 @@ export async function paymentFixture(t:TestContext,overrides:unknown={},phoneLoc
     get now(){return now;},advance:async(ms:number)=>{now+=ms;await authority.tick();},setNow:(value:number)=>{now=value;},
     override:(value:boolean)=>{ownerOverride=value;},
     verdict:(value:VoiceVerdict)=>{payVerdict=value;},initiatingVerdict:(value:VoiceVerdict)=>{initiatingVerdict=value;},deferVoice:(value:Promise<VoiceVerdict>|undefined)=>{verifyPay=value;},
+    deferInitiating:(value:Promise<VoiceVerdict>|undefined)=>{verifyInitiating=value;},
     paired:(devices:RegisteredDevice[])=>{paired=devices;},owner:(value:boolean)=>{live=value;},revoke:(source:RegisteredDevice)=>{revoked.add(source.device_id);},
-    reopen:(nextConfig:PaymentConfig=config)=>{authority.close();terminals.lock(glasses);authority=PaymentAuthority.open(directory,{config:nextConfig,now:()=>now,verifier,terminals,owner_override_active:async()=>ownerOverride});authority.attach(ports);return authority;}};
+    reopen:(nextConfig:PaymentConfig=config)=>{authority.close();terminals.lock(glasses);authority=PaymentAuthority.open(directory,{config:nextConfig,time_zone,now:()=>now,verifier,terminals,owner_override_active:async()=>ownerOverride});authority.attach(ports);return authority;}};
 }

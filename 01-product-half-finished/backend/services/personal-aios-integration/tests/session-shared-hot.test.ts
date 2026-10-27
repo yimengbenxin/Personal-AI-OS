@@ -21,6 +21,14 @@ async function fixture(t:test.TestContext){const root=await fs.mkdtemp(join(tmpd
 async function closed(f:Awaited<ReturnType<typeof fixture>>){
   const saved=[];for(let seq=0;seq<3;seq++)saved.push(await f.archive.streams.append(raw(seq+1,'closed'),trusted,at,chunk(seq)));return saved;
 }
+test('pre-ledger journal names remain hot through their live original-object ownership',async t=>{
+  const f=await fixture(t),track=f.storage.trackSessionRecords.bind(f.storage);
+  f.storage.trackSessionRecords=(ref,records)=>track(ref,records.filter(r=>r.namespace==='objects'));
+  const live=await f.archive.streams.append(raw(1,'pre-ledger-live'),trusted,at,chunk(0));
+  assert.equal((await f.archive.moveCold(1,Date.now()+5*86400000)).segments,0);
+  assert.deepEqual(await f.storage.cold!.keys('stream-revisions'),[]);
+  assert.deepEqual(Buffer.from((await f.archive.readExactChunk(live.event,chunk(0),3200)).bytes),Buffer.from(raw(1,'').payload));
+});
 test('final cleanup preserves hot hashes owned by a live stream or pending raw ingress across cold eviction and restart',async t=>{
   const f=await fixture(t),saved=await closed(f),live=await f.archive.streams.append(raw(1,'live'),trusted,at,chunk(0));
   const {payload,...metadata}=raw(2,'pending'),input={schema:'paios.raw-ingress.v1',record:{kind:'stream',raw:metadata,trusted,chunk:chunk(0),received_at:at},object_hash:sha256(payload),bytes:payload.length};

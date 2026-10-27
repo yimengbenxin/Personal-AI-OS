@@ -42,10 +42,11 @@ test('registry facts expose counts, centroid ages and each model without biometr
   const before=await readFile(path),facts=await registry.diagnostics(Date.parse(at)+60000);
   assert.equal(facts.revision,1);
   assert.equal(facts.min_identify_ms,1000);
-  assert.deepEqual(facts.thresholds,{owner_verified:.65,owner_uncertain:.45,cluster:.65,enroll_consistency:.6,assistant:.5});
-  assert.deepEqual(facts.sets,[{kind:'enrolled',channel:'file',samples:5,speech_ms:10000,enrolled_age_ms:60000,
+  assert.deepEqual(facts.thresholds,{owner_verified:.65,owner_uncertain:.45,cluster:.65,enroll_consistency:.6,assistant:.5,
+    call_anchor:.65,trusted_centroid:.65,enroll_match:.65});
+  assert.deepEqual(facts.sets,[{kind:'enrolled',channel:'file',samples:5,verified_threshold:.65,speech_ms:10000,enrolled_age_ms:60000,
     centroid_age_ms:60000,model,stale_model:false,source_sets_current:null}]);
-  assert.doesNotMatch(JSON.stringify(facts),/embedding|centroid"|source_device|source_sets"/u);
+  assert.doesNotMatch(JSON.stringify(facts),/embedding|"centroid"|source_device|"source_sets"/u);
   assert.deepEqual(await readFile(path),before);
   const short=await registry.identify(vector(1),{mode:'call',speech_ms:999,observed_at:at,learning:false});
   assert.deepEqual(short,{kind:'unknown',reason:'too_short'});

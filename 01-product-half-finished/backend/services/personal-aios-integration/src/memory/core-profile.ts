@@ -136,7 +136,8 @@ export async function migrateNativeMemory(options: {
         attempted.push(assertion_id);
         await l3.commit(command, {authenticated: true, principal_id: principal, run_id: 'core-profile-migration',
           context_ref: 'native-memory-migration', authorize: async c => c.payload_sha256 === command.payload_sha256,
-          evidenceAvailable: async ref => (await archive.locate(ref.raw_ref, principal)).archive_revision === ref.archive_revision});
+          // The cited revision's pinned proof, never the current head: a stream head moves past every earlier revision.
+          evidenceAvailable: async ref => {await archive.readRecord(ref.raw_ref, principal, ref.archive_revision, {proof_only: true}); return true;}});
         const stored = await l3.inspect({authenticated: true, principal_id: principal}, assertion_id);
         check(stored.status === 'found' && digest(stored.assertion.value) === digest(assertion.value), 'CORE_PROFILE_MIGRATION_READBACK_FAILED');
         migrated.assertions.push(assertion_id);

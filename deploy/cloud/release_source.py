@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+from release_send_policy import changed_send_policies
 
 KINDS = {'100644': 'file', '100755': 'executable', '120000': 'symlink'}
 B, G, I, H = ('01-product-half-finished/backend/', '01-product-half-finished/backend/phase0/gateway/src/',
@@ -21,6 +22,7 @@ B, G, I, H = ('01-product-half-finished/backend/', '01-product-half-finished/bac
 # Only owner baselines need consent. Ordinary prompts, skills, model settings and integrations can self-release.
 PROTECTED = ('deploy/', '.dockerignore', 'integrations/hermes/verify-producer.mjs', H + 'workshop_sandbox.py',
              H + 'effects.py', H + 'release_consent.py', I + 'effect-consent.ts', I + 'payment/', I + 'voiceprint/', I + 'owner-override.ts', I + 'owner-authority.ts',
+             H + 'send_recipients.py', I + 'capability/send-', 'capability/contracts/send-recipient',
              G + 'personal-aios-payment-source.ts', G + 'personal-aios-payment-wire.ts', G + 'paired-device-',
              G + 'call-speech-identity.ts', G + 'owner-mac-ssh.ts', I + 'care/authority.ts',
              'integrations/connectors/phone_executor/payment_guard.py',
@@ -194,6 +196,7 @@ def protected_changes(repo, base, commit):
         if models(base) != models(commit):
             protected.append(phone_config)
     protected.extend(native_baseline_changes(repo, base, commit, changed))
+    protected.extend(changed_send_policies(git, repo, base, commit, changed))
     return sorted(protected)
 
 

@@ -4,6 +4,7 @@ import os
 import json
 import re
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import subprocess
 import sys
 from ipaddress import IPv6Address
@@ -45,6 +46,16 @@ stage_authority = stage_origin.netloc
 deny_hosts = list(dict.fromkeys(deny_hosts + [stage_host]))
 # Optional external avatar must be absent, not an empty URL.
 production = json.loads((cloud / 'cloud.json').read_text())
+# Freeze the deployer's IANA zone before configuration enters a UTC container.
+zone = os.environ.get('PAIOS_TIME_ZONE') or production.get('time_zone')
+if not zone:
+    zone = os.environ.get('TZ')
+if not zone:
+    localtime = Path('/etc/localtime').resolve().as_posix()
+    zone = localtime.split('/zoneinfo/', 1)[1] if '/zoneinfo/' in localtime else Path('/etc/timezone').read_text().strip()
+ZoneInfo(zone)
+production['time_zone'] = zone
+(build / 'paios-staging-snapshot.timer').write_text((cloud / 'paios-staging-snapshot.timer').read_text().replace('@PAIOS_TIME_ZONE@', zone))
 if 'model_settings' in production and os.environ.get('PAIOS_BUILDER_URL'):
     production['model_settings'].update(build_profile='builder', build_activation_url=os.environ['PAIOS_BUILDER_URL'],
         build_ca_file='${PAIOS_SECRET_ROOT}/workshop-builder.crt')

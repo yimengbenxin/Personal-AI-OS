@@ -295,6 +295,7 @@ test('C5.7 I1 formal extensions use authenticated senders, validated envelopes a
 });
 test('formal ready holds setup output, flushes in order, fences senders and runs once per generation',async t=>{
   const f=fixture(),room=testRoom(),packets:any[]=[],opened:string[]=[],errors:unknown[]=[],reminder=deferred<void>();
+  let historyEpoch:string|undefined;
   let progress:((list:unknown[])=>Promise<boolean>)|undefined;
   room.remoteParticipants.clear();room.localParticipant.publishData=async bytes=>{packets.push(JSON.parse(Buffer.from(bytes).toString()));};
   room.localParticipant.sendText=async(text:string)=>{packets.push(JSON.parse(text));};
@@ -302,7 +303,7 @@ test('formal ready holds setup output, flushes in order, fences senders and runs
   const runtime={watchActivity:async()=>()=>{},replayActivity:async()=>{},authenticate:async()=>phone,formalVoice:async(_s:unknown,_m:string,consume:()=>Promise<unknown>)=>consume(),
     watchPayments:async()=>()=>{},paymentDetach:async()=>{},terminalChanged:()=>{},ownerInput:async()=>{},watchVoiceConfirmations:async()=>()=>{},watchAmbientTurns:async()=>()=>{},
     watchReminders:async(_s:unknown,deliver:(list:unknown[])=>Promise<void>)=>{await deliver([]);reminder.resolve();return()=>{};},
-    cameraReady:async()=>{},movementReady:async()=>{},watchCare:async(_s:unknown,_show:unknown,_speak:unknown,_observe:unknown,_live:unknown,errands:{progress:(list:unknown[])=>Promise<boolean>})=>{
+    historyEpoch:async()=>historyEpoch,cameraReady:async()=>{},movementReady:async()=>{},watchCare:async(_s:unknown,_show:unknown,_speak:unknown,_observe:unknown,_live:unknown,errands:{progress:(list:unknown[])=>Promise<boolean>})=>{
       progress=errands.progress;await reminder.promise;await progress([]);return()=>{};}} as unknown as PersonalAIOSRuntime;
   const bridge=createFormalTextIngress({participant:{roomPort:room,disconnect:async()=>{}} as unknown as LiveKitCloudParticipantPort,
     runtime,authority:f.authority,max_packet_bytes:REALTIME_ASSISTANT_MAX_PACKET_BYTES,errands:{cancel:async()=>false},
@@ -319,12 +320,16 @@ test('formal ready holds setup output, flushes in order, fences senders and runs
   assert.deepEqual(packets.at(-1),{schema_version:'paios.central.text-envelope.v1',operation:'ready',session_id:'continuity'});
   room.emit(RoomEvent.ParticipantConnected,peer);room.emit(RoomEvent.DataReceived,bytes,peer,DataPacketKind.KIND_RELIABLE,FORMAL_TEXT_INPUT_TOPIC);
   await eventually(()=>opened.length===1);assert.deepEqual(opened,['first-tap']);
+  historyEpoch='a'.repeat(32);
   room.remoteParticipants.clear();room.emit(RoomEvent.ParticipantDisconnected,peer);
   const held=progress!([]);await new Promise(resolve=>setImmediate(resolve));assert.equal(packets.length,3);
   room.remoteParticipants.set('terminal',peer);room.emit(RoomEvent.ParticipantConnected,peer);
   await held;await eventually(()=>packets.filter(packet=>packet.operation==='ready').length===2);
   assert.deepEqual(packets.slice(3).map(packet=>packet.operation),['errand_progress','ready']);
+  assert.equal(packets.at(-1).history_epoch,historyEpoch,'reset generation travels only on authenticated ready');
+  historyEpoch='b'.repeat(32);
   await bridge.onBootstrapConnected(f.input);assert.equal(packets.filter(packet=>packet.operation==='ready').length,3);
+  assert.equal(packets.at(-1).history_epoch,historyEpoch,'rollback publishes another generation');
   assert.deepEqual(errors,[]);
   room.remoteParticipants.clear();await bridge.onBootstrapConnected(f.input);await bridge.close();
   assert.equal(packets.filter(packet=>packet.operation==='ready').length,3,'retiring an unknown peer flushes no output');
@@ -507,7 +512,7 @@ async function movementFixture(t:import('node:test').TestContext,navigation?:Nav
     while(pendingMoves.size)await Promise.all([...pendingMoves]);
   };
   const submit=runtime.submit.bind(runtime);runtime.submit=async(...args)=>{if(args[0].media_type==='app_event')events.push(JSON.parse(Buffer.from(args[0].payload).toString('utf8')));return submit(...args);};
-  const connect=async(type:'phone'|'glasses',device:string=type,inCall:boolean|(()=>Promise<void>)=false)=>{
+  const connect=async(type:'phone'|'glasses',device:string=type,inCall:boolean|(()=>Promise<void>)=false,worn=true)=>{
     const f=fixture(false,{primary:device,watch:'watch',client:'watch-client'},['text','voice','text_and_voice'],{type,registry:sources},!!inCall,type==='phone'?'continuity':`${device}-continuity`);
     const room=testRoom() as ReturnType<typeof testRoom>&{localParticipant:Record<string,unknown>};
     room.localParticipant.streamBytes=async(options:any)=>{const stream={options,bytes:[] as Buffer[]};streams.push(stream);return {write:async(bytes:Uint8Array)=>{stream.bytes.push(Buffer.from(bytes));},close:async()=>{}};};
@@ -524,10 +529,12 @@ async function movementFixture(t:import('node:test').TestContext,navigation?:Nav
     await bridge.onBootstrapConnected(f.input);t.after(()=>bridge.close());
     const send=(body:unknown)=>room.emit(RoomEvent.DataReceived,Buffer.from(JSON.stringify(body)),{identity:'terminal'},DataPacketKind.KIND_RELIABLE,FORMAL_TEXT_INPUT_TOPIC);
     const out=(operation:string)=>room.published.filter((p:any)=>p.operation===operation) as any[];
-    if(type==='glasses'){send({operation:'wear_state',control_id:'wear',worn:true});await eventually(()=>out('wear_state_ack').length===1);}
+    if(type==='glasses'&&worn){send({operation:'wear_state',control_id:'wear',worn:true});await eventually(()=>out('wear_state_ack').length===1);}
     return {send,out,bridge,room,source:await runtime.authenticate(f.authority.credentialForBootstrap(f.input))};
   };
   const phone=await connect('phone'),glasses=await connect('glasses');
+  // Start each movement scenario after the idle bootstrap/wear replay has completed.
+  phone.room.published.length=0;glasses.room.published.length=0;
   const requester=hooks.source==='glasses'?glasses:phone,session=hooks.source==='glasses'?'glasses-continuity':'continuity';
   if(hooks.source==='glasses'){
     await runtime.submit({schema_version:'paios.event.v1',event_id:'movement-request',captured_at:now,device_id:'glasses',device_type:'glasses',
@@ -545,6 +552,35 @@ const rideMetrics={speed_kmh:18,avg_kmh:16,max_kmh:25,distance_m:100,moving_s:20
 const navigationFixture=():Navigation=>({search:async()=>[{name:'公司',address:'滨河路',lat:31.01,lng:121.01}],plan:async(_origin,destination,mode)=>({mode,destination,total_m:1500,total_s:600,
   steps:[{index:0,maneuver:'right',instruction:'前面右转，进滨河路',road:'滨河路',distance_m:500,duration_s:200,polyline:[{lat:30.999,lng:120.999},{lat:31,lng:121}],maneuver_location:{lat:31,lng:121}},
     {index:1,maneuver:'left',instruction:'前面左转',distance_m:1000,duration_s:400,polyline:[{lat:31,lng:121},{lat:31.01,lng:121.01}],maneuver_location:{lat:31.01,lng:121.01}}]})});
+for(const scenario of ['navigating','riding','idle'] as const)test(`glasses bootstrap replays ${scenario} without a new frame or wear message`,async t=>{
+  const m=await movementFixture(t,navigationFixture());
+  m.phone.send({operation:'location_update',location:{latitude:31,longitude:121,accuracy_m:5,datum:'wgs84',observed_at:m.at()}});
+  const route=await m.tool('paios_navigate',{destination:'公司',mode:'walking',lat:31.01,lng:121.01});
+  const projected=m.glasses.out('move_hud').at(-1).nav;
+  const nav={nav_id:route.nav_id,revision:1,step_index:0,maneuver:'right',distance_to_maneuver_m:300,remaining_m:1000,remaining_s:400,route_segment_index:0,segment_fraction:0.25};
+  m.phone.send(m.frame(23,{ride_id:rideId,ride:rideMetrics,nav_id:route.nav_id,nav}));
+  await eventually(()=>m.glasses.out('move_hud').some(packet=>packet.seq===23));
+  const previous=m.glasses.out('move_hud').at(-1);
+  await m.glasses.bridge.close();
+  if(scenario!=='riding')await m.tool('paios_ride',{action:'stop'});
+  if(scenario!=='navigating')await m.tool('paios_navigate',{action:'stop'});
+  const start=performance.now(),reconnected=await m.connect('glasses','glasses',false,false);
+  await eventually(()=>reconnected.out('move_hud').length===1,3000);
+  const elapsed=performance.now()-start,hud=reconnected.out('move_hud')[0];
+  assert.ok(elapsed<3000,`bootstrap delivery took ${elapsed} ms`);
+  assert.equal(hud.seq,23);assert.equal(hud.kind,scenario==='riding'?'ride':'walk_nav');
+  assert.equal(reconnected.out('wear_state_ack').length,0);
+  assert.equal(reconnected.out('nav_route').length,scenario==='navigating'?1:0);
+  if(scenario==='navigating'){
+    assert.equal(hud.nav.nav_id,route.nav_id);assert.deepEqual(hud.nav,projected);
+    assert.equal(reconnected.out('nav_route')[0].overview.show,false);
+  }else assert.equal(hud.nav,undefined);
+  if(scenario==='riding')assert.equal(hud.ride.speed_kmh,rideMetrics.speed_kmh);else assert.equal(hud.ride,undefined);
+  t.diagnostic(`bootstrap ${scenario}: ${elapsed.toFixed(1)} ms; no subsequent movement input`);
+  if(process.env.MOVEMENT_BOOTSTRAP_FIXTURE_DIR)await fs.writeFile(join(process.env.MOVEMENT_BOOTSTRAP_FIXTURE_DIR,`${scenario}.json`),
+    JSON.stringify({server_now:m.at(),previous,packets:reconnected.room.published.filter((packet:any)=>['nav_route','move_hud'].includes(packet.operation))},null,2)+'\n');
+  assert.deepEqual(m.errors,[]);
+});
 test('an admission change during an outstanding state publication is published after it, never dropped',{timeout:15000},async t=>{
   // The durable running transition lands while the second unresolved accepted packet is still being published.
   const native=deferred<void>();let unresolved=0;
@@ -599,6 +635,7 @@ test('navigation route-too-long provider errors reach Hermes without sending a r
 });
 test('movement relays only fresh frames at 1 Hz, selects HUD kind, and stores ride summaries through Hermes',async t=>{
   const m=await movementFixture(t,navigationFixture()),g2=await m.connect('glasses','glasses-2');
+  m.glasses.room.published.length=0;g2.room.published.length=0;
   m.phone.send({operation:'ride_state',ride_id:rideId,state:'started',at:m.at(),started_by:'watch'});await eventually(()=>m.events.length===1);
   m.phone.send(m.frame(1,{ride_id:rideId,ride:rideMetrics}));await eventually(()=>m.glasses.out('move_hud').length===1&&g2.out('move_hud').length===1);
   assert.equal(m.glasses.out('move_hud')[0].kind,'ride');assert.equal('hr_bpm' in m.glasses.out('move_hud')[0].ride,false);
@@ -1594,6 +1631,11 @@ test('"确认是我": pending prompts are pushed to the paired phone and a tap c
   await deliver!([{confirmation_id:native,event_id:`approval:${native}`,expires_in_ms:60000,kind:'native_approval',text:question}]);
   assert.deepEqual((room.published as any[]).filter(p=>p.operation==='voice_confirmations').at(-1).confirmations,
     [{confirmation_id:native,event_id:`approval:${native}`,expires_in_ms:60000,kind:'native_approval',text:question}]);
+  const scope_confirmation={grant_request:{scope_session_id:'scope:demo',target_id:'deck:demo',target_device_id:'mac',
+    expires_at:new Date(Date.now()+7200000).toISOString(),allowed_operation_kinds:['document.text.update']},
+    preview_items:['第 2 页：30 万杯 → 50 万杯']};
+  await deliver!([{confirmation_id:native,event_id:`approval:${native}`,expires_in_ms:60000,kind:'native_approval',text:question,scope_confirmation}]);
+  assert.deepEqual((room.published as any[]).filter(p=>p.operation==='voice_confirmations').at(-1).confirmations[0].scope_confirmation,scope_confirmation);
   for(const choice of ['approve','deny']) {
     send({operation:'voice_confirm',confirmation_id:native,choice});
     await eventually(()=>(room.published as any[]).filter(p=>p.operation==='voice_confirmation_decided').some(p=>p.confirmation_id===native&&p.choice===choice));
@@ -1740,6 +1782,39 @@ test('call_open: the front opens with the owner context the runtime projects for
   assert.equal(errors.length,1);
   await bridge.close();
 });
+test('call capture readiness blocks live and a failed first capture can reopen the same call without poisoned observations',async t=>{
+  const f=fixture(),room=testRoom(),capture=Promise.withResolvers<void>(),errors:unknown[]=[],closed:string[]=[],turns:string[]=[];
+  const failure=new Error('CALL_CAPTURE_SOURCE_UNAVAILABLE'),source={principal_id:'actual-owner',device_id:'mac',device_type:'phone',channel:'rtc_typed_text',capabilities:['owner_unlock']};
+  let captures=0,fronts=0,sink:import('../src/personal-aios-formal-text.ts').CallSink|undefined;
+  const runtime=callRuntime({watchActivity:async()=>()=>{},replayActivity:async()=>{},authenticate:async()=>source,locate:async()=>undefined,
+    cameraReady:async()=>{},movementReady:async()=>{},terminalChanged:()=>{},watchPayments:async()=>()=>{},paymentDetach:async()=>{},
+    watchVoiceConfirmations:async()=>()=>{},watchReminders:async()=>()=>{},watchCare:async()=>()=>{},watchAmbientTurns:async()=>()=>{},
+    submitCallTurn:async(raw:RawEvent)=>{turns.push(raw.event_id);return {processed_event:{processed_event_id:'captured-turn'},admission:null};},
+    closeCall:async(_source:unknown,_session:unknown,closure:{call_id:string})=>{closed.push(closure.call_id);}} as unknown as PersonalAIOSRuntime);
+  const ready=runtime.captureCall.bind(runtime);
+  t.mock.method(runtime,'captureCall',async(...args:Parameters<PersonalAIOSRuntime['captureCall']>)=>{if(++captures===1){await capture.promise;throw failure;}return ready(...args);});
+  const call=createVoiceCallSession({room:()=>({}),greeting:{enabled:false},
+    createFront:()=>{fronts++;return {connect:async()=>{},close:()=>{},appendAudio:()=>{},appendImage:()=>{},respond:async()=>({completed:true}),context:async()=>{}};},
+    createPlayout:()=>({open:async()=>{},close:async()=>{},push:()=>{},interrupt:()=>{},drain:async()=>{}}),
+    onState:(...args)=>sink?.state(...args),onSealed:(...args)=>sink?.sealed?.(...args),onTranscript:()=>{},onTurn:()=>{},onError:error=>errors.push(error)});
+  const bridge=createFormalTextIngress({participant:{roomPort:room,disconnect:async()=>{}} as unknown as LiveKitCloudParticipantPort,
+    runtime,authority:f.authority,max_packet_bytes:REALTIME_ASSISTANT_MAX_PACKET_BYTES,onError:error=>errors.push(error),
+    voice_call:{...call,attach:value=>{sink=value;return()=>{sink=undefined;};}}});
+  try{
+    await bridge.onBootstrapConnected(f.input);
+    const opening=call.open('capture-retry',{source:source as never,continuity:'continuity'});
+    const settled=Promise.allSettled([opening]);await eventually(()=>captures===1);await new Promise(setImmediate);
+    const premature=call.active();capture.resolve();const [result]=await settled;
+    assert.equal(premature,undefined,'a source capture pending at opening cannot become live');assert.equal(result!.status,'rejected');
+    if(result!.status==='rejected')assert.equal(result.reason,failure);
+    assert.equal(fronts,0,'source rejection precedes provider allocation');assert.deepEqual(turns,[]);assert.deepEqual(closed,[]);
+    await call.open('capture-retry',{source:source as never,continuity:'continuity'});assert.equal(captures,2);assert.equal(call.active(),'capture-retry');
+    await sink!.turn({call_id:'capture-retry',turn:0,user:'controlled recovered turn',assistant:'',interrupted:false,speaker:'owner',route:'front_only'});
+    await call.close('capture-retry','button');await call.closeAll();
+    assert.equal(turns.length,1);assert.deepEqual(closed,['capture-retry']);assert.ok(errors.every(error=>error===failure));
+  }finally{capture.resolve();await Promise.allSettled([call.closeAll(),bridge.close()]);}
+});
+
 test('call_open failures settle the requested call once with a safe terminal state',async()=>{
   for(const stage of ['permission','owner','open','emitted','closed-emitted','unsafe-emitted'] as const){
     const f=fixture(),room=testRoom(),errors:unknown[]=[];
@@ -2624,11 +2699,46 @@ test('pinned camera SDK without a visual index rejects foreign streams, reserves
   oldFailure.resolve();await settle();newFailure.resolve();await settle();
   assert.deepEqual(publications.filter(packet=>packet.operation==='rejected'&&['old-frame','new-frame'].includes(packet.frame_id)).map(packet=>packet.frame_id),['old-frame','new-frame']);
   runtime.ingestVisualFrame=ingest;received.splice(1);
-  errors.length=0;t.mock.timers.enable({apis:['setTimeout']});
+  const authenticate=runtime.authenticate.bind(runtime);
+  let authGate:ReturnType<typeof deferred<void>>|undefined,denyAuth=false,authEntered=0;
+  t.after(()=>authGate?.resolve());
+  t.mock.method(runtime,'authenticate',async(...args:Parameters<typeof authenticate>)=>{
+    if(authGate){authEntered++;await authGate.promise;if(denyAuth)throw new ContractError('CAMERA_TEST_AUTH_DENIED',403);}
+    return authenticate(...args);
+  });
+  for(const budget of ['device-count','device-bytes','global-count','global-bytes'] as const){
+    authGate=deferred<void>();authEntered=0;
+    if(budget==='device-bytes')start(p,'pending-big',3000000);
+    else if(budget==='device-count'){start(p,'pending-one');start(p,'pending-two');}
+    else for(const [n,peer] of peers.slice(0,4).entries())
+      for(let k=0;k<(budget==='global-count'?2:1);k++)start(peer,`pending-${n}-${k}`,budget==='global-count'?bytes.length:3000000);
+    const rejectedPeer=budget.startsWith('device')?p:peers[4]!;
+    const admitted=budget==='device-count'?2:budget==='device-bytes'?1:budget==='global-count'?8:4;
+    try {
+      start(rejectedPeer,'pending-excess',budget==='global-count'?bytes.length:3000000);
+      assert.equal(rejectedPeer.room.byteStreamControllers.has('pending-excess'),false,
+        `${budget}: excess SDK streams must be removed before pre-auth chunks can queue`);
+      assert.equal(authEntered,admitted,`${budget}: excess streams never enter async authentication`);
+      // Publication authenticates independently after the synchronous stream rejection.
+      chunk(rejectedPeer,'pending-excess');finish(rejectedPeer,'pending-excess');await settle();
+      assert.ok(errors.some(error=>/FORMAL_CAMERA_CAPACITY/.test(String(error))));
+    } finally {
+      // Cancel while authentication is pending; its later completion must not regain a reservation.
+      for(const peer of peers)peer.room.cleanupOnDisconnect();await settle();
+      const gate=authGate;authGate=undefined;gate.resolve();await settle();errors.length=0;
+    }
+    for(const peer of peers)await peer.bridge.onBootstrapConnected(peer.f.input);
+  }
+  authGate=deferred<void>();denyAuth=true;start(p,'pending-denied',3000000);await settle();
+  const deniedGate=authGate;authGate=undefined;deniedGate.resolve();await settle();denyAuth=false;
+  // Shared auth rejection can retire other peers while their publications are pending.
+  for(const peer of peers)await peer.bridge.onBootstrapConnected(peer.f.input);errors.length=0;
+  errors.length=0;t.mock.timers.enable({apis:['setTimeout']});authGate=deferred<void>();
   start(p,'big',3000000);start(p,'device-bytes',3000000);start(p,'small');start(p,'device-count');await settle();
   assert.equal(errors.filter(error=>/FORMAL_CAMERA_CAPACITY/.test(String(error))).length,2);
   assert.doesNotThrow(()=>{chunk(p,'device-bytes');finish(p,'device-bytes');},'SDK state must be removed before later chunks/trailer');
   t.mock.timers.tick(5000);await settle();assert.equal(errors.filter(error=>/FORMAL_CAMERA_STREAM_INACTIVE/.test(String(error))).length,2);
+  const timedOutGate=authGate;authGate=undefined;timedOutGate.resolve();await settle();
   start(p,'slow',3000000);await settle();
   for(let n=0;n<7;n++){t.mock.timers.tick(4000);chunk(p,'slow',Buffer.from([1]));await settle();}
   t.mock.timers.tick(2000);await settle();assert.ok(errors.some(error=>/FORMAL_CAMERA_STREAM_DEADLINE/.test(String(error))));
@@ -4209,6 +4319,51 @@ test('relaunch rejects an inactive source while fresh bootstrap replays its dura
   assert.equal(out(rooms[1]!,'result_header')[0]!.processed_event_id,dID);
   assert.equal(rooms[0]!.published.length,retiredPackets,'the retired transport gets no replay');
   assert.equal(creates,1,'binding churn does not lose or repeat the admitted work');
+});
+
+test('phone call utterances retain issued provenance through payment facts and durable observation admission',{timeout:30000},async t=>{
+  const sources=new FormalTerminalSources(),f=fixture(false,{primary:'phone',watch:'watch',client:'watch-client'},['text'],{type:'phone',registry:sources},true);
+  const root=await fs.mkdtemp(join(tmpdir(),'call-issued-source-')),storage=new PosixStorage(root),archive=new RawArchive(storage,16384),errors:unknown[]=[];
+  const runs=new Map<string,NativeRun>();let created=0,observed=0,transcribed=0;
+  const native:NativeClient={create:async body=>{const run={run_id:`call-run-${++created}`,session_id:body.session_id,conversation_session_id:body.session_id,status:'completed',output:''};runs.set(run.run_id,run);return run;},
+    status:async id=>runs.get(id)!,cancel:async id=>({...runs.get(id)!,status:'cancelled'})};
+  const payment=PaymentAuthority.open(join(root,'payment'),{config:{...DEFAULT_PAYMENT_CONFIG,enabled:true,executor_key_file:'/fixture/executor.key'}});
+  const admission=new RunAdmission(storage,native,{max_pending_events:8,max_pending_bytes:200000,max_event_age_ms:100000,poll_interval_ms:5,native_idempotency_retention_ms:100000,policy_version:'call-provenance'});
+  const runtime=new PersonalAIOSRuntime({storage,archive,admission,native,payment,payment_devices:async()=>[],sourceAuthority:sources,
+    output:new OutputAuthority(storage,{listRunReceipts:async()=>({sources:[]})}),skill:'fixed',max_read_bytes:16384});
+  await runtime.configureTimeline({directory:join(root,'timeline')});
+  const room=testRoom(),sinks=new Set<import('../src/personal-aios-formal-text.ts').CallSink>(),vad=controlledVad(),asset={path:'/synthetic',sha256:'0'.repeat(64)};
+  const call=createVoiceCallSession({room:()=>({}),greeting:{enabled:false},vision:false,expressive:false,
+    turns:{config:{enabled:true,model:asset,thinking_sound:{...asset,model:'fixture',voice:'fixture'}},score:async()=>1,thinking:new Int16Array(480)},
+    openVad:signal=>vad.openVad(signal),identifySpeech:async()=>({verdict:'unknown'}),transcribeSpeech:async()=>`controlled utterance ${++transcribed}`,
+    classifySpeech:async()=>({stop:false,guests:'unchanged'}),
+    createPlayout:()=>({open:async()=>{},playedSamples:()=>0,push:()=>{},interrupt:()=>{},clear:()=>{},drain:async()=>{},close:async()=>{}}),
+    createFront:()=>({connect:async()=>{},appendAudio:()=>{},appendImage:()=>{},respond:async()=>({completed:true}),context:async()=>{},close:()=>{},clearInput:()=>{},commitInput:()=>{},requestReply:async()=>({completed:true})}),
+    onState:async(...args)=>{await Promise.all([...sinks].map(sink=>sink.state(...args)));},onTranscript:(...args)=>{for(const sink of sinks)sink.transcript(...args);},
+    onTurn:async(...args)=>{try{await Promise.all([...sinks].map(sink=>sink.turn(...args)));}finally{observed++;}},
+    onSealed:async(...args)=>{await Promise.all([...sinks].map(sink=>sink.sealed?.(...args)));},onError:error=>errors.push(error)});
+  const bridge=createFormalTextIngress({participant:{roomPort:room,disconnect:async()=>{}} as unknown as LiveKitCloudParticipantPort,
+    runtime,authority:f.authority,max_packet_bytes:REALTIME_ASSISTANT_MAX_PACKET_BYTES,onError:error=>errors.push(error),voice_call:{...call,attach:sink=>{sinks.add(sink);return()=>{sinks.delete(sink);};}}});
+  t.after(async()=>{await Promise.allSettled([call.closeAll(),bridge.close()]);await runtime.close();await fs.rm(root,{recursive:true,force:true});});
+  await bridge.onBootstrapConnected(f.input);
+  room.emit(RoomEvent.DataReceived,Buffer.from(JSON.stringify({operation:'call_open',call_id:'issued-source'})),{identity:'terminal'},DataPacketKind.KIND_RELIABLE,FORMAL_TEXT_INPUT_TOPIC);
+  await eventually(()=>call.active()==='issued-source');
+  for(let utterance=1;utterance<=3;utterance++){
+    call.pushPcm(new Int16Array(512));await new Promise(setImmediate);
+    for(let frame=0;frame<36;frame++){call.pushPcm(new Int16Array(512).fill(1000));await new Promise(setImmediate);}
+    call.pushPcm(new Int16Array(512));await eventually(()=>observed===utterance);
+  }
+  const events=await Promise.all((await storage.list('processed-events')).map(async key=>JSON.parse(Buffer.from(await storage.read('processed-events',key)).toString())));
+  const turns=events.filter(d=>d.content.app_event?.kind==='voice_turn');
+  await eventually(()=>created===3||errors.length>0);
+  t.diagnostic(JSON.stringify({utterances:observed,processed_turns:turns.length,native_runs:created,errors:errors.map(e=>({code:(e as ContractError).code,frames:(e as Error).stack?.split('\n').slice(1,6)}))}));
+  assert.deepEqual(errors,[]);
+  assert.equal(turns.length,3);assert.equal(created,3);
+  for(const turn of turns){assert.equal(turn.content.audio_observations[0].speaker_ref,'unknown');assert.equal(turn.content.audio_observations[0].instruction_eligible,false);assert.ok(await admission.readOnly(turn.principal_id,'continuity',turn.processed_event_id));
+    assert.ok(await archive.read(turn.raw_ref,turn.principal_id,turn.archive_revision));}
+  assert.equal(runtime.timeline!.observations('actual-owner').length,3);
+  await call.close('issued-source','button');await call.closeAll();
+  assert.deepEqual(errors,[]);
 });
 
 for(const tail of [false,true])test(`server call seal preserves its ${tail?'pending spoken turn and ':''}close observation after the opening source binding becomes inactive`,{timeout:15000},async t=>{

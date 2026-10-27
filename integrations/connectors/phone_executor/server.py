@@ -64,6 +64,15 @@ def _load_model() -> None:
 
 
 CONFIG = os.environ.get("PAIOS_MOBILERUN_CONFIG", "config.yaml")
+
+
+def _mobile_config():
+    if state := os.environ.get("PAIOS_PHONE_STATE_DIR"):
+        from runtime_config import load_config
+        return load_config(ConfigLoader, CONFIG, state)
+    return ConfigLoader.load(CONFIG)
+
+
 PHONE_PROVIDER = os.environ.get("PAIOS_PHONE_PROVIDER", "")
 PHONE_SERIAL = os.environ.get("PAIOS_PHONE_SERIAL", "")  # ro.serialno identity; SERIAL is the selected transport
 SERIAL = PHONE_SERIAL
@@ -193,7 +202,7 @@ LOGIN_BUSY = "主人正在云手机上登录，暂时不能办事。请完成登
 CN_IDENTITY = ("setprop gsm.sim.operator.iso-country cn; setprop gsm.operator.iso-country cn; "
                "setprop gsm.sim.operator.numeric 46000; setprop gsm.operator.numeric 46000; "
                "setprop gsm.sim.operator.alpha 'China Mobile'; setprop gsm.operator.alpha 'China Mobile'; "
-               "settings put global auto_time_zone 0; service call alarm 3 s16 Asia/Shanghai")
+               "settings put global auto_time_zone 0; service call alarm 3 s16 {time_zone}")
 
 
 def _shell(cmd: str, check: bool = False) -> str:
@@ -278,7 +287,7 @@ def _ensure_cn_identity(*, preserve_app: bool = False) -> None:
         return
     if preserve_app:
         raise _Refused("【付款结果不明】当前页面不能保留，已停止；请自行核对原订单，不会重开 App 或付款。")
-    _shell(CN_IDENTITY)
+    _shell(CN_IDENTITY.format(time_zone=shlex.quote(os.environ["PAIOS_TIME_ZONE"])))
     _shell("am force-stop com.aliyun.tongyi")  # it reads the region at launch; only after a reboot, so no task state is lost
 
 
@@ -738,7 +747,7 @@ async def _phone_step(fn, reconnect=None, typing: bool = False, portal: bool = T
 
 async def _driver(repair: bool = True) -> AndroidDriver:
     _load_model()
-    config = ConfigLoader.load(CONFIG)
+    config = _mobile_config()
     class ObservedDriver(AndroidDriver):
         async def screenshot(self, hide_overlay=True):
             return await _typing_step(lambda _: _observation("screen"))
@@ -933,7 +942,7 @@ async def _agent(goal: str, max_steps: int, payment_intent: str | None, tier: st
     if job := _jobs.get(_job_id.get() or ""):
         job["_trace"] = step_trace.StepTrace(lambda force=False: _write_running(_job_id.get(), force=force))
         step_trace.bind(job["_trace"])
-    config = ConfigLoader.load(CONFIG)
+    config = _mobile_config()
     config.device.serial = SERIAL
     if screenshot_only:
         tier, config.agent.vision_only = "thorough", True
@@ -975,6 +984,9 @@ async def _agent(goal: str, max_steps: int, payment_intent: str | None, tier: st
         except _AppLoginRequired as exc:
             outcome = {"success": False, "status": "APP_LOGIN_REQUIRED", "login_app": exc.app,
                        "error_code": "APP_LOGIN_REQUIRED", "answer": str(exc), "steps": None}
+        except (FileNotFoundError, PermissionError) as exc:
+            outcome = {"success": False, "answer": f"执行器本地资源不可用：{type(exc).__name__}",
+                       "error_code": "PHONE_LOCAL_RESOURCE_UNAVAILABLE", "steps": None}
         except (ConnectionError, OSError):
             outcome = {"success": False, "answer": "执行手机连接中断，结果未知。", "error_code": "PHONE_DISCONNECTED", "steps": None}
         except Exception as exc:  # noqa: BLE001
@@ -1246,6 +1258,9 @@ async def _job(job_id: str, task: dict) -> None:
         result = {"success": False, "answer": STOPPED + (("\n" + " ".join(_repairs.get())) if _repairs.get() else "")}
     except TimeoutError:
         result = {"success": False, "answer": "执行手机任务超时，结果未知。", "terminal_reason": "timed_out"}
+    except (FileNotFoundError, PermissionError) as exc:
+        result = {"success": False, "answer": f"执行器本地资源不可用：{type(exc).__name__}",
+                  "error_code": "PHONE_LOCAL_RESOURCE_UNAVAILABLE"}
     except (ConnectionError, OSError):
         result = {"success": False, "answer": "执行手机连接中断，结果未知。", "error_code": "PHONE_DISCONNECTED"}
     except Exception as exc:  # noqa: BLE001 — every job must end with a delivered result

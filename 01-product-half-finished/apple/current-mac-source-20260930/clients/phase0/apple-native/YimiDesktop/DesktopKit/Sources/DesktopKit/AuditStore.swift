@@ -125,6 +125,13 @@ final class AuditStore {
 
     deinit { sqlite3_close(db) }
 
+    func eraseAuditRows() throws {
+        try execute("PRAGMA secure_delete=ON")
+        try execute("DELETE FROM audit")
+        guard sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil) == SQLITE_OK else { throw databaseError() }
+        try execute("VACUUM")
+    }
+
     func append(_ record: AuditRecord) throws {
         let summary: [String: Any] = ["paths": record.paths, "names": record.names, "counts": record.count]
         let args = String(decoding: try JSONSerialization.data(withJSONObject: summary), as: UTF8.self)

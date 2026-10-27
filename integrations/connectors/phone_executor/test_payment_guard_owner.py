@@ -42,6 +42,7 @@ class PaymentGuardOwner(unittest.IsolatedAsyncioTestCase):
         port = SimpleNamespace(_at_checkout=lambda: False, _phone_step=direct, _locked=lambda: False)
         phone = SimpleNamespace(tap=mock.AsyncMock())
         guard = payment_guard.CheckoutStop(port, phone)
+        guard.capture_unresolved = False  # These isolated control coordinates are a consistent observation.
         with mock.patch.object(guard, '_seen', return_value=[('确认（26.3~34.3元起）', 0, 100, 200, 300)]):
             with self.assertRaisesRegex(payment_guard._Refused, '会叫车'):
                 await guard.tap(100, 200)

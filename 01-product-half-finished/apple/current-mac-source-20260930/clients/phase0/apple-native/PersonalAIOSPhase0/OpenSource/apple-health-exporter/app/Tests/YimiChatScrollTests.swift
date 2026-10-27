@@ -18,7 +18,7 @@ final class YimiChatScrollTests: XCTestCase {
     /// The field failure: the list sat at the bottom, replies from another device and from her kept arriving, and the
     /// view never followed. Following is the owner being at the bottom; the list growing is never read as the owner leaving.
     func testPinnedListFollowsReplyFromAnotherDeviceAndEveryLaterOne() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         var height: CGFloat = 2000
         _ = scroll.update(metrics(600 - height, 600))
         for _ in 0..<3 {
@@ -31,7 +31,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testPinnedListFollowsStreamingTypingDotsCardsAndKeyboard() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         _ = scroll.update(metrics(-400, 640))
         XCTAssertTrue(scroll.pinned, "typing dots or a new card")
@@ -42,8 +42,31 @@ final class YimiChatScrollTests: XCTestCase {
         XCTAssertTrue(scroll.pinned, "keyboard resize")
     }
 
+    func testKeyboardPositioningWithoutAHistoryGestureKeepsFollowing() {
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
+        _ = scroll.update(metrics(-400, 600))
+        _ = scroll.update(metrics(-400, 600, 320))
+        _ = scroll.update(metrics(-440, 560, 320))
+        XCTAssertTrue(scroll.pinned, "same-size keyboard positioning is not a history gesture")
+        _ = scroll.update(metrics(-440, 560, 600))
+        _ = scroll.update(metrics(-400, 600))
+        XCTAssertTrue(scroll.pinned)
+    }
+
+    func testReplacingAnEqualHeightTailRowDoesNotReleaseFollowing() {
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
+        _ = scroll.update(metrics(-400, 600))
+        _ = scroll.update(metrics(-300, 700))
+        XCTAssertTrue(scroll.pinned, "a fixed-size tail can move before its new bottom target lands")
+        _ = scroll.update(metrics(-400, 600))
+        XCTAssertTrue(scroll.pinned)
+        _ = scroll.drag(towardHistory: true, began: true)
+        _ = scroll.update(metrics(-300, 700))
+        XCTAssertFalse(scroll.pinned, "the same geometry after an actual history drag releases following")
+    }
+
     func testScrollLandingWithinTheSlackStaysPinned() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         _ = scroll.update(metrics(-400, 900))
         _ = scroll.update(metrics(-660, 640))
@@ -51,7 +74,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testReadingHistoryDoesNotJumpOnNewReplyOrKeyboardButSendingAlwaysFollows() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         XCTAssertFalse(scroll.drag(towardHistory: true, began: true))
         _ = scroll.update(metrics(-100, 900))
@@ -66,7 +89,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testFlickAwayFromBottomIsReleasedByTheScrollItself() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         _ = scroll.drag(towardHistory: true, began: true)
         scroll.endDrag()                                       // released while still near the bottom
@@ -79,7 +102,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testDismissingTheKeyboardWithADragAtTheBottomStaysPinned() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         _ = scroll.drag(towardHistory: true, began: true)
         XCTAssertFalse(scroll.pinned)
@@ -88,7 +111,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testReturningNearBottomResumesFollowingWithoutLoadingHistory() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-100, 900))
         _ = scroll.drag(towardHistory: true, began: true)
         _ = scroll.drag(towardHistory: false, began: true)
@@ -97,7 +120,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testNotificationAnchorStopsFollowingUntilTheOwnerReachesTheBottom() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(-400, 600))
         scroll.readingHistory()
         _ = scroll.update(metrics(-150, 850))
@@ -108,7 +131,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testShortHistoryPullAndReleaseKeepsItsPositionWhenOlderRowsArrive() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         _ = scroll.update(metrics(0, 300))
         XCTAssertTrue(scroll.drag(towardHistory: true, began: true))
         scroll.endDrag()
@@ -119,7 +142,7 @@ final class YimiChatScrollTests: XCTestCase {
     }
 
     func testLayoutAndPrependingNeverTriggerAnotherHistoryPage() {
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         XCTAssertFalse(scroll.update(metrics(0, 300)))
         XCTAssertTrue(scroll.drag(towardHistory: true, began: true))
         XCTAssertFalse(scroll.update(metrics(0, 1500)))
@@ -159,7 +182,7 @@ final class YimiChatScrollTests: XCTestCase {
 
     func testNewReplyWhilePinnedKeepsFollowingThroughTheTailWindow() {
         var window = YimiChatWindow()
-        var scroll = YimiChatScrollState()
+        var scroll = YimiChatScrollState(tracksHistoryGestures: true)
         var all = rows(400)
         var height: CGFloat = 3600
         _ = scroll.update(metrics(600 - height, 600))
@@ -174,5 +197,23 @@ final class YimiChatScrollTests: XCTestCase {
             XCTAssertTrue(scroll.pinned)
         }
         XCTAssertFalse(window.older(loaded: all.count), "older still widens over hidden rows first")
+    }
+
+    /// The owner's history held a 72,255-character reply of 630 fact lines; a row lays out a bounded prefix of it.
+    func testLongMessagePreviewIsBoundedByCharactersAndLines() throws {
+        XCTAssertNil(YimiLongText.preview("短回复"))
+        XCTAssertNil(YimiLongText.preview(String(repeating: "字", count: YimiLongText.characters)))
+        XCTAssertNil(YimiLongText.preview(String(repeating: "一行\n", count: YimiLongText.lines - 1) + "\n \n"), "trailing blank lines fit")
+
+        let facts = String(repeating: "path：/a，来源 relay。\n", count: 4_000)
+        XCTAssertGreaterThan(facts.count, 70_000)
+        let byLines = try XCTUnwrap(YimiLongText.preview(facts))
+        XCTAssertEqual(byLines.filter(\.isNewline).count, YimiLongText.lines - 1)
+        XCTAssertTrue(byLines.hasSuffix("…"))
+        XCTAssertTrue(facts.hasPrefix(String(byLines.dropLast())))
+
+        let prose = String(repeating: "回执事实没有换行", count: 9_000)
+        let byCharacters = try XCTUnwrap(YimiLongText.preview(prose))
+        XCTAssertEqual(byCharacters.count, YimiLongText.characters + 1)
     }
 }

@@ -86,4 +86,3 @@ approvals:
 command_allowlist: []
 sync:
   enabled: false
-timezone: Asia/Shanghai

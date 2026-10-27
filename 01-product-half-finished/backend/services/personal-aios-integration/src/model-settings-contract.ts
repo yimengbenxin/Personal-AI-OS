@@ -22,10 +22,11 @@ export interface ModelRole {
   activation_boundary:'brain_idle'|'build_idle'|'read_only';
 }
 export interface ModelSnapshot {providers:ModelProvider[];roles:ModelRole[]}
-export type SettingsAction='commit'|'undo'|'authorize_mac'|'set_key'|'pause'|'resume';
+export type SettingsAction='commit'|'undo'|'authorize_mac'|'set_key'|'pause'|'resume'|'switch_local';
 export interface SettingsDraftRequest extends Partial<ModelSnapshot> {
   action?:Exclude<SettingsAction,'set_key'>;expected_revision:number;change_summary?:string;
   revision?:number;device_id?:string;public_x963_b64?:string;pause_on_limit?:boolean;owner_reserve_cny?:number;
+  local_kind?:import('./model-settings-local-catalog.ts').LocalModelKind;local_target?:string;
 }
 export interface ModelResolution {
   environment_id:string;profile:string;role:string;revision:number;disabled:boolean;

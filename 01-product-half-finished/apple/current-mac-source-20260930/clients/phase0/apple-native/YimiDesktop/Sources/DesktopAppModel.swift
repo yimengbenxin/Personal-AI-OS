@@ -9,6 +9,9 @@ import UserNotifications
     @Published private(set) var sending = false
     @Published var connectionLabel = "未连接"
     @Published var pairing: RealtimeDevicePairing?
+    @Published private(set) var unpairing = false
+    var canUnpair: Bool { pairing != nil && !unpairing }
+    @Published private(set) var unpairStatus: String?
     @Published var error: String?
     @Published var toolLockReason: String?
     @Published private(set) var desktopReady = false
@@ -70,6 +73,8 @@ import UserNotifications
     private var session: AssistantSessionCoordinator?
     private var transport: DesktopSessionTransport?
     private var desktopTransition: Task<Void, Never>?
+    private var terminalTransition: Task<Void, Never>?
+    private var terminalHistoryGeneration: UInt64 = 0
     private var bag = Set<AnyCancellable>()
     private var observation: Task<Void, Never>?
     private var press: UInt64 = 0
@@ -180,7 +185,7 @@ import UserNotifications
             do { if try ownerSSH?.hasPendingRevocation(pairing) == true { await clearPairing(); return } }
             catch { self.error = DesktopUserFacingError.message(error); return }
         }
-        let generation = UUID(); connectionID = generation
+        let generation = UUID(); connectionID = generation; terminalHistoryGeneration = 0
         connectionInProgress = true
         defer {
             connectionInProgress = false
@@ -223,7 +228,7 @@ import UserNotifications
             if FileManager.default.fileExists(atPath: cache.path) { try await coordinator.setTerminalCache(data: Data(contentsOf: cache)) }
             await coordinator.setObserver { [weak self] snapshot in Task { @MainActor in guard self?.connectionID == generation else { return }; await self?.accept(snapshot) } }
             await coordinator.setCentralTextObserver { [weak self] consumer in Task { @MainActor in guard self?.connectionID == generation else { return }; await self?.accept(consumer) } }
-            await coordinator.setTerminalObserver { [weak self] state in Task { @MainActor in guard self?.connectionID == generation else { return }; self?.accept(state) } }
+            await coordinator.setTerminalObserver { [weak self] state in Task { @MainActor in self?.enqueueTerminal(state, connection: generation) } }
             guard connectionID == generation else { return }
             await transitionDesktop(active: true).value
             guard connectionID == generation else { return }
@@ -326,7 +331,34 @@ import UserNotifications
         guard let version = YimiAvatarStore.shared.loadedVersion, let owner = YimiAvatarStore.shared.pairingIdentity, let session else { return }
         Task { do { try await session.acknowledgeAppearanceLoaded(version: version, owner: owner) } catch { self.error = DesktopUserFacingError.message(error) } }
     }
-    private func accept(_ state: CentralTerminalState) {
+    private func enqueueTerminal(_ state: CentralTerminalState, connection: UUID) {
+        let previous = terminalTransition
+        terminalTransition = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.connectionID == connection else { return }
+            await self.accept(state)
+        }
+    }
+    private func accept(_ state: CentralTerminalState) async {
+        guard state.historyGeneration >= terminalHistoryGeneration else { return }
+        terminalHistoryGeneration = state.historyGeneration
+        let connection = connectionID
+        if let reset = state.historyResetID, reset != conversation.historyResetID {
+            do {
+                if let epoch = state.historyEpoch {
+                    try await ownerSSH?.acceptTrustedHistoryEpoch(epoch)
+                    try await transport?.retireHistoryFiles()
+                    try await (desktop as? Desktop)?.acceptTrustedHistoryEpoch(epoch)
+                    try await wechatPreview.acceptTrustedHistoryEpoch(epoch)
+                    syncOwnerSSH()
+                }
+            } catch { self.error = DesktopUserFacingError.message(error); return }
+            guard connectionID == connection else { return }
+            timeline = []; conversation.timeline = YimiConversationTimeline()
+            outgoing = [:]; unacknowledged = [:]; shownTexts = [:]
+            auditEntries = []; errands = []; activities = []; lastTerminalReceiptID = nil
+            central.discardProductHistory()
+        }
         if state.avatarReceived { YimiAvatarStore.shared.accept(state.avatar, ownerIdentity: state.ownerIdentity, eventID: state.avatarEventID, profileVersion: state.avatarVersion) }
         terminals = state.terminals; confirmations = state.confirmations
         // This model owns its local rows; the coordinator only echoes the cache it was handed at connect, so its copies
@@ -645,7 +677,9 @@ import UserNotifications
     func terminalRevoke(_ id: String) async { do { try await session?.revokeTerminal(deviceID: id) } catch { self.error = DesktopUserFacingError.message(error) } }
     func terminalPause(_ id: String, paused: Bool) async { do { try await session?.pauseDesktop(deviceID: id, paused: paused) } catch { self.error = DesktopUserFacingError.message(error) } }
     func unpair() async {
-        guard let pairing else { return }
+        guard canUnpair, let pairing else { return }
+        unpairing = true
+        defer { unpairing = false }
         ownerSSH?.shutdown()
         if let ownerSSH {
             do { try ownerSSH.rememberRevocation(pairing) }
@@ -664,10 +698,16 @@ import UserNotifications
         }
     }
     private func resumeRevocations() {
+        do {
+            if try ownerSSH?.hasPendingRevocations() == true { unpairStatus = "已在本机解除；服务器端待同步" }
+        } catch { self.error = DesktopUserFacingError.message(error) }
         ownerSSH?.resumeRevocations { [weak self] message in
             guard let self else { return }
             if let message { error = message }
-            else if error == revocationError { error = nil }
+            else {
+                if error == revocationError { error = nil }
+                if unpairStatus != nil { unpairStatus = "这台电脑已解除配对" }
+            }
             revocationError = message
         }
     }

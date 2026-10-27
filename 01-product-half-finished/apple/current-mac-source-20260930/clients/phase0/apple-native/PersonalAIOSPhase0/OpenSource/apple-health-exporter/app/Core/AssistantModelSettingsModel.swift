@@ -25,6 +25,11 @@ final class AssistantModelSettingsModel: ObservableObject {
     private var send: Sender?
     private var events: Task<Void, Never>?
     private var needsRefresh = false
+    private var generation = 0
+    private var watching = false
+    private var refreshingGeneration: Int?
+    private var stateVersion = 0
+    private var state: AssistantModelSettingsWire.State?
 
     init(sender: Sender? = nil, signer: Signer? = nil) { send = sender; self.signer = signer }
     deinit { events?.cancel() }
@@ -46,32 +51,73 @@ final class AssistantModelSettingsModel: ObservableObject {
     func receive(_ event: AssistantPaymentEvent) {
         switch event {
         case .attached(let value):
+            guard binding != value else { return }
+            generation += 1
             binding = value; connected = true; authorized = value.deviceClass == "iphone"
+            watching = false; state = nil; needsRefresh = false
             snapshot = nil; review = nil; catalog = nil; pendingMacs = []; message = nil; undoSnapshot = nil
-            Task { await refresh() }
+            let attachedGeneration = generation
+            Task { [weak self] in
+                guard let self, self.generation == attachedGeneration, self.snapshot == nil else { return }
+                await self.open()
+            }
         case .detached, .failed:
+            generation += 1
             binding = nil; connected = false; authorized = false
             snapshot = nil; review = nil; pendingMacs = []; catalog = nil; testResult = nil; undoSnapshot = nil
-            needsRefresh = false
+            watching = false; state = nil; needsRefresh = false
         case .output(let packet):
-            if (try? packet.fields.value("operation", as: String.self)) == "model_settings_state" {
-                Task { await refresh() }
-            }
+            guard let binding,
+                  (try? packet.fields.value("session_id", as: String.self)) == binding.sessionID,
+                  (try? packet.fields.value("operation", as: String.self)) == "model_settings_state" else { return }
+            do {
+                guard let state = try packet.fields.value("state", as: AssistantModelSettingsWire.State.self) else {
+                    throw CentralTextError.invalidPacket
+                }
+                accept(state)
+            } catch { reportError(error) }
         }
     }
 
+    /// Opening and attachment share the same initial snapshot need.
+    func open() async {
+        guard connected, snapshot == nil || snapshot?.revision != snapshot?.desired else { return }
+        await refresh()
+    }
+
     func refresh() async {
-        if busy { needsRefresh = true; return }
+        guard connected else { return }
+        if busy {
+            if refreshingGeneration != generation { needsRefresh = true }
+            return
+        }
+        let refreshGeneration = generation
+        refreshingGeneration = refreshGeneration
+        defer { refreshingGeneration = nil }
         await perform {
-            self.snapshot = try await self.readSnapshot().0
-            let state: AssistantModelSettingsWire.State = try await self.result("watch")
-            if self.snapshot?.desired != state.desired || self.snapshot?.groups != state.groups {
-                self.snapshot = try await self.readSnapshot().0
+            if !self.watching {
+                let stateBeforeWatch = self.stateVersion
+                let state: AssistantModelSettingsWire.State = try await self.result("watch")
+                self.watching = true
+                // A push delivered during registration is newer than its receipt.
+                if self.stateVersion == stateBeforeWatch { self.accept(state) }
             }
+            self.snapshot = try await self.readSnapshot().0
             if self.binding?.deviceClass == "mac" {
                 do { _ = try await self.request("challenge"); self.authorized = true }
                 catch ModelSettingsError.server("MODEL_SETTINGS_MAC_UNAUTHORIZED") { self.authorized = false }
             }
+        }
+    }
+
+    private func accept(_ value: AssistantModelSettingsWire.State) {
+        if let snapshot, snapshot.environment_id != value.environment_id || value.desired < snapshot.desired { return }
+        if let state, state.environment_id != value.environment_id || value.desired < state.desired { return }
+        stateVersion += 1
+        state = value
+        if snapshot != nil {
+            snapshot?.desired = value.desired
+            snapshot?.groups = value.groups
         }
     }
 
@@ -252,6 +298,7 @@ final class AssistantModelSettingsModel: ObservableObject {
     }
 
     private func readSnapshot(draftID: String? = nil, revision: Int? = nil) async throws -> (ModelSettingsSnapshot, Int, AssistantModelSettingsWire.FrozenAction?) {
+        let stateAtRead = stateVersion
         var offset = 0, count = 0, snapshot: ModelSettingsSnapshot?, frozen: AssistantModelSettingsWire.FrozenAction?
         while true {
             var request: [String: Any] = ["offset": offset]
@@ -276,7 +323,13 @@ final class AssistantModelSettingsModel: ObservableObject {
             guard next > offset else { throw CentralTextError.invalidPacket }
             offset = next
         }
-        guard let snapshot else { throw ModelSettingsError.incomplete }
+        guard var snapshot else { throw ModelSettingsError.incomplete }
+        if draftID == nil, revision == nil, let state,
+           state.environment_id == snapshot.environment_id,
+           state.desired > snapshot.desired || (state.desired == snapshot.desired && stateVersion != stateAtRead) {
+            snapshot.desired = state.desired
+            snapshot.groups = state.groups
+        }
         return (snapshot, count, frozen)
     }
 
@@ -305,8 +358,9 @@ final class AssistantModelSettingsModel: ObservableObject {
     }
     private func exchange(_ bytes: Data, id: String) async throws -> CentralTextPacket {
         guard let binding, let send else { throw ModelSettingsError.changed }
+        let generation = generation
         let packet = try await send(bytes, id, 30)
-        guard self.binding == binding else { throw ModelSettingsError.changed }
+        guard self.generation == generation, self.binding == binding else { throw ModelSettingsError.changed }
         guard try packet.fields.value("ok", as: Bool.self) == true else {
             throw ModelSettingsError.server(try packet.fields.value("error_code", as: String.self) ?? "MODEL_SETTINGS_RECEIPT_INVALID")
         }
@@ -318,13 +372,22 @@ final class AssistantModelSettingsModel: ObservableObject {
     }
     private func perform(_ action: () async throws -> Void) async {
         guard !busy else { return }
+        let generation = generation
         busy = true; error = nil
         defer {
             busy = false
-            if needsRefresh, connected { needsRefresh = false; Task { await refresh() } }
+            if needsRefresh, connected {
+                needsRefresh = false
+                let pendingGeneration = self.generation
+                Task { [weak self] in
+                    guard let self, self.generation == pendingGeneration else { return }
+                    await self.refresh()
+                }
+            }
         }
         do { try await action() }
         catch {
+            guard self.generation == generation else { return }
             if case ModelSettingsError.server("MODEL_SETTINGS_REVISION_CONFLICT") = error {
                 review = nil
                 do { snapshot = try await readSnapshot().0 }

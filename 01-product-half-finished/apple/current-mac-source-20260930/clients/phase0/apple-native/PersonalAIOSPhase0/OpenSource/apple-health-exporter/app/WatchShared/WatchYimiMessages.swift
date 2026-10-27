@@ -160,6 +160,7 @@ struct WatchYimiState: Codable, Equatable, Sendable {
     let version: Int; let kind: String; let rev: UInt64; let link: WatchYimiLink; let scope: WatchBindingScope?
     let latest: WatchYimiLatest?; let question: WatchYimiQuestion?; let errands: [WatchYimiErrand]
     let care: WatchYimiCare?; let payment_pending: WatchYimiPaymentPending; let ride: WatchYimiRide?
+    var history_epoch: String? = nil
 
     func encodedStrict() throws -> Data {
         let data = try JSONEncoder().encode(self)
@@ -174,10 +175,12 @@ struct WatchYimiState: Codable, Equatable, Sendable {
 }
 extension WatchYimiState {
     init(from decoder: Decoder) throws {
-        let f = try Fields(decoder, "version", "kind", "rev", "link", "scope", "latest", "question", "errands", "care", "payment_pending", "ride")
+        let f = try Fields(decoder, "version", "kind", "rev", "link", "scope", "latest", "question", "errands", "care", "payment_pending", "ride", "history_epoch")
         version = try f.get("version"); kind = try f.get("kind"); rev = try f.get("rev"); link = try f.get("link"); scope = try f.optional("scope")
         latest = try f.optional("latest"); question = try f.optional("question"); errands = try f.get("errands")
         care = try f.optional("care"); payment_pending = try f.get("payment_pending"); ride = try f.optional("ride")
+        history_epoch = try f.optional("history_epoch")
+        if let history_epoch, history_epoch.range(of: "^[a-f0-9]{32}$", options: .regularExpression) == nil { throw WatchYimiError.invalidValue }
         guard version == 1, kind == "yimi_state", (link == .watch_unregistered) == (scope == nil) else { throw WatchYimiError.invalidValue }
         guard try JSONEncoder().encode(self).count <= Self.maximumEncodedBytes else { throw WatchYimiError.tooLarge }
     }

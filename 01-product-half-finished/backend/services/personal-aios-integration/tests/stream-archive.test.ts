@@ -117,7 +117,7 @@ test('L5 packed hot/cold preserves mic, reply, full frame, upload and old revisi
   await archive.moveCold(2,Date.now()+47*3600000);
   assert.deepEqual(await fs.readFile(join(hot,'objects',fileKey)),Buffer.from('owner file bytes'),'new dedup reuse refreshes the 48h hot deadline');
   await archive.moveCold(2,Date.now()+5*86400000);
-  assert.equal(groupedUnknown,false,'unresolved quarantine chunks stay hot');
+  assert.equal(groupedUnknown,true,'quarantine metadata also tiers without resolving or reclassifying its capture clock');
   assert.deepEqual(await fs.readdir(join(hot,'objects')),[]);
   assert.equal(await storage.cold!.contains('objects',final.object_hash),true);
   await storage.close();const reopened=new PosixStorage(hot,{cold:remote.config}),reader=new RawArchive(reopened,65536,()=>at,coldBudget);
@@ -430,13 +430,16 @@ test('a targeted publication EIO retains its original while a healthy terminal c
   unavailable=false;assert.equal(await broken.commit,sha256('held-original'));assert.deepEqual(await storage.list('raw-ingress'),[]);
 });
 test('full admission budget holds already-played reply input without ACK until healthy publication frees space',{timeout:5000},async t=>{
-  const {storage}=await fixture(t),{OriginalAdmission}=await import('../src/original-admission.ts');let entered!:()=>void,release!:()=>void;
+  const {MemoryStorage}=await import('./memory-storage-fixture.ts'),{timeoutClock}=await import('./timeout-clock-fixture.ts');
+  const storage=new MemoryStorage(),{OriginalAdmission}=await import('../src/original-admission.ts');let entered!:()=>void,release!:()=>void;
   const started=new Promise<void>(resolve=>{entered=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
   const queue=new OriginalAdmission(storage,async(record,payload)=>{if((record as {kind:string}).kind==='existing'){entered();await gate;}return sha256(payload);});
+  t.after(()=>release());t.after(()=>queue.close());
   const existing=await queue.admit({kind:'existing'},Buffer.alloc(60*1024*1024,0x5b));await started;
+  const clock=timeoutClock(t);
   const played=Buffer.alloc(5*1024*1024,0x71),snapshot=Uint8Array.from(played),hash=sha256(snapshot);let acked=false;
   const waiting=queue.admit({kind:'played-reply'},snapshot).then(ack=>{acked=true;return ack;});played.fill(0xee);
-  await Promise.resolve();assert.equal(acked,false);release();await existing.commit;
+  await clock.scheduled(1000);assert.equal(acked,false);release();await existing.commit;
   const ack=await waiting;assert.equal(await ack.commit,hash);assert.equal(sha256(await storage.read('objects',hash)),hash);await queue.close();
 });
 test('close rejects a capacity waiter while joining its admitted in-flight predecessor',async t=>{

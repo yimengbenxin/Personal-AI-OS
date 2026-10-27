@@ -52,9 +52,10 @@ export class VoiceprintPaymentVerifier implements PaymentVoiceVerifier {
       speaker_model: this.options.registry.model.id});
     signal.throwIfAborted();
     if (await this.options.owner_override_active?.()) return unavailable();
+    if (!await this.options.registry.paymentReady(deviceChannel(initiating.device_type))) return {...unavailable(), reason: 'not_enrolled'};
     const result = await this.verify(principal, initiating, pay, signal);
     signal.throwIfAborted();
-    return await this.options.owner_override_active?.() ? unavailable() : result;
+    return await this.options.owner_override_active?.() || !await this.options.registry.paymentReady(deviceChannel(initiating.device_type)) ? unavailable() : result;
   }
   private async verify(principal: string, initiating: UtteranceRef, pay: UtteranceRef|undefined, signal: AbortSignal): Promise<VoiceVerdict> {
     signal.throwIfAborted();
@@ -68,7 +69,7 @@ export class VoiceprintPaymentVerifier implements PaymentVoiceVerifier {
     try {
       engine = await this.options.engine();
       signal.throwIfAborted();
-      check(engine.speaker_model.sha256 === registry.model.sha256 && engine.speaker_model.dim === registry.model.dim,
+      check(engine.speaker_model.id === registry.model.id && engine.speaker_model.sha256 === registry.model.sha256 && engine.speaker_model.dim === registry.model.dim,
         'VOICEPRINT_SPEAKER_MODEL_MISMATCH', 503);
     } catch (error) {signal.throwIfAborted(); return {...result, reason: 'engine_unavailable'};}
     const measure = async (u: UtteranceRef, evidence: Evidence): Promise<Float32Array|VoiceVerdict> => {
@@ -92,7 +93,7 @@ export class VoiceprintPaymentVerifier implements PaymentVoiceVerifier {
     if (!speech.length) return {...result, verdict: 'insufficient', reason: 'no_speech'};
     try {
       const identity = await registry.identify(await embedSpeech(engine, speech, signal),
-        {mode: 'payment', speech_ms: result.initiating.speech_ms, observed_at: initiating.captured_at});
+        {mode: 'payment', channel: deviceChannel(initiating.device_type), speech_ms: result.initiating.speech_ms, observed_at: initiating.captured_at});
       result.initiating.score = score(identity);
       Object.assign(result, conclusion(identity));
       if (result.verdict === 'pass' && result.initiating.speech_ms < registry.policy.min_identify_ms)
@@ -110,7 +111,7 @@ export class VoiceprintPaymentVerifier implements PaymentVoiceVerifier {
       combined.set(carrier); combined.set(follow, carrier.length);
       const payEmbedding = await embedSpeech(engine, follow, signal);
       const combinedIdentity = await registry.identify(await embedSpeech(engine, combined, signal),
-        {mode: 'payment', speech_ms: Math.round(combined.length / 16), observed_at: pay.captured_at,
+        {mode: 'payment', channel: deviceChannel(pay.device_type), speech_ms: Math.round(combined.length / 16), observed_at: pay.captured_at,
           request: {embedding: payEmbedding, speech_ms: result.pay.speech_ms}});
       result.combined = {score: score(combinedIdentity), speech_ms: Math.round(combined.length / 16)};
       signal.throwIfAborted();

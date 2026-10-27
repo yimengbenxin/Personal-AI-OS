@@ -1,3 +1,4 @@
+import {DEFAULT_TIME_ZONE} from './deployment-time.ts';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import type { CaptureLocation } from './contracts.ts';
@@ -7,7 +8,7 @@ import type { L3Assertion } from './memory/contracts.ts';
 
 /** What the live call's realtime front knows about its owner when the call opens: who they are, what they prefer, when and
  *  where they are, and what was said lately. A bounded, read-only projection of the authorities the main agent itself
- *  reads — platform core-profile views (USER.md profile / MEMORY.md notes in its profile home, plus its configured time zone),
+ *  reads — platform core-profile views (USER.md profile / MEMORY.md notes in its profile home, the deployment time zone),
  *  current L3 assertions and L4 cross-terminal native session history — never a second fact store.
  *  Built fresh for every call. Owner-authorized sources: the principal's scoped L3, sessions this principal owns, and only
  *  owner-scope turns in them. */
@@ -16,10 +17,8 @@ const BUDGET = {profile: 350, notes: 200, facts: 300};
 const ENTRY_LIMIT = 160, LINE_LIMIT = 90;
 const MEMORY_ENTRY = '\n§\n'; // the native memory store's entry delimiter
 export interface CallContextSources extends TimelineContextSources {
-  /** The main agent's profile home (platform-generated read-only memory files, its time zone). */
+  /** The main agent's profile home (platform-generated read-only memory files). */
   profile_home?: string;
-  /** Configuration stays in the native home when generated memory uses a separate volume. */
-  configuration_home?: string;
   l3?: {query(owner: {authenticated: true; principal_id: string}, assertion_id: undefined, status: 'active',
     options: {limit: number}): Promise<{assertions: L3Assertion[]}>};
   /** Owner-principal projection from the health store; absent or unavailable data adds no claim. */
@@ -50,18 +49,6 @@ export async function memoryEntries(home: string | undefined, file: 'USER.md' | 
   const text = await fs.readFile(join(home, 'memories', file), {encoding:'utf8',...(signal?{signal}:{})}).catch(() => '');
   return text.slice(0, 64 * 1024).split(MEMORY_ENTRY).map(entry => entry.trim()).filter(Boolean);
 }
-// A fix inside this rectangle is on China Standard Time (UTC+8) whatever the host says: it holds only UTC+8 land (eastern mainland China,
-// Taiwan, Luzon), so no lookup table is needed there. Elsewhere the main agent's configured zone, else the host's.
-const UTC8 = {lat: [18, 42], lng: [108, 122.5]} as const;
-const fixZone = (fix?: CaptureLocation) => fix && fix.latitude >= UTC8.lat[0] && fix.latitude <= UTC8.lat[1] &&
-  fix.longitude >= UTC8.lng[0] && fix.longitude <= UTC8.lng[1] ? 'Asia/Shanghai' : undefined;
-/** The main agent's configured zone (its config.yaml `timezone`), else this host's. */
-async function timeZone(home: string | undefined): Promise<string> {
-  const config = home ? await fs.readFile(join(home, 'config.yaml'), 'utf8').catch(() => '') : '';
-  const zone = /^timezone:\s*["']?([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)*)["']?\s*$/mu.exec(config)?.[1];
-  if (zone) try {new Intl.DateTimeFormat('zh-CN', {timeZone: zone}); return zone;} catch { /* invalid: host zone */ }
-  return Intl.DateTimeFormat().resolvedOptions().timeZone;
-}
 export const fact = (a: L3Assertion, stamp: (at: string) => string = at => at) => {
   const value = typeof a.value === 'string' || typeof a.value === 'number' || typeof a.value === 'boolean' ? String(a.value) : JSON.stringify(a.value);
   const s = a.scope, time = s.valid_time ? `${stamp(s.valid_time.from)}至${s.valid_time.until ? stamp(s.valid_time.until) : '未注明结束'}` : '未注明';
@@ -70,13 +57,13 @@ export const fact = (a: L3Assertion, stamp: (at: string) => string = at => at) =
 
 export async function buildCallContext(sources: CallContextSources, request: {principal_id: string; session: string; location?: CaptureLocation}) {
   const ms = sources.timeout_ms ?? 1200, now = sources.now?.() ?? Date.now();
-  const [profile, notes, assertions, recent, zone, health] = await Promise.all([
+  const zone = sources.time_zone ?? DEFAULT_TIME_ZONE;
+  const [profile, notes, assertions, recent, health] = await Promise.all([
     settle(() => memoryEntries(sources.profile_home, 'USER.md', sources.signal), [], ms),
     settle(() => memoryEntries(sources.profile_home, 'MEMORY.md', sources.signal), [], ms),
     settle(async () => sources.l3 ? (await sources.l3.query({authenticated: true, principal_id: request.principal_id}, undefined, 'active',
       {limit: 40})).assertions : [], [] as L3Assertion[], ms),
     settle(() => buildTimelineContext(sources, request.principal_id, request.session), '【同一条时间线】暂不可读取，不能据此认定此前没有对话。', ms),
-    settle(async () => sources.time_zone ?? fixZone(request.location) ?? timeZone(sources.configuration_home ?? sources.profile_home), Intl.DateTimeFormat().resolvedOptions().timeZone, ms),
     settle(async () => sources.recentHealth?.(request.principal_id), undefined, ms)]);
   const recordTime=sources.time_zone?new Intl.DateTimeFormat('sv-SE',{timeZone:zone,dateStyle:'short',timeStyle:'short'}):undefined;
   const facts = fit(assertions.filter(a => a.scope.principal_id === request.principal_id && a.status === 'active' && a.applicability_status === 'applicable' &&

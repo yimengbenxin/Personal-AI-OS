@@ -21,6 +21,7 @@ import {HealthStore} from '../src/health/store.ts';
 import {AmbientJournal} from '../src/ambient/journal.ts';
 import {DeviceLocations,PLACE_RETENTION_MS,type PlaceBatch,type PlaceEvent} from '../src/location.ts';
 import {StaticFixtureDeviceAuthority} from '../src/source-authority.ts';
+import {fileURLToPath} from 'node:url';
 
 const TOKEN = 'registered-source-device-test-token';
 const INTERNAL = 'test-internal-service-token-source';
@@ -28,7 +29,7 @@ const SECOND = 'second-principal-device-test-token';
 const CAPTURED = '2026-10-01T01:00:00.000Z';
 
 test('legacy care run tools retain native isolation across provider HTTP',{timeout:30000},async t=>{
-  const root=new URL('../../../../..',import.meta.url).pathname.replace(/\/$/u,''),folder=await fs.mkdtemp(join(tmpdir(),'care-http-'));
+  const root=fileURLToPath(new URL('../../../../..',import.meta.url)).replace(/\/$/u,''),folder=await fs.mkdtemp(join(tmpdir(),'care-http-'));
   const sourceRoot=process.env.PAIOS_NATIVE_SOURCE_TEST_ROOT??'/opt/personal-aios-runtime/hermes-agent';
   const python=process.env.PAIOS_HERMES_PYTHON??join(sourceRoot,'.venv','bin','python'),home=join(folder,'native');
   await fs.mkdir(home);await fs.mkdir(join(folder,'pycache'));
@@ -58,7 +59,7 @@ test('legacy care run tools retain native isolation across provider HTTP',{timeo
   await fs.writeFile(request,JSON.stringify({url,key_file:key,run_id:runId,conversation_session_id:session,input:d,repo_root:root}));
   t.signal.throwIfAborted();
   const closed=Promise.withResolvers<void>();probeClosed=closed.promise;
-  const child=probeChild=spawn(python,[new URL('./native-run-fixture.py',import.meta.url).pathname,home,'--care-http',request],
+  const child=probeChild=spawn(python,[fileURLToPath(new URL('./native-run-fixture.py',import.meta.url)),home,'--care-http',request],
     {cwd:sourceRoot,env:{...process.env,PYTHONPATH:sourceRoot,HERMES_HOME:home,TMPDIR:folder,PYTHONPYCACHEPREFIX:join(folder,'pycache')},stdio:['ignore','pipe','pipe']});
   const stdout=await new Promise<string>((resolve,reject)=>{
     let output='',errors='',phase='startup',failure:Error|undefined,timer:ReturnType<typeof setTimeout>|undefined;

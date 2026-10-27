@@ -20,7 +20,7 @@ def main(request):
     root, home = Path(request["root"]), Path(request["home"]) / ("native-" + request["name"])
     executed = home / "fake.jsonl"
     config = configure(home, request["model_key_file"], {
-        "plugins": {"enabled": ["yimi-gateway"]},
+        "plugins": {"enabled": ["yimi-gateway"], "entries": {"yimi-gateway": {"settings": request["config"]}}},
         "personal_aios": request["config"],
         "mcp_servers": {"mijia": {"command": sys.executable, "args": [str(root / "capability/packages/mijia/fake/server.py")],
             "env": {"HERMES_HOME": str(home), "PAIOS_FAKE_MIJIA_LOG": str(executed)}, "timeout": 30, "trust": "full"}},
@@ -51,7 +51,7 @@ def main(request):
     agent = brain(config, tools=["mcp-mijia"], session=request["session"], max_tokens=None)
     restrict_agent(agent, "owner")
     try:
-        result = agent.run_conversation(request["prompt"], system_message=SYSTEM)
+        result = agent.run_conversation(request["input"], system_message=SYSTEM)
         messages = result.get("messages") or []
         answers = {m.get("tool_call_id"): m.get("content") for m in messages if m.get("role") == "tool"}
         calls = [{"tool": call["function"]["name"], "args": json.loads(call["function"]["arguments"] or "{}"),

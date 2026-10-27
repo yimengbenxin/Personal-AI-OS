@@ -8,6 +8,10 @@ struct YimiModelSettingsView: View {
             if let snapshot = model.snapshot {
                 Section {
                     Text(snapshot.activationText).font(.headline)
+                    if snapshot.revision != snapshot.desired {
+                        Button("设置已更新，读取最新路由") { Task { await model.refresh() } }
+                            .disabled(model.busy || !model.connected)
+                    }
                     LabeledContent("已保存版本", value: "\(snapshot.desired)")
                     ForEach(snapshot.groups.keys.sorted(), id: \.self) { key in
                         if let group = snapshot.groups[key] {
@@ -57,7 +61,7 @@ struct YimiModelSettingsView: View {
         }
         .navigationTitle("模型与密钥").navigationBarTitleDisplayMode(.inline)
         .tint(Yimi.klein).scrollContentBackground(.hidden).background(Yimi.ground)
-        .task { await model.refresh() }.refreshable { await model.refresh() }
+        .task { await model.open() }.refreshable { await model.refresh() }
         .sheet(isPresented: Binding(get: { model.review != nil }, set: { if !$0 { model.discardReview() } })) {
             YimiModelSettingsConfirmationSheet(model: model)
         }

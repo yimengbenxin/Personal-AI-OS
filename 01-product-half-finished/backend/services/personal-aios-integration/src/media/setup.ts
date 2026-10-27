@@ -44,7 +44,7 @@ export interface MediaProviderPorts {
     detector?: VadStreamFactory;
 }
 export async function configureMediaReplay(storage: StoragePort, incoming: unknown, maxEventBytes: number,
-    fetcher: typeof fetch = fetch, source?: MediaCompositionSource, provided?: MediaProviderPorts) {
+    fetcher: typeof fetch = fetch, source?: MediaCompositionSource, provided?: MediaProviderPorts, localModels?:ReturnType<typeof import('../model-settings-local-runtime.ts').localSpeechRuntime>) {
     if(source?.continuous)source={...source,continuous:{...source.continuous,budget:{...source.continuous.budget}}};
     if (source) check(typeof source.withAppendAdmission === 'function' && typeof source.authorizeClockMaps === 'function' &&
         ['calibrated','receipt_estimated','synthetic'].includes(source.clockEvidence), 'PRODUCTION_MEDIA_AUTHORITY_NOT_CONFIGURED', 503);
@@ -69,10 +69,11 @@ export async function configureMediaReplay(storage: StoragePort, incoming: unkno
             timeout_ms:30000,max_input_bytes:1000000,max_output_bytes:1000000,max_chunks:512,
             max_pixels:16777216,max_metadata_bytes:1000000,max_duration_ms:30000},execution);
     })();
+    const openSpeech=config.audio&&localModels&&!provided?await localModels.prepare(config.audio.config):undefined;
     const engines = recoveringEngine(() => {
         check(!closed, 'LOCAL_AUDIO_CLOSED', 503);
         check(config.audio, 'MEDIA_AUDIO_NOT_CONFIGURED', 503);
-        return LocalSpeechEngine.open(config.audio.config);
+        return openSpeech?openSpeech():LocalSpeechEngine.open(config.audio.config);
     });
     const speech = engines.current;
     const localExecution = {close: async () => {
@@ -145,7 +146,7 @@ export async function configureMediaReplay(storage: StoragePort, incoming: unkno
         align: config.alignment, max_segments: config.max_segments,
         max_window_ms: config.max_window_ms, fixtureOnly: config.fixture_only, ...sourceFields,...(continuous?{continuous}:{}),
         ...(turn?{turn:{capabilities:turn}}:{})});
-    if(continuous&&!provided)try {await speech();}catch(error){await service.close();throw error;}
+    if((continuous||openSpeech)&&!provided)try {await speech();}catch(error){await service.close();throw error;}
     // `speech` is the composition's shared engine (enrollment, keyword spotting); it closes with the service.
     return {service, archive, ...(config.audio ? {speech,detector:provided?.detector??detector} : {})};
 }

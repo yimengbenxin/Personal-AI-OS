@@ -10,8 +10,30 @@ enum YimiRoute: Hashable, CaseIterable { case chat, memory, health, contacts, pa
 @MainActor
 final class YimiUIState: ObservableObject {
     enum CallMode { case voice, video }
-    @Published var path: [YimiRoute] = []
+    @Published var path: [YimiRoute] = [] {
+        didSet {
+#if DEBUG
+            if path.last == .chat, oldValue.last != .chat { beginChatOpenMeasurement() }
+#endif
+        }
+    }
     @Published var chatScrollRequest: UInt64 = 0
+#if DEBUG
+    private var chatOpenStartedAt: TimeInterval?
+    @Published private(set) var chatOpenLayoutSeconds: TimeInterval?
+
+    private func beginChatOpenMeasurement() {
+        guard ProcessInfo.processInfo.arguments.contains("-ui-testing") else { return }
+        chatOpenLayoutSeconds = nil
+        chatOpenStartedAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    func recordChatLayout() {
+        guard let started = chatOpenStartedAt else { return }
+        chatOpenStartedAt = nil
+        chatOpenLayoutSeconds = ProcessInfo.processInfo.systemUptime - started
+    }
+#endif
     @Published var chatCallID: String?
     @Published var callOpen = false
     @Published var callMinimized = false
@@ -215,7 +237,7 @@ struct YimiRootView: View {
     private func autoStart() async {
 #if DEBUG
         if conversation.hasActivityFixture {
-            if ui.path.isEmpty { ui.path = [.chat] }
+            if !conversation.hasChatFixture, ui.path.isEmpty { ui.path = [.chat] }
             return
         }
 #endif

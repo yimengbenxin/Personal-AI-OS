@@ -18,6 +18,7 @@ import {EVENT_SCHEMA,sha256,digest} from '../src/contracts.ts';
 import {policy} from './sealed-replay-check.ts';
 import {buildCallContext} from '../src/call-context.ts';
 import type {RegisteredDevice} from '../src/source-authority.ts';
+import {fileURLToPath} from 'node:url';
 
 async function directory(t:test.TestContext){const root=await fs.mkdtemp(join(tmpdir(),'paios-timeline-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));return root;}
 const unreachable=async()=>{throw Error('NO_ADMISSION');},noAdmission={readOnly:async()=>undefined};
@@ -150,7 +151,7 @@ for mode,omitted in [('online',m.ONLINE_PRIVATE_PATHS),('staging',m.VISUAL_PRIVA
     with sqlite3.connect(target/relative) as db:
         assert db.execute('SELECT item_id FROM items WHERE principal_id=?',('owner',)).fetchall()==[('me-backup',)]
 print('online and staging timeline restore passed')`;
-  const result=await promisify(execFile)(process.env.PAIOS_HERMES_PYTHON??'python3',['-c',script,new URL('../../../../../deploy/cloud/migrate.py',import.meta.url).pathname,source,root],{env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'}});
+  const result=await promisify(execFile)(process.env.PAIOS_HERMES_PYTHON??'python3',['-c',script,fileURLToPath(new URL('../../../../../deploy/cloud/migrate.py',import.meta.url)),source,root],{env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'}});
   assert.match(result.stdout,/online and staging timeline restore passed/);
 });
 

@@ -160,10 +160,12 @@ export interface TimelineItem {seq:number;item_id:string;kind:'owner'|'yimi'|'no
 export interface TimelineRemoval {seq:number;removed_seqs:number[]}
 export interface TimelinePage {items:TimelineItem[];head_seq:number;has_more:boolean;removals?:TimelineRemoval[];reset?:boolean}
 export interface TimelineOptions {directory:string;enabled?:boolean;fanout_classes?:readonly TerminalClass[];retention_days?:number;max_items?:number;sync_page_max?:number;
-  queue?:{max_pending?:number;default_ttl_min?:number;max_ttl_min?:number};now?:()=>number;replay_window_ms?:number}
+  queue?:{max_pending?:number;default_ttl_min?:number;max_ttl_min?:number;terminal_ttl_ms?:number;max_terminal?:number;max_terminal_bytes?:number};now?:()=>number;replay_window_ms?:number}
 type Item=Omit<TimelineItem,'seq'|'at'>&{principal_id:string;at_ms:number;source_at_ms?:number;source_device_id?:string;session_id?:string;processed_event_id?:string};
 interface Row {seq:number;item_id:string;kind:TimelineItem['kind'];via:TimelineItem['via'];text:string;at_ms:number;source_class:TerminalClass|null;attachments:string|null}
-interface QueueRow {queue_id:string;principal_id:string;task:string;origin_processed_event_id:string|null;created_at_ms:number;expires_at_ms:number;state:'pending'|'admitted'|'expired'|'cancelled';admitted_device_id:string|null}
+interface QueueRow {queue_id:string;principal_id:string;task:string;task_digest:string|null;terminal_at_ms:number|null;origin_processed_event_id:string|null;created_at_ms:number;expires_at_ms:number;state:'pending'|'admitted'|'expired'|'cancelled';admitted_device_id:string|null}
+type QueueItem=Omit<QueueRow,'task_digest'|'terminal_at_ms'>;
+const queueWire=(row:QueueRow,task=row.task):QueueItem=>{const {task_digest,terminal_at_ms,...item}=row;return {...item,task};};
 type Submit=(raw:RawEvent,source:RegisteredDevice,session:string)=>Promise<unknown>;
 const DDL=`CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS items(
@@ -203,7 +205,7 @@ export class Timeline {
     });
   }
   private readonly db:DatabaseSync;private readonly now:()=>number;private readonly options:Required<Omit<TimelineOptions,'queue'|'now'>>;
-  private readonly queueOptions:{max_pending:number;default_ttl_min:number;max_ttl_min:number};
+  private readonly queueOptions:Required<NonNullable<TimelineOptions['queue']>>;
   private readonly watchers=new Set<{principal:string;push:()=>void}>();
   private readonly readyWork=new Map<string,Promise<void>>();private readonly purgeTimer:ReturnType<typeof setInterval>;
   private readonly storage:StoragePort;private readonly submit:Submit;
@@ -215,13 +217,16 @@ export class Timeline {
     this.now=options.now??Date.now;
     this.options={directory:options.directory,enabled:options.enabled??true,fanout_classes:options.fanout_classes??['iphone','mac'],
       retention_days:options.retention_days??90,max_items:options.max_items??5000,sync_page_max:options.sync_page_max??100,replay_window_ms:options.replay_window_ms??86400_000};
-    this.queueOptions={max_pending:options.queue?.max_pending??8,default_ttl_min:options.queue?.default_ttl_min??720,max_ttl_min:options.queue?.max_ttl_min??1440};
+    this.queueOptions={max_pending:8,default_ttl_min:720,max_ttl_min:1440,terminal_ttl_ms:86400_000,max_terminal:1000,max_terminal_bytes:1048576,...options.queue};
     check(typeof this.options.enabled==='boolean'&&Array.isArray(this.options.fanout_classes)&&this.options.fanout_classes.every(value=>['iphone','glasses','mac','watch'].includes(value)), 'TIMELINE_CONFIGURATION_INVALID');
     for(const value of [this.options.retention_days,this.options.max_items,this.options.sync_page_max,this.options.replay_window_ms,...Object.values(this.queueOptions)])check(Number.isSafeInteger(value)&&value>0,'TIMELINE_CONFIGURATION_INVALID');
-    check(this.options.sync_page_max<=100&&this.queueOptions.max_pending<=8&&this.queueOptions.default_ttl_min<=this.queueOptions.max_ttl_min&&this.queueOptions.max_ttl_min<=1440,'TIMELINE_CONFIGURATION_INVALID');
+    check(this.options.sync_page_max<=100&&this.queueOptions.max_pending<=8&&this.queueOptions.default_ttl_min<=this.queueOptions.max_ttl_min&&this.queueOptions.max_ttl_min<=1440&&this.queueOptions.terminal_ttl_ms<=2147483647,'TIMELINE_CONFIGURATION_INVALID');
     this.db=openOwnerDatabase(options.directory,'timeline.sqlite',DDL,'paios.timeline-store.v2','TIMELINE_STORE',undefined,['paios.timeline-store.v1']);
+    this.db.exec('PRAGMA secure_delete=ON');
     if(!(this.db.prepare('PRAGMA table_info(items)').all() as {name:string}[]).some(column=>column.name==='attachments'))
       inTransaction(this.db,()=>this.db.exec('ALTER TABLE items ADD COLUMN attachments TEXT'));
+    if(!(this.db.prepare('PRAGMA table_info(desktop_queue)').all() as {name:string}[]).some(column=>column.name==='task_digest'))
+      inTransaction(this.db,()=>this.db.exec('ALTER TABLE desktop_queue ADD COLUMN task_digest TEXT;ALTER TABLE desktop_queue ADD COLUMN terminal_at_ms INTEGER;UPDATE desktop_queue SET terminal_at_ms=created_at_ms WHERE state<>\'pending\''));
     if(!this.db.prepare("SELECT 1 FROM meta WHERE key='replay-upgrade'").get())this.db.prepare("INSERT INTO meta VALUES('replay-upgrade',?)").run(this.db.prepare('SELECT 1 FROM items LIMIT 1').get()?String(this.now()):'0');
     // Retract observations from existing terminal caches; retain the same rows for brain/call context.
     if(!this.db.prepare("SELECT 1 FROM meta WHERE key='observations-context-only'").get())inTransaction(this.db,()=>{
@@ -230,7 +235,7 @@ export class Timeline {
         this.db.prepare('INSERT INTO removals VALUES(?,?,?,?)').run(this.next(principal),principal,canonical(selected.slice(start,start+100).map(row=>row.seq)),this.now());
       this.db.prepare("INSERT INTO meta VALUES('observations-context-only','1')").run();
     });
-    this.purge();this.purgeTimer=setInterval(()=>this.purge(),86400_000);this.purgeTimer.unref();
+    this.purge();this.purgeTimer=setInterval(()=>this.purge(),86400_000);this.purgeTimer.unref();this.armExpiry();
   }
   async recover(principal?:string):Promise<void> {
     const rows=this.db.prepare("SELECT * FROM desktop_queue WHERE state='admitted' AND EXISTS(SELECT 1 FROM meta WHERE key='queue-source:'||queue_id)"+(principal===undefined?'':' AND principal_id=?')).all(...(principal===undefined?[]:[principal])) as unknown as QueueRow[];
@@ -315,6 +320,7 @@ export class Timeline {
     return this.removeRows(rows);
   }
   private compact():void {
+    this.compactQueue();
     const old=this.db.prepare('SELECT seq,principal_id FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY principal_id ORDER BY seq DESC) AS n FROM removals) WHERE at_ms<? OR n>?')
       .all(this.now()-this.options.retention_days*86400_000,this.options.max_items) as {seq:number;principal_id:string}[];
     for(const row of old){this.advance(`reset:${row.principal_id}`,row.seq);this.db.prepare('DELETE FROM removals WHERE seq=?').run(row.seq);}
@@ -443,14 +449,15 @@ export class Timeline {
   queueOrigin(d:ProcessedEvent):string|undefined {
     const app=d.content.app_event as {queue_id?:string;task?:string;origin_processed_event_id?:string};
     const row=this.db.prepare("SELECT * FROM desktop_queue WHERE queue_id=? AND principal_id=? AND state='admitted'").get(app.queue_id??'',d.principal_id) as unknown as QueueRow|undefined;
-    return row&&d.device_id===row.admitted_device_id&&d.event_id===row.queue_id&&app.task===row.task&&app.origin_processed_event_id===row.origin_processed_event_id?row.origin_processed_event_id??undefined:undefined;
+    return row&&d.device_id===row.admitted_device_id&&d.event_id===row.queue_id&&
+      typeof app.task==='string'&&(row.task_digest?digest(app.task)===row.task_digest:app.task===row.task)&&app.origin_processed_event_id===row.origin_processed_event_id?row.origin_processed_event_id??undefined:undefined;
   }
   queue(principal:string,processed:string,args:Record<string,unknown>,identity?:{run_id:string;session_id:string;tool_call_id:string;source_at_ms:number}) {
     this.expire();
-    if(args.action==='list')return {items:this.pending(principal)};
+    if(args.action==='list')return {items:this.pending(principal).map(row=>queueWire(row))};
     if(args.action==='cancel'){
-      const changed=inTransaction(this.db,()=>{const result=this.db.prepare("UPDATE desktop_queue SET state='cancelled' WHERE principal_id=? AND queue_id=? AND state='pending'").run(principal,args.queue_id as string);
-        if(result.changes)this.db.prepare('DELETE FROM meta WHERE key=?').run(`queue-source:${args.queue_id}`);return result;});
+      const changed=inTransaction(this.db,()=>{const result=this.db.prepare("UPDATE desktop_queue SET state='cancelled',terminal_at_ms=? WHERE principal_id=? AND queue_id=? AND state='pending'").run(this.now(),principal,args.queue_id as string);
+        if(result.changes)this.db.prepare('DELETE FROM meta WHERE key=?').run(`queue-source:${args.queue_id}`);this.compact();return result;});
       this.armExpiry();return {queue_id:args.queue_id,cancelled:Number(changed.changes)===1};
     }
     check(identity,'DESKTOP_QUEUE_TOOL_CALL_REQUIRED',403);
@@ -459,37 +466,62 @@ export class Timeline {
       const key=`queue-call:${digest([principal,identity.run_id,identity.session_id,identity.tool_call_id])}`;
       const fingerprint=digest(args),receipt=this.db.prepare('SELECT value FROM meta WHERE key=?').get(key) as {value:string}|undefined;
       if(receipt){
-        const saved=JSON.parse(receipt.value) as {fingerprint:string;queue_id:string};
+        const saved=JSON.parse(receipt.value) as {fingerprint:string;queue_id:string;row?:Omit<QueueItem,'task'>};
         check(saved.fingerprint===fingerprint,'DESKTOP_QUEUE_TOOL_CALL_CONFLICT',409);
-        return this.db.prepare('SELECT * FROM desktop_queue WHERE queue_id=? AND principal_id=?').get(saved.queue_id,principal) as unknown as QueueRow;
+        const row=this.db.prepare('SELECT * FROM desktop_queue WHERE queue_id=? AND principal_id=?').get(saved.queue_id,principal) as unknown as QueueRow|undefined;
+        return row?queueWire(row,args.task as string):{...saved.row!,task:args.task as string};
       }
       check(Number.isSafeInteger(identity.source_at_ms),'DESKTOP_QUEUE_SOURCE_TIME_REQUIRED');
       check(identity.source_at_ms>=Math.max(this.number('replay-upgrade'),this.number(`replay:${principal}`)),'DESKTOP_QUEUE_REPLAY_EXPIRED',409);
       check(ttl<=this.queueOptions.max_ttl_min,'DESKTOP_QUEUE_TTL_INVALID');
       const reserved=this.db.prepare("SELECT COUNT(*) AS n FROM desktop_queue WHERE principal_id=? AND (state='pending' OR state='admitted' AND EXISTS(SELECT 1 FROM meta WHERE key='queue-source:'||queue_id))").get(principal) as {n:number};
       check(reserved.n<this.queueOptions.max_pending,'DESKTOP_QUEUE_FULL',429);
+      const bytes=Math.max(Buffer.byteLength(args.task as string),Buffer.byteLength('[redacted]')+64),usage=this.compactQueue(principal,bytes);
+      check(usage.count+1<=this.queueOptions.max_terminal&&usage.bytes+bytes<=this.queueOptions.max_terminal_bytes,'DESKTOP_QUEUE_HISTORY_FULL',429);
       const queue_id=`dq-${randomUUID()}`,created=this.now();
       const row=this.db.prepare("INSERT INTO desktop_queue(queue_id,principal_id,task,origin_processed_event_id,created_at_ms,expires_at_ms,state) VALUES(?,?,?,?,?,?,'pending') RETURNING *")
         .get(queue_id,principal,args.task as string,processed,created,created+ttl*60_000) as unknown as QueueRow;
       this.db.prepare('INSERT INTO seen VALUES(?,?,?,?,?)').run(principal,key,processed,identity.source_at_ms,this.now());
       this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(key,canonical({queue_id,fingerprint}));
-      this.compact();return row;
+      this.compact();return queueWire(row);
     });
     this.armExpiry();return row;
   }
   private pending(principal:string):QueueRow[] {return this.db.prepare("SELECT * FROM desktop_queue WHERE principal_id=? AND state='pending' ORDER BY created_at_ms,rowid").all(principal) as unknown as QueueRow[];}
+  /** Queue-source handoff still needs plaintext. Admitted authorization keeps its compact proof for future continuations. */
+  private compactQueue(reservePrincipal?:string,reserveBytes=0):{count:number;bytes:number} {
+    const rows=this.db.prepare('SELECT * FROM desktop_queue ORDER BY created_at_ms,rowid').all() as unknown as QueueRow[];
+    const usage=new Map<string,{count:number;bytes:number}>(),cost=(row:QueueRow)=>Math.max(Buffer.byteLength(row.task)+Buffer.byteLength(row.task_digest??''),Buffer.byteLength('[redacted]')+64);
+    for(const row of rows){
+      if(row.state!=='pending'&&!this.db.prepare('SELECT 1 FROM meta WHERE key=?').get(`queue-source:${row.queue_id}`)&&!row.task_digest){
+        row.task_digest=digest(row.task);row.task='[redacted]';
+        this.db.prepare('UPDATE desktop_queue SET task=?,task_digest=? WHERE queue_id=?').run(row.task,row.task_digest,row.queue_id);
+      }
+      const total=usage.get(row.principal_id)??{count:0,bytes:0};total.count++;total.bytes+=cost(row);usage.set(row.principal_id,total);
+    }
+    for(const row of rows)if(row.state==='cancelled'||row.state==='expired'){
+      const total=usage.get(row.principal_id)!,reserve=row.principal_id===reservePrincipal;
+      if((row.terminal_at_ms??row.created_at_ms)+this.queueOptions.terminal_ttl_ms>this.now()&&total.count+(reserve?1:0)<=this.queueOptions.max_terminal&&total.bytes+(reserve?reserveBytes:0)<=this.queueOptions.max_terminal_bytes)continue;
+      // In-window native retries retain only identity, fingerprint and terminal state, never task plaintext.
+      const {task,...receipt}=queueWire(row);
+      this.db.prepare("UPDATE meta SET value=json_set(value,'$.row',json(?)) WHERE key LIKE 'queue-call:%' AND json_extract(value,'$.queue_id')=?").run(canonical(receipt),row.queue_id);
+      this.db.prepare('DELETE FROM desktop_queue WHERE queue_id=?').run(row.queue_id);total.count--;total.bytes-=cost(row);
+    }
+    return usage.get(reservePrincipal!)??{count:0,bytes:0};
+  }
   private expire():void {
     const notices=inTransaction(this.db,()=>{
-      const rows=this.db.prepare("UPDATE desktop_queue SET state='expired' WHERE state='pending' AND expires_at_ms<=? RETURNING *").all(this.now()) as unknown as QueueRow[];
-      return rows.map(row=>{this.db.prepare('DELETE FROM meta WHERE key=?').run(`queue-source:${row.queue_id}`);
+      const rows=this.db.prepare("UPDATE desktop_queue SET state='expired',terminal_at_ms=? WHERE state='pending' AND expires_at_ms<=? RETURNING *").all(this.now(),this.now()) as unknown as QueueRow[];
+      const notices=rows.map(row=>{this.db.prepare('DELETE FROM meta WHERE key=?').run(`queue-source:${row.queue_id}`);
         return {principal:row.principal_id,item:this.insert({principal_id:row.principal_id,item_id:`notice-${row.queue_id}`,kind:'notice',via:'queue',text:`排队的事已过期：${row.task}`,at_ms:this.now()})};});
+      this.compact();return notices;
     });
     for(const notice of notices)if(notice.item)this.emit(notice.principal);
     this.armExpiry();
   }
   private armExpiry():void {
     clearTimeout(this.expiryTimer);if(this.closing)return;
-    const row=this.db.prepare("SELECT MIN(expires_at_ms) AS at FROM desktop_queue WHERE state='pending'").get() as {at:number|null};
+    const row=this.db.prepare("SELECT MIN(at) AS at FROM (SELECT expires_at_ms AS at FROM desktop_queue WHERE state='pending' UNION ALL SELECT terminal_at_ms+? AS at FROM desktop_queue WHERE state IN ('cancelled','expired'))").get(this.queueOptions.terminal_ttl_ms) as {at:number|null};
     if(row.at!==null){this.expiryTimer=setTimeout(()=>this.expire(),Math.max(1,row.at-this.now()));this.expiryTimer.unref();}
   }
   ready(device:RegisteredDevice,resolve:(saved?:{principal_id:string;device_id:string})=>Promise<RegisteredDevice|undefined>):Promise<void> {
@@ -502,7 +534,7 @@ export class Timeline {
       for(const row of rows){
         this.expire();
         const state=this.db.prepare('SELECT state FROM desktop_queue WHERE queue_id=?').get(row.queue_id) as {state:QueueRow['state']};
-        if(state.state==='expired'||state.state==='cancelled')continue;
+        if(!state||state.state==='expired'||state.state==='cancelled')continue;
         const key=`queue-source:${row.queue_id}`;
         const saved=this.db.prepare('SELECT value FROM meta WHERE key=?').get(key) as {value:string}|undefined;
         const frozen=saved?JSON.parse(saved.value) as {source:RegisteredDevice;at:number}:undefined;
@@ -510,7 +542,7 @@ export class Timeline {
         if(!current)continue; // A revoked or unavailable original source cannot create a new durable admission.
         this.expire(); // Authorization can yield while the owner cancels or the TTL expires.
         const latest=this.db.prepare('SELECT state FROM desktop_queue WHERE queue_id=?').get(row.queue_id) as {state:QueueRow['state']};
-        if(latest.state==='expired'||latest.state==='cancelled')continue;
+        if(!latest||latest.state==='expired'||latest.state==='cancelled')continue;
         check(current.principal_id===row.principal_id&&(!frozen||current.device_id===frozen.source.device_id),'DESKTOP_QUEUE_SOURCE_CONFLICT',403);
         if(frozen){
           const binding=(source:RegisteredDevice)=>canonical([source.principal_id,source.device_id,source.device_type,source.channel,
@@ -521,7 +553,7 @@ export class Timeline {
         // Persist immutable ingress fields, but only the current authority's issued handle may authorize submit.
         inTransaction(this.db,()=>{
           if(!saved)this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(key,canonical(intent));
-          this.db.prepare("UPDATE desktop_queue SET state='admitted',admitted_device_id=? WHERE queue_id=? AND state='pending'").run(current.device_id,row.queue_id);
+          this.db.prepare("UPDATE desktop_queue SET state='admitted',terminal_at_ms=?,admitted_device_id=? WHERE queue_id=? AND state='pending'").run(this.now(),current.device_id,row.queue_id);
         });
         const {source,at}=intent;
         const session=`desktop-queue:${digest([row.principal_id,row.queue_id])}`;
@@ -529,7 +561,7 @@ export class Timeline {
           captured_at:new Date(at).toISOString(),source:{channel:source.channel},media_type:'app_event',mime:'application/json',representation:'uploaded_original',
           payload:Buffer.from(canonical({kind:'desktop_queue_task',queue_id:row.queue_id,task:row.task,origin_processed_event_id:row.origin_processed_event_id}))},current,session);}
         catch(error){await this.recover(device.principal_id);throw error;}
-        this.db.prepare('DELETE FROM meta WHERE key=?').run(key);
+        inTransaction(this.db,()=>{this.db.prepare('DELETE FROM meta WHERE key=?').run(key);this.compact();});
       }
       this.armExpiry();
     })();

@@ -144,7 +144,7 @@ servers['phone']['env'].update(PAIOS_PHONE_FAKE_RESULT=str(HOME / 'cashier.json'
     HERMES_INTERNAL_KEY_FILE=request['config']['internal_key_file'])
 service['capability_tools'] = tools
 service['capability_registry'] = True
-config.update(plugins={'enabled': ['yimi-gateway']}, personal_aios=service, mcp_servers=servers,
+config.update(plugins={'enabled': ['yimi-gateway'], 'entries': {'yimi-gateway': {'settings': service}}}, personal_aios=service, mcp_servers=servers,
     platform_toolsets={'api_server': ['mcp-phone', 'mcp-yimi_shared', 'mcp-platform_ts', 'mcp-owner_mac', 'skills_hub']})
 import yaml
 (HOME / 'config.yaml').write_text(yaml.safe_dump(config, allow_unicode=True))
@@ -211,7 +211,7 @@ try:
         restrict_agent(agent, turn.get('scope', 'owner'))
         try:
             with runtime_scope(turn.get('scope', 'owner')):
-                result = agent.run_conversation(turn['prompt'], system_message=turn['system'])
+                result = agent.run_conversation(turn['input'], system_message=turn['system'])
             messages = result.get('messages') or []
             answers = {m.get('tool_call_id'): m.get('content') for m in messages if m.get('role') == 'tool'}
             calls = [{'tool': call['function']['name'], 'args': json.loads(call['function']['arguments'] or '{}'),

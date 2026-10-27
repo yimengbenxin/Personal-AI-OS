@@ -234,15 +234,89 @@ private final class PairingMemoryPersistence: DesktopPairingPersisting, DesktopR
 
 
 extension DesktopPairingTests {
+    @MainActor func testOfflineUnpairClearsLocallyAndKeepsPendingStatus() async throws {
+        try await checkUnpair(connected: false, repeatedTaps: false)
+    }
+
+    @MainActor func testOnlineUnpairWaitsForServerConfirmation() async throws {
+        try await checkUnpair(connected: true, repeatedTaps: false)
+    }
+
+    @MainActor func testRepeatedUnpairTapsShareOneLocalClearAndRemoteRequest() async throws {
+        try await checkUnpair(connected: true, repeatedTaps: true)
+    }
+
+    @MainActor private func checkUnpair(connected: Bool, repeatedTaps: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent("ssh")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let authorization = directory.appendingPathComponent("authorized_keys")
+        try Data("fixture authorization".utf8).write(to: authorization)
+        let id = "01900000-0000-7000-8000-000000000001"
+        let pairing = RealtimeDevicePairing(schema: RealtimeDevicePairing.schema, origin: "https://example.test", deviceID: id, userID: id, token: "test-pairing-token-00000000",
+            governance: .init(purposeScopes: ["personal_assistant"], consentRecordRefs: [id], policyDecisionRefs: [id], purposeTokenRefs: [id], capabilityGrantRefs: [id]),
+            media: ["data"], pairedAt: "2026-10-24T00:00:00Z", deviceType: "mac", capabilities: ["display", "chat_ui", "desktop_tools"])
+        let persistence = PairingMemoryPersistence(); persistence.data = try JSONEncoder().encode(pairing)
+        let store = try DesktopPairingStore(pairingStore: persistence, recipientStore: persistence)
+        let controller = try DesktopPairingController(store: store), intents = PairingRevokeFixture()
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [HeldPairingRevoke.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel(); HeldPairingRevoke.held = nil; HeldPairingRevoke.requested = nil; HeldPairingRevoke.count = 0
+            try? FileManager.default.removeItem(at: root)
+        }
+        let requested = expectation(description: "remote request starts after local teardown")
+        let settled = expectation(description: "server confirms or offline retry is scheduled")
+        HeldPairingRevoke.requested = { requested.fulfill() }
+        let ssh = DesktopOwnerSSH(directory: directory, session: session, revocations: intents,
+            sleep: { _ in settled.fulfill(); throw CancellationError() })
+        let control = FakeDesktopControl()
+        let model = try DesktopAppModel(desktop: control, pairingController: controller, storeURL: root, ownerSSH: ssh)
+        model.connected = connected
+        XCTAssertTrue(model.canUnpair, "The unpair action must also be enabled offline")
+        let subscription = model.$unpairStatus.filter { $0 == "这台电脑已解除配对" }.prefix(1).sink { _ in settled.fulfill() }
+        defer { subscription.cancel() }
+        let stopping = repeatedTaps ? expectation(description: "local desktop stop held") : nil
+        let release = AsyncStream<Void>.makeStream()
+        if let stopping { await control.setStopBarrier { stopping.fulfill(); for await _ in release.stream { break } } }
+        let unpair = Task { await model.unpair() }
+        if let stopping {
+            await fulfillment(of: [stopping], timeout: 3)
+            await model.unpair(); await model.unpair()
+            XCTAssertFalse(model.canUnpair)
+            XCTAssertEqual(HeldPairingRevoke.count, 0, "Remote compensation waits for local teardown")
+            release.continuation.yield(())
+        }
+        await unpair.value
+        await fulfillment(of: [requested], timeout: 3)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: authorization.path))
+        XCTAssertNil(persistence.key); XCTAssertNil(model.pairing); XCTAssertNil(controller.pairing)
+        let reopened = try DesktopPairingStore(pairingStore: persistence, recipientStore: persistence)
+        XCTAssertNil(try reopened.loadPairingData(), "Unpaired is durable before the remote response")
+        XCTAssertEqual(persistence.removals, 2); XCTAssertEqual(intents.intents.count, 1)
+        XCTAssertEqual(model.unpairStatus, "已在本机解除；服务器端待同步")
+        XCTAssertFalse(model.canUnpair)
+        await model.unpair(); await model.unpair()
+        XCTAssertEqual(HeldPairingRevoke.count, 1)
+        HeldPairingRevoke.held?.complete(online: connected)
+        await fulfillment(of: [settled], timeout: 3)
+        XCTAssertEqual(intents.intents.count, connected ? 0 : 1)
+        XCTAssertEqual(model.unpairStatus, connected ? "这台电脑已解除配对" : "已在本机解除；服务器端待同步")
+        XCTAssertEqual(persistence.removals, 2)
+        let stopCalls = await control.stopCalls
+        XCTAssertEqual(stopCalls, 1)
+    }
+
     @MainActor func testExt13UnpairAndPendingRestartClearActiveIdentityWhileRevokeIsOffline() async throws {
-        for restarting in [false, true] {
+        for (restarting, paired) in [(false, true), (true, true), (true, false)] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let id = "01900000-0000-7000-8000-000000000001"
             let pairing = RealtimeDevicePairing(schema: RealtimeDevicePairing.schema, origin: "https://example.test", deviceID: id, userID: id, token: "test-pairing-token-00000000",
                 governance: .init(purposeScopes: ["personal_assistant"], consentRecordRefs: [id], policyDecisionRefs: [id], purposeTokenRefs: [id], capabilityGrantRefs: [id]), media: ["data"], pairedAt: "2026-10-24T00:00:00Z", deviceType: "mac", capabilities: ["display", "chat_ui", "desktop_tools"])
-            let persistence = PairingMemoryPersistence(); persistence.data = try JSONEncoder().encode(pairing)
+            let persistence = PairingMemoryPersistence()
+            persistence.data = paired ? try JSONEncoder().encode(pairing) : nil
             let store = try DesktopPairingStore(pairingStore: persistence, recipientStore: persistence)
             let controller = try DesktopPairingController(store: store), intents = PairingRevokeFixture()
             if restarting { intents.intents = [.init(origin: pairing.origin, deviceID: id, token: pairing.token)] }
@@ -252,8 +326,9 @@ extension DesktopPairingTests {
             let model = try DesktopAppModel(desktop: FakeDesktopControl(), pairingController: controller, storeURL: root, ownerSSH: ssh)
             if restarting { await model.activate() } else { await model.unpair() }
             XCTAssertNil(try store.loadPairingData()); XCTAssertNil(model.pairing); XCTAssertFalse(model.connected)
-            XCTAssertEqual(persistence.removals, 2)
+            XCTAssertEqual(persistence.removals, paired ? 2 : 0)
             XCTAssertEqual(intents.intents.count, 1, "Offline revocation retains only its independent intent")
+            XCTAssertEqual(model.unpairStatus, "已在本机解除；服务器端待同步")
         }
     }
 }
@@ -267,5 +342,24 @@ private final class OfflinePairingRevoke: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) }
+    override func stopLoading() {}
+}
+
+private final class HeldPairingRevoke: URLProtocol {
+    static var held: HeldPairingRevoke?
+    static var requested: (() -> Void)?
+    static var count = 0
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        XCTAssertEqual(request.url?.path, "/v1/mac/ssh/revoke")
+        Self.count += 1; Self.held = self; Self.requested?()
+    }
+    func complete(online: Bool) {
+        if !online { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
     override func stopLoading() {}
 }

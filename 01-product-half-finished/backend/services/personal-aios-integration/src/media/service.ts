@@ -58,6 +58,7 @@ export interface MediaProcessResult {
 
 // Central B→C→D business owner. Archives continue independently of pending analysis; no Agent executor or history.
 export class MediaService {
+  attachSpeechPurpose(purpose:import('./speech-purpose.ts').SpeechPurpose){this.config.processor.setSpeechPurpose(purpose);}
   private readonly config: MediaServiceConfig;
   private closed = false;
   private continuous:ContinuousMediaSource|undefined;

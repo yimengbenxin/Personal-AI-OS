@@ -35,7 +35,11 @@
           "context_inject": [
             "context",
             "idempotency_key"
-          ]
+          ],
+          "send_consent": {
+            "recipient": "wechat",
+            "kind": "message.text"
+          }
         },
         "wechat_send_file": {
           "effect": "send",
@@ -46,7 +50,11 @@
           "context_inject": [
             "context",
             "idempotency_key"
-          ]
+          ],
+          "send_consent": {
+            "recipient": "wechat",
+            "kind": "message.file"
+          }
         },
         "wechat_reply": {
           "effect": "send",
@@ -57,14 +65,19 @@
           "context_inject": [
             "context",
             "idempotency_key"
-          ]
+          ],
+          "send_consent": {
+            "recipient": "wechat",
+            "kind": "message.text"
+          }
         },
         "wechat_read_recent": {
           "effect": "observe",
           "target": "$.recipient",
           "retry": "forbidden",
           "context_inject": [
-            "context"
+            "context",
+            "check_for"
           ]
         }
       },

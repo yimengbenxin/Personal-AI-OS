@@ -19,6 +19,7 @@ public actor WeChatPreviewInbox {
         var owner: String? = nil
         var cursor = WeChatPreviewCursor(since: Date())
         var pending: Pending? = nil
+        var historyEpoch: String? = nil
     }
     private var state: State
     private let file: URL
@@ -32,6 +33,12 @@ public actor WeChatPreviewInbox {
         try save(next)
     }
     public func reset() throws { try save(State()) }
+    public func acceptTrustedHistoryEpoch(_ epoch: String, now: Date = Date()) throws {
+        guard state.historyEpoch != epoch else { return }
+        var next = state
+        next.cursor = WeChatPreviewCursor(since: now); next.pending = nil; next.historyEpoch = epoch
+        try save(next)
+    }
     public func prepare(reader: WeChatNotificationReader, owner: String) throws -> WeChatPreviewBatch? {
         guard state.policy.enabled, state.owner == owner, !state.policy.chats.isEmpty else { return nil }
         if let pending = state.pending { return pending.batch }

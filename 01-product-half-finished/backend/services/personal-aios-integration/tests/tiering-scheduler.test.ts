@@ -32,20 +32,20 @@ async function fixture(t:test.TestContext,configured=false){
 }
 
 test('unconfigured tiering still monitors reserves every 60 seconds and raises the owner reason',async t=>{
-  t.mock.timers.enable({apis:['Date','setInterval'],now:1000000});
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1000000});
   const {assembly,storage}=await fixture(t),reasons:string[]=[];let checks=0;
   t.mock.method(storage,'monitorReserve',async()=>{checks++;return true;});
   t.mock.method(assembly.runtime,'archiveAlert',async(reason:string)=>{reasons.push(reason);});
   assembly.server.emit('listening');await turn();
   assert.equal(checks,1);assert.deepEqual(reasons,['L5_TIERING_NOT_CONFIGURED']);
-  t.mock.timers.tick(59999);await turn();assert.equal(checks,1);
-  t.mock.timers.tick(1);await turn();assert.equal(checks,2);
+  t.mock.timers.tick(59000);await turn();assert.equal(checks,1);
+  t.mock.timers.tick(1000);await turn();assert.equal(checks,2);
   t.mock.timers.tick(60000);await turn();assert.equal(checks,3);
   assert.deepEqual(reasons,Array(3).fill('L5_TIERING_NOT_CONFIGURED'));
 });
 
 test('configured tiering reports failures, skips overlapping ticks, and close joins stalled work',async t=>{
-  t.mock.timers.enable({apis:['Date','setInterval'],now:1000000});
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1000000});
   const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
   t.after(()=>release.resolve());
   const {assembly,storage,archive}=await fixture(t,true),reasons:string[]=[];
@@ -67,7 +67,7 @@ test('configured tiering reports failures, skips overlapping ticks, and close jo
 });
 
 test('unconfigured notice uses Chinese text and persisted six-hour receipts across restart',async t=>{
-  t.mock.timers.enable({apis:['Date','setInterval'],now:12*60*60*1000});
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:12*60*60*1000});
   const f=await fixture(t),messages:string[]=[];
   const connect=async(assembly:typeof f.assembly)=>assembly.runtime.watchCare(await assembly.runtime.authenticate(token),
     async(_id,text)=>{messages.push(text);return 'pending';});
@@ -84,4 +84,44 @@ test('unconfigured notice uses Chinese text and persisted six-hour receipts acro
   await restarted.assembly.runtime.archiveAlert('L5_TIERING_NOT_CONFIGURED');
   assert.equal(messages.length,2);assert.equal((await restarted.storage.list('archive-alerts')).length,2);
   assert.equal((await restarted.storage.list('archive-alert-deliveries')).length,2);stopAgain();
+});
+
+test('the same maintenance clock resumes immediately after a pack overruns its minute',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1000000});
+  let clock=0,moves=0;t.mock.method(performance,'now',()=>clock);
+  const {assembly,storage,archive}=await fixture(t,true),release=Promise.withResolvers<void>();
+  t.after(()=>release.resolve());
+  t.mock.method(storage,'monitorReserve',async()=>true);
+  t.mock.method(archive,'maintenance',async()=>{if(++moves===1)clock=65000;else await release.promise;});
+  assembly.server.emit('listening');await turn();assert.equal(moves,1);
+  t.mock.timers.tick(0);await turn();assert.equal(moves,2);
+  const closing=assembly.close();release.resolve();await closing;
+});
+
+test('a throwing capability monitor cannot skip reserves or archive maintenance on successive ticks',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {assembly,storage,archive}=await fixture(t,true);let probes=0,reserves=0,moves=0;
+  t.mock.method(console,'error',()=>{});
+  t.mock.method(assembly.runtime,'monitorCapabilities',async()=>{probes++;throw Error('fictional health timeout');});
+  t.mock.method(storage,'monitorReserve',async()=>{reserves++;return true;});
+  t.mock.method(archive,'maintenance',async()=>{moves++;});
+  assembly.server.emit('listening');await turn();
+  assert.deepEqual({probes,reserves,moves},{probes:1,reserves:1,moves:1});
+  t.mock.timers.tick(60000);await turn();
+  assert.deepEqual({probes,reserves,moves},{probes:2,reserves:2,moves:2});
+});
+
+test('a pending health probe does not hold the maintenance clock or overlap another probe; close joins it',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const release=Promise.withResolvers<void>();t.after(()=>release.resolve());
+  const {assembly,storage,archive}=await fixture(t,true);let probes=0,reserves=0,moves=0;
+  t.mock.method(assembly.runtime,'monitorCapabilities',async()=>{probes++;await release.promise;});
+  t.mock.method(storage,'monitorReserve',async()=>{reserves++;return true;});
+  t.mock.method(archive,'maintenance',async()=>{moves++;});
+  assembly.server.emit('listening');await turn();
+  assert.deepEqual({probes,reserves,moves},{probes:1,reserves:1,moves:1});
+  t.mock.timers.tick(60000);await turn();
+  assert.deepEqual({probes,reserves,moves},{probes:1,reserves:2,moves:2});
+  let closed=false;const closing=assembly.close().then(()=>{closed=true;});await turn();assert.equal(closed,false);
+  release.resolve();await closing;
 });

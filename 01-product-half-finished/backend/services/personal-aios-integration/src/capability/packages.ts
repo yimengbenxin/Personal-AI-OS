@@ -3,6 +3,7 @@ import {fileURLToPath} from 'node:url';
 import {resolve, sep} from 'node:path';
 import AjvModule from 'ajv/dist/2020.js';
 import {check,sha256} from '../contracts.ts';
+import type {SendPolicy} from './send-identity.ts';
 
 const root = fileURLToPath(new URL('../../../../../../', import.meta.url));
 const schema = JSON.parse(readFileSync(resolve(root, 'capability/contracts/manifest.v1.schema.json'), 'utf8'));
@@ -24,6 +25,7 @@ export interface PackageTool {
   retry: string; check_with?: string; context_inject?: string[];
   aliases?:string[]; transport_name?:string; version_digest?:string;
   principal_id?:string;
+  send_consent?:SendPolicy;
 }
 /** The deploy config selects packages; their manifests alone declare tool identity and policy. */
 export function packageSelection():PackageSelection {

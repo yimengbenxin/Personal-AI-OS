@@ -13,18 +13,17 @@ from capability.packages.phone.server.registration import select_transport
 
 ROOT = Path(__file__).parents[2]
 NAMES = ['mijia', 'phone', 'messaging', 'wechat-mac', 'ts-delivery', 'ts-erasure', 'ts-health',
-         'ts-location', 'ts-memory', 'ts-model-settings', 'ts-personal', 'ts-schedule', 'desktop', 'owner-mac']
+         'ts-location', 'ts-memory', 'ts-model-settings', 'ts-personal', 'ts-personality', 'ts-schedule', 'desktop', 'owner-mac']
 
 
-def test_gateway_replaces_receipt_text_and_keeps_native_image_envelope_and_media():
-    from integrations.hermes.yimi_gateway import _retain_media
+def test_package_boundary_converts_images_and_preserves_media_without_kernel_mutation():
+    from capability.sdk.python.mcp_media import content
     image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,fixture'}}
-    result = {'_multimodal': True, 'content': [{'type': 'text', 'text': 'old'},
-        {'type': 'text', 'text': 'coordinate map'}, image], 'text_summary': 'old'}
-    assert _retain_media(result, 'ledger facts') is None
-    assert result['text_summary'] == result['content'][0]['text'] == 'ledger facts'
-    assert result['content'][1:] == [{'type': 'text', 'text': 'coordinate map'}, image]
-    assert _retain_media(json.dumps({'result': 'succeeded\nMEDIA:/fixture.png'}), 'facts') == 'facts\nMEDIA:/fixture.png'
+    raw = {'content': [{'type': 'text', 'text': 'coordinate map'}, image], 'result': 'MEDIA:/fixture.png'}
+    blocks = content(raw)
+    assert blocks == [{'type': 'text', 'text': 'coordinate map'},
+        {'type': 'image', 'mimeType': 'image/png', 'data': 'fixture'}, {'type': 'text', 'text': 'MEDIA:/fixture.png'}]
+    assert raw['content'][1] == image
 
 
 def test_release_gate_reuses_only_the_exact_source_candidate_and_owner(tmp_path, monkeypatch):
@@ -67,14 +66,18 @@ def test_all_families_share_transports_without_rewriting_module_arguments(tmp_pa
     assert set(servers) == {'mijia', 'phone', 'yimi_shared', 'platform_ts', 'desktop', 'owner_mac'}
     assert servers['yimi_shared']['args'] == ['-m', 'capability.hosts.python',
         'messaging=capability.packages.messaging.server.server', 'wechat-mac=capability.packages.wechat-mac.server.server']
-    assert len(skills) == 14
+    assert len(skills) == 15
     assert servers['platform_ts']['url'] == 'http://127.0.0.1:19661/internal/capability/mcp'
     assert servers['platform_ts']['headers']['Authorization'] == 'Bearer ${PAIOS_HERMES_INTERNAL_KEY}'
     assert servers['desktop']['url'] == 'http://127.0.0.1:19661/internal/desktop/mcp'
     assert servers['owner_mac']['args'] == [str(ROOT / 'capability/packages/owner-mac/server/main.py')]
     assert {'send_message', 'mcp__messaging__send_message', 'mcp__yimi_shared__messaging__send_message'} <= set(tools)
     assert 'paios_health_query' in tools
-    legacy = {'command': '/provider/python', 'args': ['old.py'], 'env': {'PROVIDER': 'same'}, 'timeout': 660}
+    legacy = {'command': '/provider/python', 'args': ['old.py'], 'env': {
+        'PROVIDER': 'same', 'PAIOS_PHONE_PROVIDER': 'mac-android', 'PAIOS_INTEGRATION_PORT': '19661',
+        'PAIOS_DEEPSEEK_KEY_FILE': str(tmp_path / 'fast.key'), 'PAIOS_SILICONFLOW_KEY_FILE': str(tmp_path / 'vision.key'),
+        'PAIOS_MOBILERUN_CONFIG': str(tmp_path / 'mobilerun.yaml'), 'PAIOS_ERRAND_SPOOL': str(tmp_path / 'spool'),
+        'PAIOS_PAYMENT_URL': 'http://127.0.0.1:19661', 'PAIOS_PAYMENT_KEY_FILE': str(tmp_path / 'payment.key')}, 'timeout': 660}
     phone = select_transport(product['capability_packages'], legacy, servers['phone'])
     assert phone['command'] == legacy['command'] and phone['timeout'] == 660
     assert phone['env']['PROVIDER'] == 'same'

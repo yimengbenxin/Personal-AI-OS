@@ -168,12 +168,19 @@ export function createTimelineWire(runtime:PersonalAIOSRuntime,onError:(error:un
       let stopped=false,cursor=timeline.head(ctx.device.principal_id),dirty=false,resync=false,request:Sync|undefined,turn=0;
       const snapshots=new Map<string,WireBody>(),stops:(()=>void)[]=[];let active:{frames:Iterator<TimelineFrame>;finish:()=>void;retry:()=>void}|undefined;
       const send:WirePublish=async body=>{check(!stopped&&ctx.current(),'TIMELINE_ATTACHMENT_CLOSED',409);await ctx.publish(body,pump.signal);};
+      const retrySnapshot=(key:string,body:WireBody)=>{
+        if(snapshots.has(key))return;
+        if(body.operation==='activity_update'){
+          const later=[...snapshots];snapshots.clear();snapshots.set(key,body);
+          for(const [pending,frame] of later)snapshots.set(pending,frame);
+        }else snapshots.set(key,body);
+      };
       // A failed frame never leaves the room (the SDK's room events own liveness): its whole item is served again from the start.
       const pump=coalescedPublication(async signal=>{
         // Rotate snapshot/sync/resync/live at item boundaries: at most three other items per pending class.
         for(let checked=0;!active&&checked<4;checked++){
           const selected=turn;turn=(turn+1)%4;
-          if(selected===0&&snapshots.size){const [op,body]=snapshots.entries().next().value!;snapshots.delete(op);active={frames:[{body,end:'page' as const}][Symbol.iterator](),finish:()=>{},retry:()=>{if(!snapshots.has(op))snapshots.set(op,body);}};}
+          if(selected===0&&snapshots.size){const [op,body]=snapshots.entries().next().value!;snapshots.delete(op);active={frames:[{body,end:'page' as const}][Symbol.iterator](),finish:()=>{},retry:()=>retrySnapshot(op,body)};}
           else if(selected===1&&request){
             const pending=request,body=pending.body;
             pending.frames??=timelineFrames(timeline.page(ctx.device.principal_id,{...(body.after_seq===undefined?{}:{after_seq:body.after_seq as number}),...(body.before_seq===undefined?{}:{before_seq:body.before_seq as number}),...(body.limit===undefined?{}:{limit:body.limit as number})}),body.request_id,body.page_markers===true);
@@ -204,6 +211,7 @@ export function createTimelineWire(runtime:PersonalAIOSRuntime,onError:(error:un
           const key=activity?`${body.operation}:${activity.id}`:body.operation;
           const previous=snapshots.get(key);
           if(activity&&previous&&activity.revision<=(previous.card as ActivityCard).revision)return;
+          if(activity)snapshots.delete(key);
           snapshots.set(key,body);pump.push();
         },
         stop:()=>{if(stopped)return;stopped=true;pump.stop();request?.reject(new ContractError('TIMELINE_ATTACHMENT_CLOSED',409));request?.frames?.return?.();request=undefined;active?.frames.return?.();active=undefined;snapshots.clear();for(const stop of stops)stop();if(owners.get(id)===owner)owners.delete(id);}

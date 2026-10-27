@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs';
 import {createCallAvatarWire} from '../src/call-avatar-wire.ts';
 import {utc} from '../../../services/personal-aios-integration/src/contracts.ts';
 import test from 'node:test';
@@ -417,4 +418,37 @@ test('opted-in history pages mark only their last frame, including split rows an
   assert.equal(phone.packets[start]!.page_end,true);
   const legacy=f.attach('mac');await legacy.sync({limit:1});
   assert.ok(legacy.packets.every(body=>!Object.hasOwn(body,'page_end')));
+});
+
+const activitySnapshot=(id:string,revision:number):WireBody=>{
+  const body=JSON.parse(readFileSync(new URL('../../../../../integrations/contracts/activity-update.fixtures.json',import.meta.url),'utf8')).fixtures.single_running;
+  body.processed_event_id=`processed-${id}`;body.card.id=`a:${id}`;body.card.revision=revision;return body;
+};
+
+test('HUD activity snapshots preserve publication order through timeline coalescing',async t=>{
+  const f=await timelineFixture(t,{fanout_classes:['glasses']}),gate=Promise.withResolvers<void>();
+  const glasses=f.attach('glasses',async body=>{if(body.operation==='errand_progress')await gate.promise;});
+  const publish=(body:WireBody)=>f.api.publish(body,f.source('glasses'),async()=>assert.fail('activity bypassed attachment'));
+  try{
+    await publish({operation:'errand_progress',errands:[]});await until(()=>glasses.packets.length===1);
+    for(const body of [activitySnapshot('a',1),activitySnapshot('b',2),activitySnapshot('a',3)])await publish(body);
+  }finally{gate.resolve();}
+  await until(()=>glasses.packets.length===3);
+  assert.deepEqual(glasses.packets.slice(1).map(body=>(body.card as {revision:number}).revision),[2,3]);
+  assert.deepEqual(f.errors,[]);
+});
+
+test('HUD activity retry stays before newer snapshots after a failed send',async t=>{
+  const f=await timelineFixture(t,{fanout_classes:['glasses']}),gate=Promise.withResolvers<void>(),entered=Promise.withResolvers<void>();let failed=false;
+  const glasses=f.attach('glasses',async body=>{
+    if((body.card as {revision:number}).revision===1&&!failed){entered.resolve();await gate.promise;failed=true;throw Error('SDK_PUBLISH_FAILED');}
+  });
+  const publish=(body:WireBody)=>f.api.publish(body,f.source('glasses'),async()=>assert.fail('activity bypassed attachment'));
+  try{
+    await publish(activitySnapshot('a',1));await entered.promise;
+    await publish(activitySnapshot('b',2));await publish(activitySnapshot('c',3));
+  }finally{gate.resolve();}
+  await until(()=>glasses.packets.length===4);
+  assert.deepEqual(glasses.packets.slice(1).map(body=>(body.card as {revision:number}).revision),[1,2,3]);
+  assert.equal(f.errors.length,1);assert.match(String(f.errors[0]),/SDK_PUBLISH_FAILED/);
 });

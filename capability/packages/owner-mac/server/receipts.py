@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 
 from capability.sdk.python.yimi_receipt import effect, receipt, to_mcp_result, unknown_fact, value
+from capability.sdk.python.mcp_media import content as media_content
 
 POLICIES = json.loads((Path(__file__).parents[1] / 'plugin.json').read_text())['extensions']['ai.yimi.capability']['tools']
 READ_ACTIONS = {'capture', 'list_apps', 'list_windows', 'wait'}
@@ -92,16 +93,23 @@ def exception_result(name, error):
 
 
 def mcp_result(name, args, raw):
+    original = raw
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {'message': raw}
     result = to_mcp_result(convert(name, args, raw))
-    # Keep native visual evidence outside the receipt, alongside its one TextContent.
-    if isinstance(raw, dict) and raw.get('_multimodal'):
-        for item in raw['content']:
-            if item.get('type') == 'image_url':
-                header, data = item['image_url']['url'].split(',', 1)
-                result['content'].append({'type': 'image', 'mimeType': header[5:].split(';')[0], 'data': data})
+    for block in media_content(original):
+        if block['type'] == 'text':
+            result['content'][0]['text'] += '\n' + block['text']
+        else:
+            result['content'].append(block)
     if isinstance(raw, dict) and raw.get('base64_content'):
         if raw.get('is_image'):
             result['content'].append({'type': 'image', 'mimeType': raw['mime_type'], 'data': raw['base64_content']})
         else:
-            result['structuredContent']['content'].append({'key': 'file_content_base64', 'text': raw['base64_content'], 'provenance': 'observed'})
+            result['content'].append({'type': 'resource', 'resource': {
+                'uri': (Path('/') / raw.get('path', 'attachment')).as_uri(),
+                'mimeType': raw.get('mime_type', 'application/octet-stream'), 'blob': raw['base64_content']}})
     return result

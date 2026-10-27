@@ -40,7 +40,7 @@ interface FormalMessageContract {
   outputs: Record<string, {properties: Record<string, AnySchema>} & AnySchema>;
 }
 const contractBytes = readFileSync(new URL('../../../../../integrations/contracts/formal-message.v1.json', import.meta.url));
-check(createHash('sha256').update(contractBytes).digest('hex') === '1fb23153ccf4478d64c9cff3a969a97477504bcfa49685a41320b8428de0a8f1', 'FORMAL_MESSAGE_CONTRACT_CHANGED');
+check(createHash('sha256').update(contractBytes).digest('hex') === '9dc8b39792e2fc11371df23b2aaf9be7c3d0bb38315023045bc33e4826c605c0', 'FORMAL_MESSAGE_CONTRACT_CHANGED');
 const wire = JSON.parse(contractBytes.toString('utf8')) as FormalMessageContract;
 check(wire.version === 1, 'FORMAL_MESSAGE_CONTRACT_VERSION');
 const movementInputs = new Set(['ride_state','move_frame','nav_state','ride_control','nav_control']);
@@ -486,7 +486,10 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
           const context:CallContext={call_id,owner:expectedGeneration,pending:new Set(),refs:new Set(),turn:-1,source:device,session,capture:track(options.runtime.captureCall(device,session,call_id)),
             identity:extra?.mode==='manual'&&device.device_type==='phone'&&hasTerminalCapability(device,'owner_unlock')?'owner':'pending',enrollment:enrollmentCalls.get(call_id)};
           if(context.enrollment){context.sealDone=Promise.withResolvers<void>();void context.sealDone.promise.catch(()=>{});}
-          calls.set(call_id,context);retainedCalls.add(context);await context.capture;}
+          calls.set(call_id,context);retainedCalls.add(context);
+          try{await context.capture;}catch(error){
+            if(calls.get(call_id)===context)calls.delete(call_id);retainedCalls.delete(context);
+            context.sealDone?.reject(error);releaseCallSink();throw error;}}
         if((state==='connecting'||state==='live')&&attached&&current()&&!calls.has(call_id)&&options.voice_call?.pending?.()===call_id){
           const context=retainedCall(call_id);if(context&&!context.sealing){context.owner=expectedGeneration;calls.set(call_id,context);}}
         if(['closing','closed','failed'].includes(state))for(const [abort,id] of callProgress)if(id===call_id){abort.abort();callProgress.delete(abort);}if(liveCallId!==call_id){liveCallId=call_id;callIdentity=extra?.mode==='manual'&&device.device_type==='phone'&&hasTerminalCapability(device,'owner_unlock')?'owner':'pending';}liveCall=state==='live';options.runtime.terminalChanged(device);if(attached&&current()){
@@ -654,7 +657,9 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
           await publishResult(value,'errand');
           return 'pending';
         }}:undefined,leave,
-        {session,...(hasTerminalCapability(device,'location')?{locate:requestLocation}:{}),
+        {session,reply:async value=>{if(!(attached&&current()))return;await authorized();
+          await publish({operation:'ambient_reply',session_id:session,processed_event_id:value.result.processed_event_id,heard:'',text:clip(value.result.reply_text,2000)});
+          await publishResult({...value,result:{...value.result,session_id:session}});},...(hasTerminalCapability(device,'location')?{locate:requestLocation}:{}),
           move:async(body,current)=>{
             const cancel=new AbortController(),timer=setTimeout(()=>cancel.abort(new ContractError(device.device_type==='phone'?'PHONE_NOT_CONNECTED':'GLASSES_NOT_CONNECTED',409)),REALTIME_READINESS_DEADLINE_MS);
             try {await track(publish({...body,operation:body.operation as string,session_id:session},undefined,current,true,undefined,cancel.signal));}
@@ -673,8 +678,8 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
           ...((hasFirstPersonCamera(device)||device.device_type==='phone'&&hasTerminalCapability(device,'camera'))?{captureOnce:async(frame_id:string,camera?:'back'|'front',expires_at_ms?:number)=>{await track(publish({operation:'camera_capture_once',session_id:session,frame_id,...(camera?{camera,expires_at_ms}:{})}));}}:{}),
           ...(hasFirstPersonCamera(device)?{capture:async (policy:import('../../../services/personal-aios-integration/src/visual/store.ts').CameraCapturePolicy)=>{await track(publish({operation:'camera_policy',session_id:session,control_id:'camera-policy-sync',policy}));}}:{})}));
       if(hasTerminalCapability(device,'owner_unlock'))watchers.push(options.runtime.watchVoiceConfirmations(device,async pending=>{
-        const confirmations=pending.slice(-16).map(({confirmation_id,event_id,expires_in_ms,text,kind,purpose,source_device_id,source_device_type})=>({confirmation_id,event_id,expires_in_ms,
-          ...(kind?{kind}:{}),...(purpose?{purpose}:{}),...(source_device_id?{source_device_id}:{}),...(source_device_type?{source_device_type}:{}),...(text?{text}:{})}));
+        const confirmations=pending.slice(-16).map(({confirmation_id,event_id,expires_in_ms,text,kind,purpose,source_device_id,source_device_type,scope_confirmation})=>({confirmation_id,event_id,expires_in_ms,
+          ...(kind?{kind}:{}),...(purpose?{purpose}:{}),...(source_device_id?{source_device_id}:{}),...(source_device_type?{source_device_type}:{}),...(scope_confirmation?{scope_confirmation}:{}),...(text?{text}:{})}));
         const ids=JSON.stringify(confirmations);
         if(ids===shown||!(attached&&current()))return;
         shown=ids;await track(extensions.publish({operation:'voice_confirmations',session_id:session,confirmations},device,publish));
@@ -1124,7 +1129,8 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
             kind==='size'?new ContractError('FORMAL_CAMERA_STREAM_SIZE_INVALID',413):
             kind==='incomplete'?new ContractError('FORMAL_CAMERA_STREAM_INCOMPLETE',409):
             new ContractError(kind==='inactive'?'FORMAL_CAMERA_STREAM_INACTIVE':'FORMAL_CAMERA_STREAM_DEADLINE',408),
-          authorize:async signal=>{
+          // Reserve synchronously: the SDK can queue chunks while authentication is pending.
+          authorize:signal=>{
             check(hasFirstPersonCamera(device)||device.device_type==='phone'&&hasTerminalCapability(device,'camera'),'CAMERA_DEVICE_REQUIRED',403);
             check(reader.info.mimeType==='image/jpeg' && reader.info.totalSize!==undefined && reader.info.totalSize>0 &&
               reader.info.totalSize<=3000000,'FORMAL_CAMERA_STREAM_SIZE_INVALID',413);
@@ -1133,13 +1139,12 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
             frame=JSON.parse(metadata) as Record<string,unknown>;
             check(cameraMetadataValidator(frame),'FORMAL_CAMERA_FRAME_INVALID');
             frameId=frame.frame_id as string;
-            source=await authorized();
-            signal.throwIfAborted();
             const quota=cameraReservations.get(key)??{streams:0,bytes:0},total=reader.info.totalSize!;
             check(quota.streams<2&&quota.bytes+total<=4000000&&cameraStreams<8&&cameraBytes+total<=12000000,'FORMAL_CAMERA_CAPACITY',429);
             held=quota;held.streams++;held.bytes+=total;cameraReservations.set(key,held);cameraStreams++;cameraBytes+=total;
-            bytes=Buffer.alloc(total);
-            return source;
+            return authorized().then(authenticated=>{
+              signal.throwIfAborted();source=authenticated;bytes=Buffer.alloc(total);return source;
+            });
           },
           write:content=>{bytes.set(content,size);size+=content.byteLength;}});
         if(foreign){track(bounded.done.catch(error=>{if(!(error instanceof ContractError&&error.code==='FORMAL_TEXT_CONNECTION_CHANGED'))options.onError(error);}));return;}
@@ -1157,7 +1162,8 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
           }
         };
         track(consume().catch(async error=>{
-          if(source&&frame?.trigger==='user_request')await options.runtime.cameraCaptureFailed(source,frame.frame_id as string,error);
+          const failedSource=source??(error instanceof ContractError&&error.code==='FORMAL_CAMERA_CAPACITY'?device:undefined);
+          if(failedSource&&frame?.trigger==='user_request')await options.runtime.cameraCaptureFailed(failedSource,frame.frame_id as string,error);
           await reject(error,{operation:'camera_frame'},frameId);
         }).catch(options.onError));
       });
@@ -1205,7 +1211,8 @@ export function createFormalTextIngress(options: {participant: LiveKitCloudParti
       if(!attached||!current()||peer!==recipient)return;
       if(activityEnabled&&activityReady)await settleWithSignal(()=>options.runtime.replayActivity(device,deliverActivity),readySignal);
       activityReady=true;
-      await settleWithSignal(()=>publish({operation:'ready',session_id:session}),readySignal);
+      const historyEpoch=await options.runtime.historyEpoch?.();
+      await settleWithSignal(()=>publish({operation:'ready',session_id:session,...(historyEpoch?{history_epoch:historyEpoch}:{})}),readySignal);
       if(device.device_type==='phone'&&hasTerminalCapability(device,'camera'))void track(options.runtime.cameraReady(device)).catch(options.onError);
       if(device.device_type==='phone'||device.device_type==='glasses')void track(options.runtime.movementReady(device)).catch(options.onError);
       // Readiness belongs to the transport; a call replay/publication error remains with the call owner.

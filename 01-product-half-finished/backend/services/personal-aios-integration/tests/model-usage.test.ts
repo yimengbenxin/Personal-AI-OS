@@ -131,6 +131,37 @@ test('documented provider billing prices legacy rows without fabricating cache-w
  assert.throws(()=>usage.setPrices([{...legacy,cache_write_billing:'guess' as never}]),/USAGE_PRICE_INVALID/);
  db.close();
 });
+test('configured vision and executor identities use documented billing without a cache-write counter',async()=>{
+ const {usage,db}=setup();
+ const routes=[
+  ['siliconflow-paios','zai-org/GLM-5.3-Flash','https://api.siliconflow.cn/v1','auxiliary.vision',0.8,2.8,0.23],
+  ['executor-siliconflow','zai-org/GLM-5.3-Flash','https://api.siliconflow.cn/v1','executor.thorough',0.8,2.8,0.23],
+  ['deepseek-paios','deepseek-flash','https://api.deepseek.com','brain',2,8,0.04],
+  ['executor-deepseek','deepseek-flash','https://api.deepseek.com','executor.fast.executor',2,8,0.04],
+ ] as const;
+ for(const [provider_id,model_id,base_url,role,input,output,cache] of routes){
+  const configured={...price,environment:'production',provider_id,model_id,price_version:'official-standard-2026-10-24',
+   updated_at:'2026-10-24T00:00:00.000Z',
+   source:'Official standard billing regression fixture; token counts are synthetic',input_per_million:input,
+   output_per_million:output,cache_read_per_million:cache,cache_write_per_million:null};
+  usage.setPrices([configured]);
+  const attempt={...base,environment:'production',provider_id,model_id,role,attempt_id:provider_id,status:'completed' as const,
+   captured_at:'2026-10-25T08:58:15.000Z',
+   input_tokens:1000,output_tokens:200,cache_read_tokens:64};
+  await usage.record(attempt,defaultCacheWriteBilling({wire_protocol:'chat_completions',base_url},model_id));
+  const saved=usage.sourceAttempt('production','owner',provider_id)!;
+  assert.equal(saved.price_version,configured.price_version,provider_id);
+  assert.deepEqual(saved.cost,{kind:'estimated',amount:Math.round((936*input+200*output+64*cache))/1e6,currency:'CNY'},provider_id);
+  assert.equal(saved.cache_write_tokens,0);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT body FROM model_usage_prices WHERE provider_id=?').get(provider_id)!.body as string),configured);
+  await usage.record({...attempt,attempt_id:provider_id+'-missing-read',cache_read_tokens:null},
+   defaultCacheWriteBilling({wire_protocol:'chat_completions',base_url},model_id));
+  assert.equal(usage.sourceAttempt('production','owner',provider_id+'-missing-read')!.cost.kind,'unknown');
+ }
+ assert.equal(defaultCacheWriteBilling({wire_protocol:'chat_completions',base_url:'https://api.siliconflow.cn/v1'},'unpublished/model'),'separate');
+ assert.equal(defaultCacheWriteBilling({wire_protocol:'chat_completions',base_url:'https://other.invalid/v1'},'zai-org/GLM-5.3-Flash'),'separate');
+ db.close();
+});
 test('explicit versioned CNY price estimates complete native usage and uses existing estimated reminder',async()=>{
  const {usage,db,notices}=setup();usage.setPrices([price]);
  const wire={...base,status:'completed' as const,input_tokens:10000000,output_tokens:1000000,cache_read_tokens:2000000,cache_write_tokens:1000000};
@@ -180,4 +211,15 @@ test('nonrun terminal without a persisted start refuses; a start without price n
  const terminal={...started,status:'completed',input_tokens:100,output_tokens:10,cache_read_tokens:0,cache_write_tokens:0} as UsageAttempt;
  await assert.rejects(usage.record(terminal),/USAGE_STARTED_REQUIRED/);await usage.record(started);usage.setPrices([price]);
  await usage.record(terminal);assert.equal(usage.recentAttempts('staging','owner')[0]!.cost.kind,'unknown');db.close();
+});
+
+for(const [zone,date] of [['America/Los_Angeles','2026-10-09'],['UTC','2026-10-10']] as const)
+test(`model usage groups budget facts by deployment ${zone}`,async()=>{
+  const db=new DatabaseSync(':memory:'),now=Date.parse('2026-10-10T00:30:00Z');
+  try{
+    const usage=new ModelUsage(db,{time_zone:zone,now:()=>now,notify:async()=>{}});
+    await usage.record({...base,captured_at:new Date(now).toISOString()});
+    assert.equal(usage.summary('staging','owner').local_date,date);
+    assert.equal(usage.summary('staging','owner').attempts,1);
+  }finally{db.close();}
 });

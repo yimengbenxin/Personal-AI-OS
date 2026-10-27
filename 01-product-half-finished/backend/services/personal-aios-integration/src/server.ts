@@ -112,8 +112,15 @@ export function createPersonalAIOSServer(runtime: PersonalAIOSRuntime, options: 
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
     let releaseBody:(()=>void)|undefined;
     try {
-      await options.capability_ready;
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      // Bootstrap health is the listening contract; neither wiring nor recovery gates it.
+      if (request.method === 'GET' && url.pathname === '/health') {
+        send(response, 200, {service: 'personal-aios-integration', schema_version: EVENT_SCHEMA,
+          reply_phase_mode: 'final_buffer', real_model_configured: options.model_route !== undefined,
+          configured_model_route: options.model_route ?? null,
+          verification_note: 'Configuration is not runtime acceptance; consult run evidence.'}); return;
+      }
+      await options.capability_ready;
       if(['POST','PUT','PATCH'].includes(request.method??''))releaseBody=bodyBudget.acquire(request,
         request.method==='PUT'&&url.pathname.startsWith('/v1/archive/backups/')?64*1024*1024:
           /^\/internal\/hermes\/gateway\/(find|check|publish|rollback|status|monitor)$/u.test(url.pathname)?4<<20:
@@ -131,12 +138,6 @@ export function createPersonalAIOSServer(runtime: PersonalAIOSRuntime, options: 
       if(url.pathname==='/internal/owner-mac/resolve'&&options.ownerMac){
         check(request.method==='POST','METHOD_NOT_ALLOWED',405);check(bearer(request)===options.internal_token,'INTERNAL_AUTHENTICATION_REQUIRED',401);
         send(response,200,await options.ownerMac(runtime,await json(request,8192)));return;
-      }
-      if (request.method === 'GET' && url.pathname === '/health') {
-        send(response, 200, {service: 'personal-aios-integration', schema_version: EVENT_SCHEMA,
-          reply_phase_mode: 'final_buffer', real_model_configured: options.model_route !== undefined,
-          configured_model_route: options.model_route ?? null,
-          verification_note: 'Configuration is not runtime acceptance; consult run evidence.'}); return;
       }
       if(request.method==='GET'&&url.pathname==='/internal/resources'){
         check(bearer(request)===options.internal_token,'INTERNAL_AUTHENTICATION_REQUIRED',401);
@@ -165,6 +166,10 @@ export function createPersonalAIOSServer(runtime: PersonalAIOSRuntime, options: 
         check(request.method==='GET','METHOD_NOT_ALLOWED',405);const data=await archive.downloadBackup(name);
         response.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':data.length,'Cache-Control':'no-store'});response.end(data);return;
       }
+      if(url.pathname==='/internal/meeting/call'){
+        check(request.method==='POST','METHOD_NOT_ALLOWED',405);check(bearer(request)===options.internal_token,'INTERNAL_AUTHENTICATION_REQUIRED',401);
+        send(response,200,await runtime.meetingCall(await json(request,options.max_request_bytes)));return;
+      }
       if (url.pathname.startsWith('/internal/hermes/gateway/')) {
         check(bearer(request)===options.internal_token,'INTERNAL_AUTHENTICATION_REQUIRED',401);
         const operation=url.pathname.slice('/internal/hermes/gateway/'.length);
@@ -173,6 +178,9 @@ export function createPersonalAIOSServer(runtime: PersonalAIOSRuntime, options: 
           send(response,200,runtime.capabilityGateway.catalog());return;
         }
         check(request.method==='POST','METHOD_NOT_ALLOWED',405);
+        if(operation==='lifecycle'){
+          send(response,200,await runtime.capabilityHook(await json(request,options.max_request_bytes)));return;
+        }
         if(['find','check','publish','rollback','status','monitor'].includes(operation)){
           send(response,200,await runtime.capabilityRegistryCall(operation as Parameters<PersonalAIOSRuntime['capabilityRegistryCall']>[0],await json(request,4<<20)));return;
         }

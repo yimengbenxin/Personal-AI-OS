@@ -30,12 +30,14 @@ export async function probeModelConnection(input:ProbeInput){
       ...(input.parameters.thinking?{thinking:{type:'disabled'}}:{})};}
   }
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10_000);
+  let reader:ReadableStreamDefaultReader<Uint8Array>|undefined,responseComplete=false;
   let status:'passed'|'failed'='failed',http_status:number|null=null,safe_error:string|null=null,actual_model:string|null=null,usage:Record<string,number>|null=null;
   try{
     const response=await fetch(provider.base_url.replace(/\/$/u,'')+suffix,{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal,redirect:'error'});
     http_status=response.status;
-    const reader=response.body?.getReader();let length=0;const chunks:Uint8Array[]=[];
-    if(reader)for(;;){const value=await reader.read();if(value.done)break;length+=value.value.length;check(length<=262144,'MODEL_SETTINGS_PROBE_RESPONSE_LIMIT',502);chunks.push(value.value);}
+    reader=response.body?.getReader();let length=0;const chunks:Uint8Array[]=[];
+    if(reader)for(;;){const value=await reader.read();if(value.done){responseComplete=true;break;}length+=value.value.length;check(length<=262144,'MODEL_SETTINGS_PROBE_RESPONSE_LIMIT',502);chunks.push(value.value);}
+    else responseComplete=true;
     const result=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {model?:unknown;usage?:Record<string,unknown>;error?:{code?:unknown}};
     if(response.ok){
       check(typeof result.model==='string'&&result.model.length<=200,'MODEL_SETTINGS_PROBE_RESPONSE_INVALID',502);actual_model=result.model;
@@ -45,6 +47,14 @@ export async function probeModelConnection(input:ProbeInput){
           'cache_creation_input_tokens'].includes(entry[0])&&typeof entry[1]==='number'&&Number.isSafeInteger(entry[1])&&entry[1]>=0));status='passed';
     }else safe_error=typeof result.error?.code==='string'&&safeCodes.has(result.error.code)?result.error.code:'MODEL_SETTINGS_PROVIDER_REJECTED';
   }catch(error){safe_error=controller.signal.aborted?'MODEL_SETTINGS_PROBE_TIMEOUT':'MODEL_SETTINGS_PROBE_FAILED';}
-  finally{clearTimeout(timeout);}
+  finally{
+    try{
+      // Cancellation can reject or remain pending. It must not delay transport abort or replace the probe result.
+      if(reader&&!responseComplete)void reader.cancel().catch(()=>{});
+    }finally{
+      try{reader?.releaseLock();}
+      finally{if(!responseComplete)controller.abort();clearTimeout(timeout);}
+    }
+  }
   return {status,http_status,safe_error,trace_id,actual_model,latency_ms:Math.round(performance.now()-started),usage,max_output_tokens:16,fallback_activated:false};
 }

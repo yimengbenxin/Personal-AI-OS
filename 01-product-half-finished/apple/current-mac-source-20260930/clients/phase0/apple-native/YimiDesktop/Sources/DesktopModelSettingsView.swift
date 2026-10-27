@@ -38,6 +38,10 @@ struct DesktopModelSettingsView: View {
                 Section("保存与生效") {
                     LabeledContent("已保存", value: "版本 \(snapshot.desired)")
                     Text(snapshot.activationText)
+                    if snapshot.revision != snapshot.desired {
+                        Button("设置已更新，读取最新路由") { Task { await model.refresh() } }
+                            .disabled(model.busy || !model.connected)
+                    }
                     ForEach(snapshot.groups.keys.sorted(), id: \.self) { key in
                         if let group = snapshot.groups[key] {
                             LabeledContent(key, value: "已保存 \(group.desired) · 已生效 \(group.effective)")
@@ -108,7 +112,7 @@ struct DesktopModelSettingsView: View {
         .formStyle(.grouped).tint(Yimi.klein).foregroundStyle(Yimi.ink)
         .background(Yimi.paper).navigationTitle("模型与密钥")
         .frame(minWidth: 580, minHeight: 430)
-        .task(id: model.connected) { if !rendering, model.connected { await model.refresh() } }
+        .task(id: model.connected) { if !rendering, model.connected { await model.open() } }
         .sheet(isPresented: Binding(get: { role != nil }, set: { if !$0 { role = nil } })) {
             if let role { DesktopModelSettingsRoleEditor(model: model, original: role) }
         }

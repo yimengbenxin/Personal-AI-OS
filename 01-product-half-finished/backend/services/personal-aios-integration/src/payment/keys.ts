@@ -128,13 +128,14 @@ export class PaymentKeys {
     }));
   }
   pendingModelSettings(source:RegisteredDevice):DeviceKey|undefined {return this.registered(source,'model_settings_pending');}
-  async registerModelSettings(source:RegisteredDevice,target:RegisteredDevice,public_x963_b64:string,verified:VerifiedStatement,mutation?:()=>void):Promise<void> {
+  async registerModelSettings(source:RegisteredDevice,target:RegisteredDevice,public_x963_b64:string,verified:VerifiedStatement,mutation?:()=>void,reconcileApproval?:()=>void):Promise<void> {
     await this.phone(source);const current=await this.options.revalidate(target);
     check(current.device_type==='mac'&&current.principal_id===source.principal_id,'MODEL_SETTINGS_MAC_TARGET_INVALID',403);
     paymentPublicKey(public_x963_b64);
-    check(this.pendingModelSettings(current)?.public_x963_b64===public_x963_b64,'MODEL_SETTINGS_MAC_KEY_CHANGED',409);
+    if(!reconcileApproval)check(this.pendingModelSettings(current)?.public_x963_b64===public_x963_b64,'MODEL_SETTINGS_MAC_KEY_CHANGED',409);
     check(verified.statement.purpose==='model_settings'&&verified.statement.action==='authorize_mac'&&verified.statement.device_id===source.device_id,'PAYMENT_SIGNATURE_INVALID',403);
     verified.commit(()=>this.options.store.tx(()=>{
+      reconcileApproval?.();
       this.options.store.db.prepare(`INSERT INTO device_keys(device_id,role,principal_id,public_x963_b64,created_at_ms,revoked_at_ms)
         VALUES(?,'model_settings',?,?,?,NULL) ON CONFLICT(device_id,role) DO UPDATE SET
         principal_id=excluded.principal_id,public_x963_b64=excluded.public_x963_b64,created_at_ms=excluded.created_at_ms,revoked_at_ms=NULL`)

@@ -13,6 +13,7 @@
       "ts-memory",
       "ts-model-settings",
       "ts-personal",
+      "ts-personality",
       "ts-schedule",
       "desktop",
       "owner-mac",
@@ -30,6 +31,7 @@
       "ts-memory",
       "ts-model-settings",
       "ts-personal",
+      "ts-personality",
       "ts-schedule",
       "desktop",
       "owner-mac",
@@ -386,7 +388,6 @@
     "anomaly": {
       "max_per_day": 2
     },
-    "day_timezone": "Asia/Taipei",
     "limits": {
       "max_settable_fen": 100000
     },

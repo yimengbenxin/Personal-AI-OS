@@ -1,5 +1,6 @@
 import {readFileSync} from 'node:fs';
 import {effect, receipt, to_mcp_result, unknown_fact, value, type Receipt, type ReceiptOptions} from '../../../sdk/ts/receipt.ts';
+import {withMedia} from '../../../sdk/ts/mcp-media.ts';
 
 const manifest = JSON.parse(readFileSync(new URL('../plugin.json', import.meta.url), 'utf8'));
 export const desktopPolicies = manifest.extensions['ai.yimi.capability'].tools as Record<string, {
@@ -81,5 +82,5 @@ export function desktopReceipt(name: string, args: Record<string, unknown>, resu
 
 export function desktopPackageResult(name: string, args: Record<string, unknown>, result: DesktopResult) {
   const wrapped = to_mcp_result(desktopReceipt(name, args, result));
-  return {...wrapped, structuredContent: {...wrapped.structuredContent}};
+  return {...withMedia(wrapped,result), structuredContent: {...wrapped.structuredContent}};
 }

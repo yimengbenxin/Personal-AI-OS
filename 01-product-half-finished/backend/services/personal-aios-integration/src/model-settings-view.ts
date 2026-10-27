@@ -5,7 +5,7 @@ import type {ModelSettingsAuthority} from './model-settings.ts';
 export type ModelSettingsUsageSummary=ReturnType<ModelUsage['summary']>;
 export interface ModelSettingsPageRequest {revision?:number;offset?:number;draft_id?:string}
 export function modelSettingsState(authority:ModelSettingsAuthority) {
-  const {environment_id,desired,groups}=authority.read();return {environment_id,desired,groups};
+  const {environment_id,desired,groups,local_models}=authority.read();return {environment_id,desired,groups,...(local_models?{local_models}:{})};
 }
 /** Pages one immutable revision or frozen draft; no key ciphertext enters the view. */
 export function modelSettingsPage(authority:ModelSettingsAuthority,source:RegisteredDevice,request:ModelSettingsPageRequest={},usage:ModelSettingsUsageSummary|null=null) {
@@ -19,9 +19,9 @@ export function modelSettingsPage(authority:ModelSettingsAuthority,source:Regist
   const rows=[...value.snapshot.providers.map(value=>({kind:'provider' as const,value})),
     ...value.snapshot.roles.map(value=>({kind:'role' as const,value})),...credentials.map(value=>({kind:'credential' as const,value}))];
   const offset=request.offset??0;check(Number.isSafeInteger(offset)&&offset>=0&&offset<=rows.length,'MODEL_SETTINGS_PAGE_INVALID');
-  const result={environment_id:current.environment_id,revision:value.revision,desired:current.desired,groups:current.groups,usage,
+  const result={environment_id:current.environment_id,revision:value.revision,desired:current.desired,groups:current.groups,usage,...(current.local_models?{local_models:current.local_models}:{}),
     ...(draft?{draft:{draft_id:draft.draft_id,action:draft.action,
-      payload:Object.fromEntries(Object.entries(draft.payload).filter(([field])=>!['providers','roles','change_summary'].includes(field)))}}:{}),
+      payload:Object.fromEntries(Object.entries(draft.payload).filter(([field])=>!['providers','roles','change_summary','local_entry','local_pin','local_catalog_id'].includes(field)))}}:{}),
     items:[] as typeof rows,next_offset:null as number|null};
   for(let index=offset;index<rows.length&&result.items.length<8;index++){
     const next={...result,items:[...result.items,rows[index]!],next_offset:index+1<rows.length?index+1:null};

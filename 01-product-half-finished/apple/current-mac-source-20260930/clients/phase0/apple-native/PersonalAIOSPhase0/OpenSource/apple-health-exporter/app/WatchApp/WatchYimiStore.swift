@@ -101,7 +101,11 @@ final class WatchYimiStore: ObservableObject {
                 do { try credentials.save(nil) }
                 catch { report("旧连接凭证删除失败：\(error)") }
             }
-            if reducer.apply(incoming, fromContext: true) { try publishState() }
+            let historyChanged = incoming.history_epoch != nil && incoming.history_epoch != state?.history_epoch
+            if reducer.apply(incoming, fromContext: true) {
+                if historyChanged { lastReceipt = nil; lastCompletedRequest = nil }
+                try publishState()
+            }
             if let raw = context["watch_credential"] {
                 guard let bytes = raw as? Data else { throw WatchYimiError.invalidValue }
                 let value = try JSONDecoder().decode(WatchCredential.self, from: bytes)
@@ -117,7 +121,11 @@ final class WatchYimiStore: ObservableObject {
         do {
             let incoming = try WatchYimiState.decodeStrict(data)
             guard incoming.scope == currentScope else { report("忽略其他绑定的即时状态"); return }
-            if reducer.apply(incoming, fromContext: false) { try publishState() }
+            let historyChanged = incoming.history_epoch != nil && incoming.history_epoch != state?.history_epoch
+            if reducer.apply(incoming, fromContext: false) {
+                if historyChanged { lastReceipt = nil; lastCompletedRequest = nil }
+                try publishState()
+            }
         } catch { report("即时状态接收失败：\(error)") }
     }
     func begin(_ request: WatchLocalEnvelope, scope: WatchBindingScope) throws { try reducer.begin(request, scope: scope); lastError = nil }

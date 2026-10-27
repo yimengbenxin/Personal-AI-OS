@@ -6,6 +6,7 @@ All payment/UI/Core sources and contracts are the original files. No device buil
 """
 import argparse
 import json
+import plistlib
 import re
 from pathlib import Path
 import shutil
@@ -28,6 +29,13 @@ objects = value["objects"]
 root = objects[value["rootObject"]]
 objects[root["mainGroup"]]["path"] = str(app)
 objects[root["mainGroup"]]["sourceTree"] = "<absolute>"
+# Simulator Keychain tests need an application identity, even with ad-hoc signing.
+# These entitlements never enter the device project and require no signing key or profile.
+entitlements = plistlib.loads((app / "App/HealthKitExporter.entitlements").read_bytes())
+entitlements.update({"application-identifier": "ai.paios.personal.phase0",
+                     "keychain-access-groups": ["ai.paios.personal.phase0"], "get-task-allow": True})
+simulator_entitlements = output / "SimulatorHealthKitExporter.entitlements"
+simulator_entitlements.write_bytes(plistlib.dumps(entitlements))
 if args.without_place_bootstrap:
     # An observed synchronous CoreLocation hang prevents XCTest from connecting at app launch.
     # Exclude only that unrelated bootstrap from this generated test app, never the shipped source.
@@ -61,9 +69,14 @@ for obj in objects.values():
         obj["path"] = str((app / obj["path"]).resolve())
         obj["sourceTree"] = "<absolute>"
     settings = obj.get("buildSettings", {})
+    if "PRODUCT_BUNDLE_IDENTIFIER" in settings:
+        settings["CODE_SIGN_STYLE"] = "Manual"
+        settings["CODE_SIGN_IDENTITY"] = "-"
     for key in ("INFOPLIST_FILE", "CODE_SIGN_ENTITLEMENTS"):
         if key in settings:
             settings[key] = str(app / settings[key])
+    if settings.get("PRODUCT_BUNDLE_IDENTIFIER") == "ai.paios.personal.phase0":
+        settings["CODE_SIGN_ENTITLEMENTS"] = str(simulator_entitlements)
     if obj.get("path") == "ARTCCallClient.swift":
         obj["path"] = str(output / "SimulatorARTC.swift")
         obj["sourceTree"] = "<absolute>"

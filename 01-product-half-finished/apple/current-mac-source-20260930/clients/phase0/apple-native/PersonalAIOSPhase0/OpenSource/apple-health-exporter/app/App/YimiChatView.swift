@@ -8,6 +8,7 @@ struct YimiChatView: View {
     @ObservedObject var ui: YimiUIState
     let actions: YimiActions
     @State private var paymentDetailID: String?
+    @State private var fullText: YimiFullText?
     @State private var typing = false
     @State private var sending = false
     @State private var selectedCardID: String?
@@ -15,44 +16,71 @@ struct YimiChatView: View {
     @State private var decidingRecovery = false
     @State private var recoveringEventID: String?
     @State private var expandedCalls: Set<String> = []
-    @State private var scroll = YimiChatScrollState()
+    @State private var scroll = YimiChatScrollState(tracksHistoryGestures: true)
     @State private var window = YimiChatWindow()
     @State private var dragging = false
-    @State private var visibleItemID: String?
-    @State private var viewportHeight: CGFloat = 0
+    @State private var historyDragBegan = false
+    @State private var lastMetrics: YimiChatScrollState.Metrics?
     @State private var contentHeight: CGFloat = 0
     @FocusState private var focused: Bool
+
+    private func updateScroll(_ metrics: YimiChatScrollState.Metrics) {
+        if dragging, let previous = lastMetrics, metrics.top != previous.top,
+           abs(metrics.height - previous.height) < 1, metrics.viewport == previous.viewport {
+            let older = scroll.drag(towardHistory: metrics.top > previous.top, began: !historyDragBegan)
+            historyDragBegan = true
+            if older { loadOlder() }
+        }
+        lastMetrics = metrics
+        if scroll.update(metrics) { loadOlder() }
+        contentHeight = metrics.height
+#if DEBUG
+        ui.recordChatLayout()
+#endif
+    }
+
+    private func updateScrollPhase(_ interacting: Bool) {
+        if interacting {
+            if !dragging { historyDragBegan = false }
+            dragging = true
+        } else if dragging {
+            dragging = false
+            if historyDragBegan { scroll.endDrag() }
+        }
+    }
 
     var body: some View {
         let all = conversation.chatItems
         let items = window.rows(all)
         let activityLayout = YimiActivityLayout(items: all, activities: vm.activities, consumer: vm.centralSnapshot)
-        let viewport = viewportHeight
-        ScrollViewReader { proxy in
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+            let viewport = geometry.size.height
             ScrollView {
-                // Eager: every row has its real height, so a scroll to the bottom marker lands exactly (a lazy stack
-                // estimates unrealised rows and lands short).
-                VStack(spacing: 10) {
+                // Historical replies can contain tens of thousands of characters. Keep them out of eager layout.
+                LazyVStack(spacing: 10) {
                     if items.isEmpty {
                         Text("和依米说点什么吧")
                             .font(.system(size: 14)).foregroundStyle(Yimi.ink3)
                             .padding(.top, 40)
                     }
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        if showsDay(at: index, in: items) {
-                            Text(item.date, format: .dateTime.month().day().hour().minute())
-                                .font(.system(size: 12)).foregroundStyle(Yimi.ink3).padding(.vertical, 4)
-                        }
-                        row(item)
-                            .id(item.id)
-                        ForEach(activityLayout.under[item.id] ?? []) { activity in
-                            YimiActivityCard(activity: activity, collapsed: activity.collapsed(replyProcessedIDs: activityLayout.replyProcessedIDs))
-                                .padding(.trailing, 24)
-                        }
-                            .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
-                    }
-                    ForEach(activityLayout.unanchored) { activity in
+                    ForEach(activityLayout.leading) { activity in
                         YimiActivityCard(activity: activity).padding(.trailing, 24)
+                    }
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        VStack(spacing: 10) {
+                            if showsDay(at: index, in: items) {
+                                Text(item.date, format: .dateTime.month().day().hour().minute())
+                                    .font(.system(size: 12)).foregroundStyle(Yimi.ink3).padding(.vertical, 4)
+                            }
+                            row(item)
+                            ForEach(activityLayout.under[item.id] ?? []) { activity in
+                                YimiActivityCard(activity: activity, collapsed: activity.collapsed(replyProcessedIDs: activityLayout.replyProcessedIDs))
+                                    .padding(.trailing, 24)
+                            }
+                            .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
+                        }
+                        .id(item.id)
                     }
                     if let outcome = vm.careOutcome { Text(outcome).font(.system(size: 13)).foregroundStyle(Yimi.ink3) }
                     if vm.typedRecoveryNeedsDecision {
@@ -115,42 +143,37 @@ struct YimiChatView: View {
                         TypingDots().frame(maxWidth: .infinity, alignment: .leading)
                             .transition(.opacity)
                     }
-                    Color.clear.frame(height: 1).id("latest")
+                    Color.clear.frame(height: 1).id(latestMarkerID)
                 }
-                .scrollTargetLayout()
                 .padding(.horizontal, 14).padding(.vertical, 14)
                 .frame(minHeight: viewport, alignment: .bottom)
                 .animation(Yimi.Motion.component, value: vm.voiceConfirmations)
                 .onGeometryChange(for: YimiChatScrollState.Metrics.self) { content in
                     let frame = content.frame(in: .named("chat"))
                     return .init(top: frame.minY, bottom: frame.maxY, viewport: viewport)
-                } action: { metrics in
-                    if scroll.update(metrics) { loadOlder() }
-                    contentHeight = metrics.height
-                }
+                } action: { updateScroll($0) }
             }
-            .scrollPosition(id: $visibleItemID, anchor: .top)
+            .defaultScrollAnchor(.bottom)
             .coordinateSpace(name: "chat")
             .accessibilityIdentifier("yimi.chat.history")
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
-            .simultaneousGesture(DragGesture().onChanged { value in
-                let towardHistory = value.translation.height > abs(value.translation.width)
-                let older = scroll.drag(towardHistory: towardHistory, began: !dragging)
-                dragging = true
-                if older { loadOlder() }
-            }.onEnded { _ in
-                dragging = false
-                scroll.endDrag()
-            })
+#if DEBUG
+            .accessibilityValue(ui.chatOpenLayoutSeconds.map { String($0) } ?? "")
+#endif
+            // Observe the scroll view's own pan; another DragGesture competes with native swipe-back.
+            .modifier(YimiHistoryTracking(phaseChanged: updateScrollPhase, dragged: { towardHistory, began in
+                if scroll.drag(towardHistory: towardHistory, began: began) { loadOlder() }
+            }, ended: { scroll.endDrag() }))
             .onAppear { scrollToRequest(proxy) }
             .onChange(of: vm.notificationOpenRevision) { _, _ in scrollToRequest(proxy) }
             .onChange(of: ui.chatScrollRequest) { _, _ in scrollToRequest(proxy) }
-            // New rows, streaming text, cards, typing dots and the keyboard all change these two sizes; a list that was at
-            // the bottom stays there, one the owner is reading does not move.
+            // A sliding history window can append equal-height rows. Follow both identity and size changes
+            // while pinned; reading older history keeps its position.
             .onChange(of: contentHeight) { _, _ in followLatest(proxy) }
-            .onChange(of: viewportHeight) { _, _ in followLatest(proxy) }
+            .onChange(of: viewport) { _, _ in followLatest(proxy) }
             .onChange(of: focused) { _, _ in followLatest(proxy) }
+            .onChange(of: items.last?.id) { _, _ in followLatest(proxy) }
             .onChange(of: conversation.sendRevision) { _, _ in showLatest(proxy) }
+            }
         }
         .scrollDismissesKeyboard(.interactively)
         .background(Yimi.paper)
@@ -158,6 +181,7 @@ struct YimiChatView: View {
         .sheet(isPresented: Binding(get: { paymentDetailID != nil }, set: { if !$0 { paymentDetailID = nil } })) {
             if let id = paymentDetailID { YimiPaymentDetailSheet(payment: vm.payment, paymentID: id) }
         }
+        .sheet(item: $fullText) { YimiFullTextPage(text: $0.text) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
         .toolbar {
@@ -231,13 +255,16 @@ struct YimiChatView: View {
         }
     }
 
+    private var latestMarkerID: String { "latest-" + (conversation.chatItems.last?.id ?? "empty") }
+
     private func showLatest(_ proxy: ScrollViewProxy) {
         scroll.showLatest()
-        proxy.scrollTo("latest", anchor: .bottom)
+        proxy.scrollTo(latestMarkerID, anchor: .bottom)
     }
 
     private func followLatest(_ proxy: ScrollViewProxy) {
-        if scroll.pinned { proxy.scrollTo("latest", anchor: .bottom) }
+        // Reposition after size changes even when the newest row identity is unchanged.
+        if scroll.pinned { proxy.scrollTo(latestMarkerID, anchor: .bottom) }
     }
 
     @ViewBuilder
@@ -247,7 +274,7 @@ struct YimiChatView: View {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     if item.isVoiceInput { Image(systemName: "mic.fill").font(.system(size: 12)).accessibilityLabel("语音") }
-                    Text(item.text)
+                    YimiBoundedText(text: item.text) { fullText = YimiFullText(id: item.id, text: item.text) }
                 }
                     .font(.system(size: 16)).foregroundStyle(Yimi.ground)
                     .padding(.horizontal, 14).padding(.vertical, 10)
@@ -275,7 +302,9 @@ struct YimiChatView: View {
                             Label("分享/保存二维码", systemImage: "square.and.arrow.up")
                         }.font(.system(size: 14)).tint(Yimi.klein)
                     }
-                    if !content.text.isEmpty { Text(content.text) }
+                    if !content.text.isEmpty {
+                        YimiBoundedText(text: content.text) { fullText = YimiFullText(id: item.id, text: content.text) }
+                    }
                 }
                     .font(.system(size: 16)).foregroundStyle(Yimi.ink)
                     .padding(.horizontal, 14).padding(.vertical, 10)
@@ -296,7 +325,7 @@ struct YimiChatView: View {
                 live: vm.call.isActive && vm.call.id.map { "call-" + $0 } == item.id,
                 expanded: Binding(get: { expandedCalls.contains(item.id) }, set: { expanded in
                     if expanded { expandedCalls.insert(item.id) } else { expandedCalls.remove(item.id) }
-                }))
+                }), openFull: { fullText = YimiFullText(id: $0.id, text: $0.text) })
         }
     }
 
@@ -391,6 +420,67 @@ struct YimiChatView: View {
     }
 }
 
+/// A message body bounded for chat layout (YimiLongText): a long one shows its prefix and a link to the whole text.
+struct YimiBoundedText: View {
+    let text: String
+    let openFull: () -> Void
+
+    var body: some View {
+        if let preview = YimiLongText.preview(text) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(preview)
+                Button(action: openFull) { Text("查看全文").fontWeight(.semibold).underline() }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("yimi.message.fullText")
+            }
+        } else {
+            Text(text)
+        }
+    }
+}
+
+struct YimiFullText: Identifiable {
+    let id: String
+    let text: String
+}
+
+/// The whole of a long message on its own page. UITextView lays out only what is on screen, so the length costs
+/// nothing up front, and the text stays selectable.
+struct YimiFullTextPage: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            YimiTextReader(text: text)
+                .background(Yimi.paper)
+                .navigationTitle("全文")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
+    }
+}
+
+private struct YimiTextReader: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.font = .preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = UIColor(Yimi.ink)
+        view.backgroundColor = .clear
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 32, right: 14)
+        view.accessibilityIdentifier = "yimi.message.fullText.page"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
+    }
+}
+
 /// Chat bubble with a tightened corner toward its sender.
 struct BubbleShape: Shape {
     let mine: Bool
@@ -408,6 +498,7 @@ struct CallRecordCard: View {
     /// Whether this is the session's current live call (the one authority on a call being in progress).
     let live: Bool
     @Binding var expanded: Bool
+    let openFull: (YimiItem) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button { withAnimation(Yimi.Motion.component) { expanded.toggle() } } label: {
@@ -428,7 +519,8 @@ struct CallRecordCard: View {
                 HStack(alignment: .top, spacing: 6) {
                     Text(line.role == "user" ? "你" : line.role == "main_agent" ? "依米·补充" : "依米")
                         .font(.system(size: 14, weight: .semibold)).foregroundStyle(line.kind == .me ? Yimi.ink2 : Yimi.klein)
-                    Text(line.text).font(.system(size: 14)).foregroundStyle(Yimi.ink).textSelection(.enabled)
+                    YimiBoundedText(text: line.text) { openFull(line) }
+                        .font(.system(size: 14)).foregroundStyle(Yimi.ink).textSelection(.enabled)
                 }
             }
         }
@@ -528,5 +620,29 @@ struct YimiCareCard: View {
             Text(item.text)
             Button(answering ? "正在告诉依米…" : "我没事", action: answer).disabled(answering)
         }.padding(14).background(Yimi.tint, in: RoundedRectangle(cornerRadius: Yimi.Radius.card))
+    }
+}
+
+/// iOS 18 reports scrolling directly. Earlier releases need the existing gesture observation.
+private struct YimiHistoryTracking: ViewModifier {
+    let phaseChanged: (Bool) -> Void
+    let dragged: (Bool, Bool) -> Void
+    let ended: () -> Void
+    @State private var dragging = false
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                phaseChanged(phase == .interacting)
+            }
+        } else {
+            content.simultaneousGesture(DragGesture().onChanged { value in
+                dragged(value.translation.height > abs(value.translation.width), !dragging)
+                dragging = true
+            }.onEnded { _ in
+                dragging = false
+                ended()
+            })
+        }
     }
 }

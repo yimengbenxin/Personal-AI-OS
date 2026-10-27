@@ -436,6 +436,8 @@ class CheckoutStop:
             if self.payment_intent:
                 self._checkpoint()
             raise _Refused("已到付款页（收银台）：按规则不再点击或输入，立即结束任务并汇报商家、商品规格、金额和预计时间。")
+        if self.capture_unresolved and (control.points or control.confirm):
+            raise _Refused("屏幕图像与视图尺寸不一致，无法确认这一下不会付款：不输入，重新观察屏幕。")
         if await asyncio.to_thread(self.runtime._locked):
             raise RuntimeError("执行手机锁屏，当前输入未执行。")
         if self.login_required:

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:paios:presentation-outline:1",
+  "title": "Read-only native document tree; never a slideshow selection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "target", "deck_revision", "captured_at", "source", "slides"],
+  "properties": {
+    "version": {"const": 1},
+    "target": {"$ref": "urn:paios:presentation:1#/$defs/target"},
+    "deck_revision": {"$ref": "urn:paios:presentation:1#/$defs/hash"},
+    "captured_at": {"$ref": "urn:paios:presentation:1#/$defs/utc"},
+    "source": {"const": "document_tree"},
+    "slides": {
+      "type": "array", "minItems": 1, "maxItems": 512,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["slide_id", "slide_number", "elements"],
+        "properties": {
+          "slide_id": {"$ref": "urn:paios:presentation:1#/$defs/id"},
+          "slide_number": {"type": "integer", "minimum": 1},
+          "elements": {"type": "array", "maxItems": 256, "items": {"$ref": "urn:paios:presentation:1#/$defs/element"}}
+        }
+      }
+    }
+  }
+}

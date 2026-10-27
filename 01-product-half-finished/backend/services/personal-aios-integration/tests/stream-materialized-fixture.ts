@@ -17,7 +17,8 @@ export async function committedCount(storage:StoragePort){
 // Explicit HTTP boundary backed by an isolated local directory for cold lifecycle fixtures.
 export async function webdav(t:import('node:test').TestContext,root:string){
  const {createServer}=await import('node:http'),{promises:fs}=await import('node:fs'),{join}=await import('node:path');
- const directory=join(root,'cold'),password_file=join(root,'webdav-password'),state={corrupt:false,unavailable:false,reads:0};
+ const directory=join(root,'cold'),password_file=join(root,'webdav-password'),state={corrupt:false,unavailable:false,reads:0,
+   uploaded:0,onUpload:undefined as (()=>void)|undefined};
  await fs.mkdir(directory,{recursive:true});await fs.writeFile(password_file,'fixture-password');
  const server=createServer(async(req,res)=>{
   if(req.headers.authorization!==`Basic ${Buffer.from('fixture:fixture-password').toString('base64')}`){res.writeHead(401).end();return;}
@@ -25,7 +26,8 @@ export async function webdav(t:import('node:test').TestContext,root:string){
   const ref=(req.url??'').slice(1);if(!/^[a-f0-9]{64}\.l5pack$/u.test(ref)){res.writeHead(400).end();return;}
   const path=join(directory,ref);
   try{
-   if(req.method==='PUT'){const parts:Buffer[]=[];for await(const part of req)parts.push(part);await fs.writeFile(path,Buffer.concat(parts));res.writeHead(201).end();return;}
+   if(req.method==='PUT'){const parts:Buffer[]=[];for await(const part of req){parts.push(part);state.uploaded+=part.length;state.onUpload?.();}
+     await fs.writeFile(path,Buffer.concat(parts));res.writeHead(201).end();return;}
    if(req.method==='DELETE'){await fs.unlink(path).catch(e=>{if(e.code!=='ENOENT')throw e;});res.writeHead(204).end();return;}
    state.reads++;let bytes=await fs.readFile(path);if(state.corrupt){bytes=Buffer.from(bytes);bytes[bytes.length-1]=bytes[bytes.length-1]!^1;}
    const range=/^bytes=(\d+)-(\d+)$/u.exec(req.headers.range??'');

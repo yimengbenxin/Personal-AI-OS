@@ -7,7 +7,7 @@ test('payment config: frozen defaults, nested overrides and unknown keys',()=>{
   assert.equal(parsePaymentConfig({auto:{undo_s:3}}).auto.max_day_fen,15000);
   for(const input of [{unknown:true},{auto:{unknown:1}},{auto:{max_order_fen:1.5}},{locks:{phone_relock_s:2}},
     {enabled:true},{voice:{pay_phrases:[]}},{enabled:'true'},{card_ttl_s:301},{grant_ttl_s:61},{request_freshness_s:601},{locks:{glasses_lease_max_s:43201}},
-    {locks:{phone_relock_choices_s:Array(17).fill(60)}}])assert.throws(()=>parsePaymentConfig(input));
+    {locks:{phone_relock_choices_s:Array(17).fill(60)}},{day_timezone:'UTC'}])assert.throws(()=>parsePaymentConfig(input));
   assert.equal(parsePaymentConfig({enabled:true,executor_key_file:'/secret/payment.key'}).enabled,true);
   const policy={principal_id:'owner',version:1,voice_enabled:true,auto_enabled:true,limits:{auto_order_fen:4000},paused_until_ms:null,updated_at_ms:0};
   assert.deepEqual(effectiveLimits(policy,parsePaymentConfig()),{auto_order_fen:4000,auto_day_fen:15000,voice_order_fen:20000});

@@ -1,3 +1,4 @@
+import type {SpeechPurpose} from './speech-purpose.ts';
 import {publishRawRecord} from '../stream-archive.ts';
 import type {VoiceprintChannel} from '../voiceprint/contracts.ts';
 import {canonical, check, checkLocation, ContractError, digest, directedVoice, principalAttribution, sha256, utc, validateProcessed, voiceEvidence} from '../contracts.ts';
@@ -32,6 +33,7 @@ export interface PcmSelection {
 }
 export interface WorkerRequest {
   input_contract: 'paios.media.full-chunks.v1' | 'paios.media.selected-pcm.v1';
+  speech_purpose?:'meeting'|'meeting_paused';
   identity_channel?: VoiceprintChannel;
   principal_id?: string; device_id?: string; call_id?: string;
   coverage: MediaSegment['coverage'];
@@ -131,6 +133,8 @@ export function selectCapabilities(segment:MediaSegment,views:MediaView[],capabi
 
 // Bounded front-processing, no Agent, scheduler, reply writer, memory writer, or acquisition loop.
 export class MediaProcessor {
+  private speechPurpose:SpeechPurpose|undefined;
+  setSpeechPurpose(purpose:SpeechPurpose){this.speechPurpose=purpose;}
   private inflight=0;
   private closing:Promise<void>|undefined;
   private readonly processOperations=new Set<Promise<unknown>>();
@@ -176,7 +180,8 @@ export class MediaProcessor {
       requestViews.push({modality:view.chunk.modality,format:view.chunk.format,ref:view.ref,time_range:view.mapped_range,bytes});
     }
     const base={event_id:segment.event_id,segment_id:segment.segment_id,archive_revision:segment.archive_revision,time_range:segment.time_range};
-    return {...base, input_contract: 'paios.media.selected-pcm.v1', principal_id:segment.principal_id,device_id:segment.device_id,
+    const purpose=await this.speechPurpose?.({principal_id:segment.principal_id,device_id:segment.device_id,time_range:segment.time_range});
+    return {...base,...(purpose?{speech_purpose:purpose}:{}), input_contract: 'paios.media.selected-pcm.v1', principal_id:segment.principal_id,device_id:segment.device_id,
       ...(segment.device_type === 'phone' ? {identity_channel: 'phone_app' as const} :
         segment.device_type === 'glasses' || segment.device_type === 'mac' ? {identity_channel: segment.device_type} : {}),
       coverage: structuredClone(segment.coverage), ...(segment.speaker_carrier?{speaker_carrier:{...segment.speaker_carrier}}:{}),
@@ -202,7 +207,7 @@ export class MediaProcessor {
     const selectedViews = requestViews.map(({bytes, ...view}) => view);
     const selectedInputHash = digest({input_contract: prepared.input_contract, views: selectedViews});
     const policy={version:this.config.policy_version,allow_external:this.config.allow_external,
-      allow_replay:this.config.allow_replay,allow_partial:this.config.allow_partial};
+      allow_replay:this.config.allow_replay,allow_partial:this.config.allow_partial,...(prepared.speech_purpose?{speech_purpose:prepared.speech_purpose}:{})};
     let reuse:AudioReuseEvidence|undefined,reused:ProcessedEvent|undefined;
     if(reusedAudio){
       const oldKey=digest([reusedAudio.raw_ref,reusedAudio.segment_id,reusedAudio.revision]);
@@ -246,8 +251,9 @@ export class MediaProcessor {
     // The source-sealed request is the only input to provider availability. A callback
     // receives its own copy and cannot change selected bytes or the eventual consumer.
     const available=typeof capabilities==='function'?await capabilities(structuredClone(prepared)):capabilities;
-    const analyzedViews=reuse?views.filter(view=>view.chunk.modality==='visual'):views;
-    const selected=selectCapabilities(segment,analyzedViews,available,this.config);
+    const meeting=prepared.speech_purpose!==undefined;
+    const analyzedViews=meeting?views.filter(view=>view.chunk.modality==='audio'):reuse?views.filter(view=>view.chunk.modality==='visual'):views;
+    const selected=selectCapabilities(segment,analyzedViews,meeting?available.filter(c=>c.id==='local-sherpa-audio'):available,this.config);
     check(this.inflight+selected.length<=this.config.max_inflight,'MEDIA_BUSY',429);
     check(selected.every(c=>this.workers.has(c.id)),'MEDIA_WORKER_NOT_CONNECTED',503);
     const models=selected.map(c=>({id:c.id,version:c.version,evidence:c.evidence}));

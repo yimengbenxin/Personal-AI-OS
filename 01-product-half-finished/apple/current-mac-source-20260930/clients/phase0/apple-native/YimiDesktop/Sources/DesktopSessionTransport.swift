@@ -13,6 +13,7 @@ final class DesktopSessionTransport: DesktopTransport, @unchecked Sendable {
     private var readers: [UUID: Task<Void, Error>] = [:]
     private var files = Set<URL>(), retiredFiles = Set<URL>()
     private var finished = false
+    private var retiringHistory = false
     private var resetHandler: @Sendable () -> Void = {}
     private let temporary: URL
     init(room: SystemLiveKitRoomOperator, temporary: URL) throws {
@@ -49,7 +50,7 @@ final class DesktopSessionTransport: DesktopTransport, @unchecked Sendable {
               frame || reader.info.attributes["dir"] == "down" else { throw CentralTextError.invalidPacket }
         let id = UUID(), file = temporary.appendingPathComponent(UUID().uuidString)
         let wait: @Sendable () async throws -> Void = try lock.withLock {
-            guard !finished, readers.values.filter({ !$0.isCancelled }).count < 8 else { throw CentralTextError.unavailable }
+            guard !finished, !retiringHistory, readers.values.filter({ !$0.isCancelled }).count < 8 else { throw CentralTextError.unavailable }
             let frames = incomingFrames.continuation, downloads = incomingFiles.continuation
             if !frame { files.insert(file) }
             let task = Task {
@@ -108,4 +109,15 @@ final class DesktopSessionTransport: DesktopTransport, @unchecked Sendable {
         if ended { try FileManager.default.removeItem(at: temporary) }
     }
     func finish() { rotate(reopen: false) }
+    func retireHistoryFiles() async throws {
+        lock.withLock { retiringHistory = true }
+        defer { lock.withLock { retiringHistory = false } }
+        rotate(reopen: true)
+        try await removeTemporaryFiles()
+        let parent = temporary.deletingLastPathComponent()
+        for path in try FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil) {
+            try FileManager.default.removeItem(at: path)
+        }
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    }
 }

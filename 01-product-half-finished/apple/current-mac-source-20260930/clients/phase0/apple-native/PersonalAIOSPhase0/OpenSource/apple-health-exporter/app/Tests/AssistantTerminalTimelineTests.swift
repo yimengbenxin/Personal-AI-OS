@@ -3,6 +3,120 @@ import XCTest
 @testable import HealthKitExporter
 
 final class AssistantTerminalTimelineTests: XCTestCase {
+    func testProcessTimeZoneKeepsCachedForwardSyncAndSentReplyMerge() throws {
+        assertProcessTimeZone()
+        var seed = CentralTerminalState(); seed.bindOwner("owner")
+        _ = try seed.sync()
+        _ = try seed.accept(items([datedItem(100, at: "2026-10-25T00:05:00.000Z")], request: seed.requestID))
+        var state = CentralTerminalState(); try state.restore(seed.encodedCache()); state.attach()
+        var display = YimiConversationTimeline(items: [YimiItem(id: "local", kind: .me, text: "local draft",
+            date: Date(timeIntervalSince1970: 1_792_886_730), delivery: .sending)])
+        display.merge(state.timeline, ownerIdentity: "owner", includeLocal: false)
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: state.sync()) as? [String: Any])
+        XCTAssertEqual(request["after_seq"] as? Int, 100)
+        XCTAssertNil(request["before_seq"])
+        _ = try state.accept(items([
+            datedItem(101, at: "2026-10-25T00:06:00.000Z", text: "sent message"),
+            datedItem(102, at: "2026-10-25T07:05:00.000Z", kind: "yimi", text: "server reply")
+        ], request: state.requestID))
+        display.merge(state.timeline, ownerIdentity: "owner", includeLocal: false)
+        XCTAssertEqual(display.items.map(\.id), ["me-e100", "local", "me-e101", "me-e102"])
+        XCTAssertEqual(display.items.map(\.text), ["row 100", "local draft", "sent message", "server reply"])
+        XCTAssertEqual(display.items.map { $0.date.timeIntervalSince1970 },
+            [1_792_886_700, 1_792_886_730, 1_792_886_760, 1_792_911_900])
+        XCTAssertEqual(state.lastSeq, 102); XCTAssertNil(state.requestID)
+        var restored = CentralTerminalState(); try restored.restore(state.encodedCache())
+        XCTAssertEqual(restored.lastSeq, 102)
+        XCTAssertEqual(restored.timeline.items, state.timeline.items)
+        print("N15_TZ \(TimeZone.current.identifier) cached_forward_cursor=102 sent_reply_and_local_row=preserved")
+    }
+
+    func testProcessTimeZoneKeepsDSTHistoryPagingLiveRowsAndDeletion() throws {
+        assertProcessTimeZone()
+        var state = CentralTerminalState(); state.bindOwner("owner")
+        _ = try state.sync()
+        _ = try state.accept(items([datedItem(30, at: "2026-11-01T09:40:00.000Z")], request: state.requestID, more: true))
+        let older = try XCTUnwrap(state.loadOlder(before: 30))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: older) as? [String: Any])
+        XCTAssertEqual(fields["before_seq"] as? Int, 30); XCTAssertNil(fields["after_seq"])
+        let request = state.requestID
+        _ = try state.accept(items([datedItem(31, at: "2026-11-01T09:45:00.000Z", kind: "yimi", text: "live reply")]))
+        _ = try state.accept(packet("timeline_removed", ["seq": 32, "head_seq": 32, "has_more": false, "removed_seqs": [27]]))
+        _ = try state.accept(packet("timeline_items", ["request_id": try XCTUnwrap(request), "head_seq": 30,
+            "has_more": true, "items": [
+                datedItem(27, at: "2026-11-01T08:00:00.000Z", text: "deleted before page arrived"),
+                datedItem(28, at: "2026-11-01T08:30:00.000Z"),
+                datedItem(29, at: "2026-11-01T09:30:00.000Z")]]))
+        var display = YimiConversationTimeline(); display.merge(state.timeline, ownerIdentity: "owner", includeLocal: false)
+        XCTAssertEqual(display.items.compactMap(\.seq), [28, 29, 30, 31])
+        XCTAssertEqual(display.items.map { $0.date.timeIntervalSince1970 },
+            [1_793_521_800, 1_793_525_400, 1_793_526_000, 1_793_526_300])
+        XCTAssertEqual(display.items[1].date.timeIntervalSince(display.items[0].date), 3600)
+        XCTAssertEqual(display.items.last?.text, "live reply")
+        XCTAssertEqual(state.lastSeq, 32); XCTAssertNil(state.requestID); XCTAssertTrue(state.hasOlderHistory)
+        var restored = CentralTerminalState(); try restored.restore(state.encodedCache())
+        XCTAssertEqual(restored.timeline.items, display.items); XCTAssertEqual(restored.lastSeq, 32)
+        print("N15_TZ \(TimeZone.current.identifier) DST_instants_delta=3600 older_before=30 live_delete_cursor=32 rows=28,29,30,31")
+    }
+
+    func testProcessTimeZoneKeepsBootstrapAndWireTimestampsAbsolute() throws {
+        assertProcessTimeZone()
+        for timestamp in ["2026-10-25T00:05:00.000Z", "2026-10-25T00:05:00Z"] {
+            XCTAssertEqual(RealtimeControlValidation.parseTimestamp(timestamp)?.timeIntervalSince1970, 1_792_886_700)
+        }
+        for timestamp in ["2026-10-25T00:05:00.000", "2026-10-25T08:05:00.000+08:00"] {
+            XCTAssertNil(RealtimeControlValidation.parseTimestamp(timestamp))
+            XCTAssertThrowsError(try items([datedItem(1, at: timestamp)]))
+        }
+        print("N15_TZ \(TimeZone.current.identifier) bootstrap_epoch=1792886700 non_UTC_wire_rejected=true")
+    }
+
+    private func assertProcessTimeZone() {
+        if let identifier = ProcessInfo.processInfo.environment["TZ"] {
+            let expected = TimeZone(identifier: identifier)!
+            for epoch in [1_792_886_700.0, 1_793_525_400.0] {
+                let instant = Date(timeIntervalSince1970: epoch)
+                XCTAssertEqual(TimeZone.current.secondsFromGMT(for: instant), expected.secondsFromGMT(for: instant),
+                    "The process must actually use the injected time zone")
+            }
+        }
+    }
+
+    private func datedItem(_ seq: Int, at: String, kind: String = "owner", text: String? = nil) -> [String: Any] {
+        var value = item(seq, text ?? "row \(seq)")
+        value["at"] = at; value["kind"] = kind
+        return value
+    }
+
+    func testCacheWriterSkipsUnpersistedPacketsAndKeepsNewestVersionFence() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = CentralTerminalCacheWriter()
+        var state = CentralTerminalState(); state.bindOwner("owner")
+        _ = try state.accept(items([item(1)]))
+        try await writer.write(state, version: 1, to: url)
+        let savedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: savedDate], ofItemAtPath: url.path)
+        _ = try state.accept(packet("avatar_state", ["profile": avatar()]))
+        _ = try state.accept(packet("confirmations", ["items": []]))
+        _ = try state.accept(packet("terminal_receipt", ["control_id": "c1", "ok": true]))
+        try await writer.write(state, version: 3, to: url)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date, savedDate)
+        var stale = state
+        stale.timeline.upsert(YimiItem(id: "stale", kind: .her, text: "stale", date: .distantPast))
+        try await writer.write(stale, version: 2, to: url)
+        var restored = CentralTerminalState(); try restored.restore(Data(contentsOf: url))
+        XCTAssertEqual(restored.timeline.items.map(\.id), ["me-e1"])
+        _ = try state.accept(packet("timeline_removed", ["seq": 2, "head_seq": 2, "has_more": false, "removed_seqs": [1]]))
+        try await writer.write(state, version: 4, to: url)
+        try restored.restore(Data(contentsOf: url))
+        XCTAssertTrue(restored.timeline.items.isEmpty)
+        XCTAssertEqual(restored.lastSeq, 2)
+        try await writer.remove(version: 5, at: url)
+        try await writer.write(state, version: 6, to: url)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "Removal clears the persisted projection")
+    }
+
     func testOpeningLongHistoryStopsAfterOnePageAndReconnectRequestsOnlyNewer() throws {
         var state = CentralTerminalState()
         _ = try state.sync()

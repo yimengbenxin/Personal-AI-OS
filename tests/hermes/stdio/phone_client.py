@@ -43,7 +43,8 @@ async def main():
             assert not isinstance(starts[0], Exception) and isinstance(starts[1], Exception), starts
             assert not phone._stdio_children_dead()
             assert not phone._stdio_child_pids.intersection(mijia._stdio_child_pids)
-            started = await call('phone_task', {'goal': '从当前页面继续：核对合计并停在付款前', 'max_steps': 3, 'app': '千问', 'principal_id': 'synthetic-owner'})
+            started = await call('phone_task', {'goal': '从当前页面继续：核对合计并停在付款前', 'max_steps': 3, 'app': '千问', 'principal_id': 'synthetic-owner',
+                                               'effect': {'kind': 'read', 'task_type': 'stdio_checkout_probe', 'requested': True}})
             assert started['status'] == 'started', started
             concurrent = await call('phone_status', {'principal_id': 'synthetic-owner'})
             terminal = out / 'spool' / (started['job_id'] + '.done.json')
@@ -73,7 +74,6 @@ async def main():
             report.update(children=[{'pid': p.pid, 'exit_status': p.returncode, 'args': args} for p, args in spawned],
                           stderr=(out / 'logs/mcp-stderr.log').read_text())
             print(json.dumps(report, ensure_ascii=False))
-        assert 'tzlocal' in report['stderr'], report
         assert next(p.returncode for p, args in spawned if 'phone_server.py' in args[-1]) == 0
 
 asyncio.run(main())

@@ -1,0 +1,616 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:paios:presentation:1",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "target_device_id",
+        "kind",
+        "app_bundle_id",
+        "document_id",
+        "file_identity",
+        "file_url",
+        "display_name"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "target_device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "keynote-local"
+        },
+        "app_bundle_id": {
+          "const": "com.apple.iWork.Keynote"
+        },
+        "document_id": {
+          "$ref": "#/$defs/id"
+        },
+        "file_identity": {
+          "$ref": "#/$defs/id"
+        },
+        "file_url": {
+          "type": "string",
+          "pattern": "^file:///[^?#]+\\.key/?$",
+          "maxLength": 4096
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "target_device_id",
+        "image_ref",
+        "sha256",
+        "mime",
+        "width",
+        "height",
+        "window_id",
+        "captured_at",
+        "expires_at"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "target_device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "image_ref": {
+          "type": "string",
+          "pattern": "^mac-image:[A-Za-z0-9_-]+$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "mime": {
+          "const": "image/jpeg"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "window_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "captured_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/utc"
+        }
+      }
+    },
+    "element": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "element_id",
+        "kind",
+        "text",
+        "text_sha256",
+        "bbox",
+        "text_style_ref"
+      ],
+      "properties": {
+        "element_id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "table_cell"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "text_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "bbox": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "text_style_ref": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "target",
+        "deck_revision",
+        "captured_at",
+        "clock_uncertainty_ms",
+        "presentation_id",
+        "mode",
+        "slide_id",
+        "slide_number",
+        "page_source",
+        "cross_check",
+        "image",
+        "elements"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "deck_revision": {
+          "$ref": "#/$defs/hash"
+        },
+        "captured_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "clock_uncertainty_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "presentation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "mode": {
+          "enum": [
+            "editing",
+            "slideshow"
+          ]
+        },
+        "slide_id": {
+          "$ref": "#/$defs/id"
+        },
+        "slide_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "page_source": {
+          "enum": [
+            "slideshow_state",
+            "document_selection"
+          ]
+        },
+        "cross_check": {
+          "enum": [
+            "matched",
+            "unavailable",
+            "ambiguous"
+          ]
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/image"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elements": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/element"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "slideshow"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "page_source": {
+                "const": "slideshow_state"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "edit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_item_id",
+        "slide_id",
+        "slide_number",
+        "element_id",
+        "op",
+        "before_text_sha256",
+        "after_text",
+        "basis_refs"
+      ],
+      "properties": {
+        "work_item_id": {
+          "$ref": "#/$defs/id"
+        },
+        "slide_id": {
+          "$ref": "#/$defs/id"
+        },
+        "slide_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "element_id": {
+          "$ref": "#/$defs/id"
+        },
+        "op": {
+          "enum": [
+            "replace_text",
+            "append_paragraph"
+          ]
+        },
+        "before_text_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "after_text": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "basis_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "plan_id",
+        "revision",
+        "plan_sha256",
+        "target",
+        "scope_session_id",
+        "base_deck_revision",
+        "workflow",
+        "edits",
+        "preview_items"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "plan_id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "scope_session_id": {
+          "$ref": "#/$defs/id"
+        },
+        "base_deck_revision": {
+          "$ref": "#/$defs/hash"
+        },
+        "workflow": {
+          "const": "local_review_then_project"
+        },
+        "edits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/edit"
+          }
+        },
+        "preview_items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal_id",
+        "grant_id",
+        "confirmation_id",
+        "scope_session_id",
+        "target_id",
+        "target_device_id",
+        "operation_kind",
+        "valid_until",
+        "plan_sha256"
+      ],
+      "properties": {
+        "grant_id": {
+          "$ref": "#/$defs/id"
+        },
+        "confirmation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "scope_session_id": {
+          "$ref": "#/$defs/id"
+        },
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "target_device_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_kind": {
+          "const": "document.text.update"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/utc"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "principal_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "work_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "state",
+        "effect_refs"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "running",
+            "waiting",
+            "succeeded",
+            "partial",
+            "unknown",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "effect_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "slide_id": {
+          "$ref": "#/$defs/id"
+        },
+        "slide_number": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "edit_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "operation_id",
+        "target",
+        "plan_sha256",
+        "revision",
+        "items",
+        "checks",
+        "review_status"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/work_item"
+          }
+        },
+        "file_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "saved_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "review_status": {
+          "const": "awaiting_owner"
+        },
+        "error_code": {
+          "$ref": "#/$defs/id"
+        },
+        "checks": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/read_back"
+          }
+        }
+      }
+    },
+    "snapshot_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "shared_window_id"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "shared_window_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "apply_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "plan",
+        "execution",
+        "idempotency_key"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "plan": {
+          "$ref": "#/$defs/plan"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "status_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "operation_id"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "read_back": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_item_id",
+        "before_text_sha256",
+        "after_text_sha256",
+        "saved_at",
+        "read_back_at",
+        "evidence_ref"
+      ],
+      "properties": {
+        "work_item_id": {
+          "$ref": "#/$defs/id"
+        },
+        "before_text_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "after_text_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "saved_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "read_back_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    }
+  }
+}

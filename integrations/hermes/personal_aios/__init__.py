@@ -59,9 +59,12 @@ class PersonalAIOSProvider(MemoryProvider):
         from gateway.run_scope import current_scope
         if current_scope() != "owner":
             return ""
-        return '\n\n'.join(f"{name}（平台核心档案，只读）\n{text}"
+        core = '\n\n'.join(f"{name}（平台核心档案，只读）\n{text}"
             for name in ('USER.md', 'MEMORY.md')
-            if (text := (self.profile_home / 'memories' / name).read_text()))
+            if (path := self.profile_home / 'memories' / name).is_file() and (text := path.read_text()))
+        # Same platform-owned, read-only volume; no native/persona writer owns this document.
+        zone = self.profile_home / 'memories' / 'PERSONALITY.md'
+        return '\n\n'.join(part for part in (core, zone.read_text() if zone.exists() else '') if part)
 
     def _request(self, path, body=None, max_bytes=1048576):
         if not self.is_available():

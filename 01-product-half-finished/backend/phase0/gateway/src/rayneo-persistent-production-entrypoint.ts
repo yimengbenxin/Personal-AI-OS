@@ -40,7 +40,7 @@ export function reportPersistentExecutionError(error:unknown){
     .filter(line=>/^\s+at /.test(line)).slice(0,3).map(line=>line.trim().slice(3).replace(/(?:file:\/\/)?\/[^\s()]*?\/(?=01-product-half-finished\/|node_modules\/)/g,'')
       .replace(/[^\w.$<>/:() -]/g,'').slice(0,160)):[];
   emitRuntimeEvent({...admission?{continuous_pcm_admission:report.continuous_pcm_admission,code,
-    ...(typeof report.stream_key==='string'&&/^[a-f0-9]{64}$/.test(report.stream_key)?{stream_key:report.stream_key}:{})}:{central_text_failed:code,...(frames.length?{at:frames}:{})},
+    ...(typeof report.stream_key==='string'&&/^[a-f0-9]{64}$/.test(report.stream_key)?{stream_key:report.stream_key}:{})}:{central_text_failed:code,...(frames.length?{frames}:{})},
     ...(causeCodes.size?{cause_codes:[...causeCodes]}:{})});
 }
 
@@ -1013,8 +1013,6 @@ export async function createPersistentPublicControlOwnerHandoff(
     port: clockPort,
     readiness: productionReadiness('T01.clock', true),
   });
-  // The paired-device table is the one device authority: bearer, lease policy, ownership, E2EE recipient.
-  const devices = await createPairedTerminalAuthorities({ pool: input.pool, now, ownerUserId:input.policy.userId });
   const avatarLooks=input.productResources?.configuration.avatar_looks;
   let avatar:ReturnType<typeof createAvatarProfileService>|undefined;
   let appearanceImages:ReturnType<typeof createAppearanceImages>|undefined;
@@ -1030,6 +1028,9 @@ export async function createPersistentPublicControlOwnerHandoff(
   const ownerMac=process.env.PAIOS_OWNER_MAC_ROOT?createOwnerMacSsh({pool:input.pool,root:process.env.PAIOS_OWNER_MAC_ROOT,
     relay:JSON.parse(readFileSync(process.env.PAIOS_OWNER_MAC_RELAY_FILE!,'utf8')) as MacRelayConfiguration,
     paused:deviceId=>sharedExecution?.desktop?.paused(deviceId)}):undefined;
+  // Read owner-Mac configuration before borrowing the paired-device LISTEN client.
+  // The paired-device table is the one device authority: bearer, lease policy, ownership, E2EE recipient.
+  const devices = await createPairedTerminalAuthorities({ pool: input.pool, now, ownerUserId:input.policy.userId });
   const stopRevoked = devices.onRevoked(async deviceId=>{await Promise.all([participants.get(deviceId)?.disconnect(),ownerMac?.revoked(deviceId)]);});
   const executionByDevice = new Map<string, Awaited<ReturnType<typeof createPersistentPublicExecutionOwner>>>();
   const viduRetrieval:ViduRetrieval=new Map();

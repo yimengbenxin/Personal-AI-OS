@@ -1,6 +1,6 @@
 {
   "name": "qwen-audio-embedded-source-candidate",
-  "version": "0.0.2",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",

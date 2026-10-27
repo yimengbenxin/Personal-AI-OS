@@ -43,9 +43,42 @@ def publish(attempt):
         with urlopen(request, timeout=15) as response:
             response.read(65536)
     except (HTTPError, URLError, TimeoutError) as error:
+        # The service answers {"error":{"code":...}}; keep it so a refusal names the contract check that fired.
+        detail = f'{error.code} {error.read(512).decode("utf-8", "replace")}' if isinstance(error, HTTPError) else type(error).__name__
         if attempt.get('phase') == 'started':
-            raise RuntimeError('MODEL_USAGE_START_UNAVAILABLE') from error
-        logging.getLogger(__name__).error('MODEL_USAGE_DELIVERY_FAILED attempt=%s error=%s', attempt['attempt_id'], type(error).__name__)
+            raise RuntimeError('MODEL_USAGE_START_UNAVAILABLE ' + detail) from error
+        logging.getLogger(__name__).error('MODEL_USAGE_DELIVERY_FAILED attempt=%s error=%s', attempt['attempt_id'], detail)
+
+
+def _usage_numbers(usage, protocol):
+    # Protocol details precede compatibility aliases. A reported zero wins; an absent counter stays absent.
+    if protocol == 'messages':
+        fields = {'input_tokens': ('input_tokens',), 'output_tokens': ('output_tokens',),
+                  'cache_read_input_tokens': ('cache_read_input_tokens',),
+                  'cache_creation_input_tokens': ('cache_creation_input_tokens',),
+                  'reasoning_tokens': ('reasoning_tokens',)}
+    elif protocol == 'responses':
+        fields = {'input_tokens': ('input_tokens',), 'output_tokens': ('output_tokens',),
+                  'cached_tokens': ('input_tokens_details.cached_tokens', 'cache_read_input_tokens', 'cached_tokens'),
+                  'cache_creation_input_tokens': ('input_tokens_details.cache_write_tokens',
+                      'input_tokens_details.cache_creation_tokens', 'cache_creation_input_tokens', 'cache_write_tokens'),
+                  'reasoning_tokens': ('output_tokens_details.reasoning_tokens', 'reasoning_tokens')}
+    else:
+        fields = {'prompt_tokens': ('prompt_tokens', 'input_tokens'), 'completion_tokens': ('completion_tokens', 'output_tokens'),
+                  'cached_tokens': ('prompt_tokens_details.cached_tokens', 'cache_read_input_tokens', 'prompt_cache_hit_tokens', 'cached_tokens'),
+                  'cache_creation_input_tokens': ('prompt_tokens_details.cache_write_tokens',
+                      'prompt_tokens_details.cache_creation_input_tokens', 'cache_creation_input_tokens', 'cache_write_tokens'),
+                  'reasoning_tokens': ('completion_tokens_details.reasoning_tokens', 'reasoning_tokens')}
+    numbers = {}
+    for key, paths in fields.items():
+        for path in paths:
+            value = usage
+            for part in path.split('.'):
+                value = value.get(part) if isinstance(value, dict) else None
+            if type(value) is int and value >= 0:
+                numbers[key] = value
+                break
+    return numbers
 
 
 class _Attempt:
@@ -66,6 +99,7 @@ class _Attempt:
             'model_id': body['model'], 'base_url': providers[0][1]['api'], 'captured_at': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
             'input_tokens': None, 'output_tokens': None, 'cost': {'kind': 'unknown', 'amount': None, 'currency': 'CNY'}}
         self.pending = b''
+        self.protocol = request.url.path.rsplit('/', 1)[-1]
         self.usage = {}
         self.done = False
         self.complete = False
@@ -84,12 +118,7 @@ class _Attempt:
             self.complete = True
         usage = value.get('usage') or value.get('response', {}).get('usage') or value.get('message', {}).get('usage')
         if usage:
-            numbers = {**usage, 'cached_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
-                       'reasoning_tokens': (usage.get('completion_tokens_details') or {}).get('reasoning_tokens')}
-            for key in ('prompt_tokens', 'completion_tokens', 'input_tokens', 'output_tokens',
-                        'cache_read_input_tokens', 'cache_creation_input_tokens', 'cached_tokens', 'reasoning_tokens'):
-                if isinstance(number := numbers.get(key), int) and not isinstance(number, bool) and number >= 0:
-                    self.usage[key] = number
+            self.usage.update(_usage_numbers(usage, self.protocol))
 
 
     def feed(self, chunk):

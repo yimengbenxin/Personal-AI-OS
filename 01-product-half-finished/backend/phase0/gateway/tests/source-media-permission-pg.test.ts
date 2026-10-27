@@ -19,6 +19,7 @@ import { StreamArchive, type TrackChunk } from '../../../services/personal-aios-
 import { MediaService } from '../../../services/personal-aios-integration/src/media/service.ts';
 import { MediaProcessor } from '../../../services/personal-aios-integration/src/media/processing.ts';
 import { digest, sha256, type RawEvent, type TrustedContext } from '../../../services/personal-aios-integration/src/contracts.ts';
+import {fileURLToPath} from 'node:url';
 const poolFor = (url: string) => {
   const value = new URL(url);
   const pool = createPostgresPool({ host: value.hostname, port: Number(value.port), database: value.pathname.slice(1),
@@ -124,7 +125,7 @@ if (process.env.PAIOS_MEDIA_CHILD_URL) {
         createTransportAlias: ({ requestId }) => 'alias-' + requestId,
         createConnectionId: ({ requestId }) => 'connection-' + requestId } });
     const child = async () => {
-      const proc = spawn(process.execPath, [new URL(import.meta.url).pathname],
+      const proc = spawn(process.execPath, [fileURLToPath(import.meta.url)],
         { env: { ...process.env, PAIOS_MEDIA_CHILD_URL: url.href, PAIOS_MEDIA_CHILD_ARCHIVE:archiveDirectory }, stdio: ['ignore', 'pipe', 'pipe'] });
       let result = ''; let errors = '';
       proc.stdout.on('data', (chunk) => { result += chunk; }); proc.stderr.on('data', (chunk) => { errors += chunk; });

@@ -9,6 +9,7 @@ import {openOwnerDatabase,inTransaction} from '../owner-db.ts';
 import {hasTerminalCapability,type RegisteredDevice} from '../source-authority.ts';
 import type {VoiceprintRegistry} from '../voiceprint/registry.ts';
 import {prepareVisualImage,VISUAL_IMAGE_BYTES,type FaceEngine} from './image.ts';
+import {VisualEmbeddingSpaces,type EmbeddingSpace,type EmbeddingProvider,type EmbeddingCandidate} from './embedding-spaces.ts';
 
 export const VISUAL_INGEST_LIMITS=Object.freeze({active_jobs:1,image_bytes:VISUAL_IMAGE_BYTES});
 
@@ -28,10 +29,11 @@ export const DEFAULT_CAMERA_CAPTURE_POLICY: Readonly<CameraCapturePolicy> = Obje
 export class CameraCapturePolicies {
   private readonly flights=new Map<string,Promise<unknown>>();private readonly active=new Map<string,Set<AbortController>>();
   private readonly records=new Map<string,Promise<CameraCapturePolicy>>();private readonly lastCapture=new Map<string,number>();
+  private readonly leases=new Map<string,{purpose:string;until:number;interval:number}>();
   private readonly statuses=new Map<string,{principal_id:string;device_id:string;device_type:RegisteredDevice['device_type'];status:'available'|'paused'|'unavailable'|'error';error:string|null}>();
   private readonly storage:import('../storage.ts').StoragePort; private readonly now:()=>number;
   constructor(storage:import('../storage.ts').StoragePort,now:()=>number=Date.now) {this.storage=storage;this.now=now;}
-  private key(source:RegisteredDevice):string {
+  private key(source:Pick<RegisteredDevice,'principal_id'|'device_id'>):string {
     return digest({principal_id:source.principal_id,device_id:source.device_id});
   }
   private async serial<T>(key:string,consume:()=>Promise<T>):Promise<T> {
@@ -51,7 +53,13 @@ export class CameraCapturePolicies {
     await this.storage.replace('camera-capture-policy',key,Buffer.from(canonical({policy})));
     this.records.set(key,Promise.resolve(policy));
   }
-  async policyForConnect(source:RegisteredDevice):Promise<CameraCapturePolicy> {return this.record(this.key(source));}
+  async policyForConnect(source:RegisteredDevice):Promise<CameraCapturePolicy> {
+    const key=this.key(source),policy=await this.record(key),lease=this.leases.get(key);
+    if(!lease)return policy;if(this.now()>=lease.until||!policy.enabled||policy.private_paused){this.leases.delete(key);return policy;}
+    return {...policy,interval_ms:Math.min(policy.interval_ms,lease.interval)};
+  }
+  lease(source:RegisteredDevice,purpose:string,until:number,interval=1000){check(Number.isFinite(until)&&interval>=1000,'CAMERA_LEASE_INVALID');this.leases.set(this.key(source),{purpose,until,interval});}
+  releaseLease(source:Pick<RegisteredDevice,'principal_id'|'device_id'>,purpose:string){if(this.leases.get(this.key(source))?.purpose===purpose)this.leases.delete(this.key(source));}
   reportStatus(source:RegisteredDevice,status:'available'|'paused'|'unavailable'|'error',error:string|null):void {
     this.statuses.set(this.key(source),{principal_id:source.principal_id,device_id:source.device_id,device_type:source.device_type,status,error});
   }
@@ -60,7 +68,7 @@ export class CameraCapturePolicies {
   }
   async set(source:RegisteredDevice,patch:Partial<CameraCapturePolicy>):Promise<CameraCapturePolicy> {
     const key=this.key(source);
-    if(patch.private_paused===true||patch.enabled===false)this.pause(source);
+    if(patch.private_paused===true||patch.enabled===false){this.leases.delete(key);this.pause(source);}
     return this.serial(key,async()=>{
       const policy={...await this.record(key),...patch};
       await this.save(key,policy);return policy;
@@ -76,7 +84,7 @@ export class CameraCapturePolicies {
     else {const controllers=this.active.get(key)??new Set<AbortController>();controllers.add(controller);this.active.set(key,controllers);}
     try {
       await this.serial(key,async()=>{
-        const policy=await this.record(key);
+        const policy=await this.policyForConnect(source);
         check(policy.enabled && !policy.private_paused && frame.private_paused===false,'CAMERA_CAPTURE_PAUSED',403);
         check(!needsWear||frame.worn===true,'CAMERA_NOT_WORN',403);
         check(policy.triggers.includes(frame.trigger),'CAMERA_TRIGGER_DENIED',403);
@@ -91,6 +99,7 @@ export class CameraCapturePolicies {
 }
 
 export interface VisualModels {
+  embeddingSpace?:EmbeddingSpace;
   embedImage(bytes:Buffer,signal?:AbortSignal):Promise<number[]>;embedQuery(text:string):Promise<number[]>;
   describe(bytes:Buffer,signal?:AbortSignal,context?:import('../hermes-client.ts').ModelSourceContext):Promise<{caption:string;ocr:string}>;
 }
@@ -134,12 +143,16 @@ const bounds=(args:{from?:unknown;until?:unknown})=>{
 export class VisualMemory {
   private active:Promise<unknown>=Promise.resolve();private readonly captures=new Set<{principal:string;at:number;controller:AbortController;pending?:Promise<unknown>;admission?:boolean}>();private closed=false;
   private readonly deletions=new Set<Promise<unknown>>();
+  private readonly embeddingSpaces:VisualEmbeddingSpaces|undefined;
+  private readonly queries=new Set<Promise<void>>();
   private indexingBytes=0;private indexing=false;private closing:Promise<void>|undefined;
   resourceSnapshot(){return {active_jobs:Number(this.indexing),input_bytes:this.indexingBytes,limits:VISUAL_INGEST_LIMITS};}
   private readonly db:DatabaseSync;readonly directory:string;private readonly models:VisualModels;private rawArchive:RawArchive|undefined;
   readonly retention:VisualRetention;private readonly people:VoiceprintRegistry|undefined;private readonly faces:FaceEngine|undefined;private readonly cold:ColdVisualPort|undefined;
   private constructor(db:DatabaseSync,directory:string,models:VisualModels,retention:VisualRetention,people?:VoiceprintRegistry,faces?:FaceEngine,cold?:ColdVisualPort){
     this.db=db;this.directory=directory;this.models=models;this.retention=retention;this.people=people;this.faces=faces;this.cold=cold;
+    check(models.embeddingSpace||!db.prepare("SELECT 1 FROM meta WHERE key='embedding_active'").get(),'VISUAL_EMBEDDING_SPACE_REQUIRED',503);
+    this.embeddingSpaces=models.embeddingSpace?new VisualEmbeddingSpaces(db,models as EmbeddingProvider):undefined;
   }
   static async open(directory:string,models:VisualModels,retention:Partial<VisualRetention>={},people?:VoiceprintRegistry,faces?:FaceEngine,cold?:ColdVisualPort,archive?:RawArchive) {
     const days=retention.retention_days??2,policy={retention_days:days,max_bytes:Math.ceil(days*513*1024*1024),...retention};
@@ -160,6 +173,19 @@ export class VisualMemory {
       const ready=db.prepare("SELECT 1 FROM frames WHERE frame_key=? AND state='ready'");await people?.pruneFaceEvidence(key=>Boolean(ready.get(key)));
       return store;
     }catch(error){people?.setVisualMemory(undefined);db.close();throw error;}
+  }
+  embeddingSpaceInfo(){return this.embeddingSpaces?.info();}
+  prepareEmbeddingSpace(models:EmbeddingProvider,signal?:AbortSignal,onProgress?:(value:{done:number;total:number})=>void){
+    return this.deleting(async()=>{check(this.embeddingSpaces,'VISUAL_EMBEDDING_SPACE_REQUIRED',503);
+      return this.embeddingSpaces.prepare(models,(principal,key)=>this.imageBytes(principal,key),signal,onProgress);});
+  }
+  activateEmbeddingSpace(candidate:EmbeddingCandidate){
+    check(!this.closed&&!this.closing,'VISUAL_CLOSED',503);check(!this.indexing,'VISUAL_EMBEDDING_INGEST_BUSY',409);
+    check(this.embeddingSpaces,'VISUAL_EMBEDDING_SPACE_REQUIRED',503);this.embeddingSpaces.activate(candidate);
+  }
+  preparePreviousEmbeddingSpace(models:EmbeddingProvider,signal?:AbortSignal){
+    return this.deleting(async()=>{check(this.embeddingSpaces,'VISUAL_EMBEDDING_SPACE_REQUIRED',503);
+      return this.embeddingSpaces.preparePrevious(models,(principal,key)=>this.imageBytes(principal,key),signal);});
   }
   bindArchive(archive:RawArchive):void {
     check(!this.rawArchive||this.rawArchive===archive,'VISUAL_ARCHIVE_AUTHORITY_CONFLICT',500);this.rawArchive=archive;
@@ -262,7 +288,9 @@ export class VisualMemory {
       return {key,keyframe,at};});
       if('status' in reservation)return {...reservation,people:[]};
       signal.throwIfAborted();
-      const embedding=new Float32Array(await this.models.embedImage(prepared.thumbnail,signal));signal.throwIfAborted();
+      const space=this.embeddingSpaces?.snapshot();let values:number[];
+      try{values=await (space?.provider??this.models).embedImage(prepared.thumbnail,signal);}finally{space?.release();}
+      const embedding=space?this.embeddingSpaces!.vector(values,space.provider.embeddingSpace):new Float32Array(values);signal.throwIfAborted();
       const description=reservation.keyframe?await this.models.describe(frame.image,signal,{kind:'capture',raw_ref:archived.raw_ref,archive_revision:archived.archive_revision,principal_id:principal,device_id:device}):{caption:'',ocr:''};signal.throwIfAborted();
       return await this.run(async()=>{
         signal.throwIfAborted();
@@ -272,18 +300,22 @@ export class VisualMemory {
         await this.rawArchive!.locate(archived!.raw_ref,principal);
         check(this.db.prepare('SELECT 1 FROM capture_refs WHERE raw_ref=? AND owner_delete=0').get(archived!.raw_ref),'VISUAL_DELETED',409);
         inTransaction(this.db,()=>{
-          this.db.prepare('INSERT INTO vectors(rowid,embedding,principal_id,captured_ms) VALUES(?,?,?,?)').run(rowid!,embedding,principal,BigInt(reservation.at));
+          if(space)this.embeddingSpaces!.assertCurrent(space.generation);
+          this.db.prepare(`INSERT INTO ${space?.generation??'vectors'}(rowid,embedding,principal_id,captured_ms) VALUES(?,?,?,?)`).run(rowid!,embedding,principal,BigInt(reservation.at));
           this.db.prepare("UPDATE frames SET state='ready',caption=?,ocr=? WHERE id=?").run(description.caption,description.ocr,rowid!);
         });
         return {status:'kept',frame_id:frame.frame_id,visual_frame_id:reservation.key,keyframe:reservation.keyframe,people};});
     }catch(error){if(signal.aborted&&signal.reason instanceof ContractError&&signal.reason.code==='VISUAL_DELETED'&&archived)await this.rawArchive!.delete(archived.raw_ref,principal);if(rowid!==undefined)await this.run(async()=>{this.db.prepare("UPDATE frames SET state='deleting' WHERE frame_key=?").run(key!);await this.finishDeletes();});signal.throwIfAborted();throw error;}
   }
   async recall(principal:string,args:{query?:unknown;from?:unknown;until?:unknown;limit?:unknown}) {
-    check(!this.closed,'VISUAL_CLOSED',503);const {from,until}=bounds(args),limit=args.limit??5;
+    check(!this.closed&&!this.closing,'VISUAL_CLOSED',503);const {from,until}=bounds(args),limit=args.limit??5;
     check(Number.isSafeInteger(limit)&&Number(limit)>=1&&Number(limit)<=50,'VISUAL_LIMIT_INVALID');
     check(args.query===undefined||typeof args.query==='string'&&args.query.trim().length>0&&args.query.length<=200,'VISUAL_QUERY_INVALID');
-    const personFrames=args.query?await this.people?.frameIdsForPerson(args.query as string):undefined;
-    const embedding=args.query&&!personFrames?new Float32Array(await this.models.embedQuery(args.query as string)):undefined;check(!this.closed,'VISUAL_CLOSED',503);
+    const done=Promise.withResolvers<void>();this.queries.add(done.promise);let space:ReturnType<VisualEmbeddingSpaces['snapshot']>|undefined;
+    try {
+    const personFrames=args.query?await this.people?.frameIdsForPerson(args.query as string):undefined;space=this.embeddingSpaces?.snapshot();
+    const values=args.query&&!personFrames?await (space?.provider??this.models).embedQuery(args.query as string):undefined;
+    const embedding=values?(space?this.embeddingSpaces!.vector(values,space.provider.embeddingSpace):new Float32Array(values)):undefined;check(!this.closed,'VISUAL_CLOSED',503);
     const scores=new Map<number,number>(),add=(ids:number[])=>ids.forEach((id,index)=>scores.set(id,(scores.get(id)??0)+1/(60+index)));
     if(personFrames)add((this.db.prepare("SELECT id FROM frames WHERE principal_id=? AND captured_ms>=? AND captured_ms<? AND state='ready' AND frame_key IN (SELECT value FROM json_each(?)) ORDER BY captured_ms DESC LIMIT 100")
       .all(principal,from,until,JSON.stringify(personFrames)) as {id:number}[]).map(r=>r.id));
@@ -293,7 +325,7 @@ export class VisualMemory {
       const params=fts?[terms.map(t=>'"'+t.replaceAll('"','""')+'"').join(' AND ')]:terms.map(t=>'%'+t.replace(/[\\%_]/gu,'\\$&')+'%');
       add((this.db.prepare(`SELECT f.id FROM frames f WHERE f.principal_id=? AND f.captured_ms>=? AND f.captured_ms<? AND f.state='ready' AND ${clause} ORDER BY f.captured_ms DESC LIMIT 100`)
         .all(principal,from,until,...params) as {id:number}[]).map(r=>r.id));
-      add((this.db.prepare('SELECT rowid FROM vectors WHERE embedding MATCH ? AND k=100 AND principal_id=? AND captured_ms>=? AND captured_ms<? ORDER BY distance')
+      add((this.db.prepare(`SELECT rowid FROM ${space?.generation??'vectors'} WHERE embedding MATCH ? AND k=100 AND principal_id=? AND captured_ms>=? AND captured_ms<? ORDER BY distance`)
         .all(embedding!,principal,BigInt(from),BigInt(until)) as {rowid:number}[]).map(r=>r.rowid));
     }else add((this.db.prepare("SELECT id FROM frames WHERE principal_id=? AND captured_ms>=? AND captured_ms<? AND state='ready' ORDER BY captured_ms DESC LIMIT 100")
       .all(principal,from,until) as {id:number}[]).map(r=>r.id));
@@ -306,6 +338,7 @@ export class VisualMemory {
       if(this.db.prepare("SELECT 1 FROM frames WHERE frame_key=? AND state='ready'").get(row.frame_key))entries.push({frame_id:row.frame_key,...(row.raw_ref?{raw_ref:row.raw_ref,archive_revision:row.archive_revision}:{}),at:new Date(row.captured_ms).toISOString(),caption:row.caption,ocr:row.ocr,place:row.place,people});
     }
     return {frames:entries,truncated:scores.size>Number(limit)};
+    }finally{try{space?.release();}finally{this.queries.delete(done.promise);done.resolve();}}
   }
   get faceRecognitionAvailable(){return Boolean(this.people&&this.faces);}
   async imageBytes(principal:string,frame_id:string,full=false):Promise<Buffer> {
@@ -383,9 +416,10 @@ export class VisualMemory {
     for(const row of available)for(const path of [row.owner_delete?row.original:'',row.thumbnail].filter(Boolean))await unlink(join(this.directory,path)).catch(error=>{if(error.code!=='ENOENT')throw error;});
     const directory=await open(join(this.directory,'frames'),'r');try{await directory.sync();}finally{await directory.close();}
     inTransaction(this.db,()=>{for(const row of available){if(row.cold_ref)this.db.prepare('INSERT OR IGNORE INTO cold_deletes(reference) VALUES(?)').run(row.cold_ref);
-      this.db.prepare('DELETE FROM vectors WHERE rowid=?').run(BigInt(row.id));this.db.prepare('DELETE FROM frames WHERE id=?').run(row.id);}});
+      if(this.embeddingSpaces)this.embeddingSpaces.deleteRow(row.id);else this.db.prepare('DELETE FROM vectors WHERE rowid=?').run(BigInt(row.id));
+      this.db.prepare('DELETE FROM frames WHERE id=?').run(row.id);}});
   }
   close(){return this.closing??=(async()=>{for(const capture of this.captures)capture.controller.abort(new ContractError('VISUAL_CLOSED',503));
-    await Promise.allSettled([...this.captures].map(c=>c.pending!));await Promise.allSettled([...this.deletions]);this.closed=true;
-    try{await this.active.catch(()=>{});}finally{this.people?.setVisualMemory(undefined);if(this.db.isOpen)this.db.close();}})();}
+    await Promise.allSettled([...this.captures].map(c=>c.pending!));await Promise.allSettled([...this.deletions]);await Promise.all([...this.queries]);this.closed=true;
+    try{await this.active.catch(()=>{});await this.embeddingSpaces?.close();}finally{this.people?.setVisualMemory(undefined);if(this.db.isOpen)this.db.close();}})();}
 }

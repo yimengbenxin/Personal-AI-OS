@@ -48,7 +48,7 @@ def test_fake_stdio_contract_and_call_journal(tmp_path):
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
             assert set(tools) == {'prepare_login', 'get_login_status', 'refresh_devices',
                                  'read_device', 'control_device', 'run_scene'}
-            assert set(tools['control_device'].input_schema['properties']) == {'device', 'home', 'room', 'service', 'property', 'value', 'action', 'arguments', 'owner_requested'}
+            assert set(tools['control_device'].input_schema['properties']) == {'device', 'home', 'room', 'service', 'property', 'value', 'action', 'arguments', 'owner_requested', 'idempotency_key'}
             qr = await invoke(client, 'prepare_login')
             assert qr['qr_markdown'] == '![米家登录二维码](qr:https://example.invalid/staging-mijia-login)'
             assert (await invoke(client, 'get_login_status'))['status'] in {'connected', 'waiting_for_scan'}
@@ -338,7 +338,7 @@ def test_scene_stops_after_uncertain_write_and_does_not_retry(tmp_path, monkeypa
         step = {'device': '客厅灯', 'service': 'light', 'property': 'on', 'value': True}
         result = await invoke(server, 'run_scene', name='断网', steps=[step, step])
         assert result == {'scene': '断网', 'results': [
-            {'status': 'outcome_unknown', 'error': 'mijia_request_failed'}], 'status': 'incomplete'}
+            {'status': 'outcome_unknown', 'error': 'mijia_request_failed', 'device_id': '0'}], 'status': 'incomplete'}
         assert len(dispatched) == 1
         assert json.loads((tmp_path / 'actions.jsonl').read_text())['result'] == 'outcome_unknown'
     asyncio.run(run())

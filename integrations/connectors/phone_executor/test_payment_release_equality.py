@@ -65,6 +65,7 @@ def load_guard(source, name):
 async def observe(module, nodes, cashier, action, args):
     dispatch = mock.AsyncMock()
     guard = module.CheckoutStop(SimpleNamespace(**{action: dispatch}), None)
+    guard.capture_unresolved = False  # Compare the released input matrix with established geometry.
     refusal = None
     with mock.patch.object(guard, '_seen', mock.AsyncMock(return_value=nodes)), \
             mock.patch.object(module, '_at_checkout', return_value=cashier, create=True):

@@ -207,6 +207,9 @@ final class AssistantLocalOperationDatabase: AppleLocalPendingCaching, @unchecke
             try db.execute(sql: "CREATE TABLE move_outbox (id TEXT PRIMARY KEY NOT NULL, identity TEXT NOT NULL, payload BLOB NOT NULL)")
             try db.execute(sql: "CREATE TABLE move_checkpoint (identity TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL)")
         }
+        migrator.registerMigration("v5_outstanding_qwen_index") { db in
+            try db.execute(sql: "CREATE INDEX local_operations_outstanding_qwen ON local_operations (kind) WHERE kind = 'qwen_handoff' AND state != 'completed'")
+        }
         try migrator.migrate(queue)
         try queue.write { db in
             try pruneCompletedOperations(db: db)
@@ -235,6 +238,31 @@ final class AssistantLocalOperationDatabase: AppleLocalPendingCaching, @unchecke
 
     func placeState() throws -> PlaceSensingState {
         try queue.read { db in try placeState(db) }
+    }
+
+    /// History generation from the authenticated server; never exposed as a local/model operation.
+    func discardProductHistory(epoch: String) throws {
+        try AssistantHistoryFiles.locked {
+        let marker = databaseURL.appendingPathExtension("history-epoch")
+        if (try? String(contentsOf: marker, encoding: .utf8)) == epoch { return }
+        try queue.write { db in
+            try db.execute(sql: "PRAGMA secure_delete=ON")
+            let old = try placeState(db)
+            var fresh = PlaceSensingState()
+            fresh.enabled = old.enabled; fresh.identity = old.identity; fresh.needsRegionSync = old.enabled
+            for table in ["local_receipt_cache", "local_operations", "place_outbox", "move_outbox", "move_checkpoint", "place_state"] {
+                try db.execute(sql: "DELETE FROM \(table)")
+            }
+            try db.execute(sql: "INSERT INTO place_state(id,payload) VALUES(1,?)", arguments: [try JSONEncoder().encode(fresh)])
+        }
+        try queue.writeWithoutTransaction { db in
+            guard let row = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(TRUNCATE)") else { throw CocoaError(.fileWriteUnknown) }
+            let busy: Int = row["busy"]
+            guard busy == 0 else { throw CocoaError(.fileWriteUnknown) }
+            try db.execute(sql: "VACUUM")
+        }
+        try Data(epoch.utf8).write(to: marker, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
     }
 
     private func placeState(_ db: Database) throws -> PlaceSensingState {
@@ -707,7 +735,7 @@ final class AssistantLocalOperationDatabase: AppleLocalPendingCaching, @unchecke
     /// One pending nonce per pairing; returned replies stay in the same operation journal until admission.
     func preserveQwenHandoff(identity: String, sourceID: String, now: Date = Date()) throws -> QwenHandoff.Pending? {
         try queue.write { db in
-            let records = try qwenHandoffs(db: db)
+            let records = try qwenHandoffs(db: db, includeCompleted: true)
             if let existing = records.first(where: { $0.handoff.identity == identity && $0.handoff.sourceID == sourceID }) {
                 return existing.state == .pending && existing.handoff.reply == nil ? existing.handoff.pending : nil
             }
@@ -758,8 +786,9 @@ final class AssistantLocalOperationDatabase: AppleLocalPendingCaching, @unchecke
         }
     }
 
-    private func qwenHandoffs(db: Database) throws -> [(handoff: AssistantLocalQwenHandoff, state: AssistantLocalOperationState)] {
-        try Row.fetchAll(db, sql: "SELECT * FROM local_operations WHERE kind = 'qwen_handoff' AND (state != 'completed' OR replay_payload IS NOT NULL) ORDER BY rowid").map { row in
+    private func qwenHandoffs(db: Database, includeCompleted: Bool = false) throws -> [(handoff: AssistantLocalQwenHandoff, state: AssistantLocalOperationState)] {
+        let scope = includeCompleted ? "(state != 'completed' OR replay_payload IS NOT NULL)" : "state != 'completed'"
+        return try Row.fetchAll(db, sql: "SELECT * FROM local_operations WHERE kind = 'qwen_handoff' AND \(scope) ORDER BY rowid").map { row in
             guard let payload: Data = row["replay_payload"], Self.stopReplayFingerprint(payload) == (row["fingerprint"] as String) else { throw AssistantLocalOperationDatabaseError.corruptRow }
             let handoff = try JSONDecoder().decode(AssistantLocalQwenHandoff.self, from: payload)
             guard handoff.pending.nonce == (row["operation_id"] as String), let state = AssistantLocalOperationState(rawValue: row["state"]) else { throw AssistantLocalOperationDatabaseError.corruptRow }

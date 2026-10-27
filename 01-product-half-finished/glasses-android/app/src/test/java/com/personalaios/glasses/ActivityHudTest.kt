@@ -3,7 +3,14 @@ package com.personalaios.glasses
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [32], application = android.app.Application::class, manifest = Config.NONE)
+@LooperMode(LooperMode.Mode.PAUSED)
 class ActivityHudTest {
     @Test fun capabilityUnknownAndWaitingDecodeAndKeepWaitingVisible() {
         for (phase in listOf("unknown", "waiting")) {

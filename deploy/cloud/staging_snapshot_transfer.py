@@ -1,12 +1,15 @@
 """age envelopes, capped transfer and staging-only retention of accepted snapshots."""
 from datetime import datetime, timezone
 import os
+import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tarfile
 import time
+
+PRODUCT_CONFIG = Path(__file__).resolve().parent / '.build/production.json'
 
 NAME = re.compile(r'snapshot-\d{8}T\d{6}Z\.age')
 
@@ -89,13 +92,14 @@ def transfer(snapshot, destination, idle, bwlimit=244):
             process.wait()
 
 
-def taiwan(now=None):
+def local_time(now=None):
     from zoneinfo import ZoneInfo
-    return (now or datetime.now(timezone.utc)).astimezone(ZoneInfo('Asia/Taipei'))
+    config = json.loads(PRODUCT_CONFIG.read_text())
+    return (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(config['time_zone']))
 
 
 def night(now=None):
-    local = taiwan(now)
+    local = local_time(now)
     if not 3 <= local.hour < 6:
-        raise ValueError('Capture is allowed only at Taiwan 03:00–06:00')
+        raise ValueError('Capture is allowed only at deployment-local 03:00–06:00')
     return local

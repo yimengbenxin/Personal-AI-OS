@@ -16,7 +16,7 @@ class CloudFrontAdmissionTests(unittest.TestCase):
     def render(self, root):
         cloud = root / "deploy/cloud"
         cloud.mkdir(parents=True)
-        for name in ("prepare-build.py", "staging_config.py", "cloud.json", "front.conf.in", "paios_roaming_guard.js.in"):
+        for name in ("prepare-build.py", "staging_config.py", "cloud.json", "front.conf.in", "paios_roaming_guard.js.in", "paios-staging-snapshot.timer"):
             shutil.copyfile(CLOUD / name, cloud / name)
         env = dict(os.environ, PAIOS_PUBLIC_API_URL="https://front.example.invalid:9443",
                    PAIOS_LEGACY_PUBLIC_API_URLS="https://legacy.example.invalid",

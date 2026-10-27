@@ -124,3 +124,33 @@ test('simulator cancellation interrupts pending consent and preserves scratch in
   await f.elicitationStarted;assert.ok(f.elicited);abort.abort();await assert.rejects(pending);
   release.resolve();await new Promise(setImmediate);assert.equal(await fs.readFile(file,'utf8'),'unchanged');
 });
+
+/** A minimal uncompressed PDF whose pages each carry one Helvetica text line. */
+function textPdf(lines:string[]):Buffer {
+  const objects=['<< /Type /Catalog /Pages 2 0 R >>',`<< /Type /Pages /Kids [${lines.map((_,i)=>`${4+i*2} 0 R`).join(' ')}] /Count ${lines.length} >>`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+  for(const [i,line] of lines.entries()){
+    const stream=`BT /F1 24 Tf 72 720 Td (${line}) Tj ET`;
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5+i*2} 0 R >>`,
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  }
+  let pdf='%PDF-1.4\n';const offsets:number[]=[];
+  for(const [i,body] of objects.entries()){offsets.push(pdf.length);pdf+=`${i+1} 0 obj\n${body}\nendobj\n`;}
+  const xref=pdf.length;
+  pdf+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.map(offset=>`${String(offset).padStart(10,'0')} 00000 n \n`).join('')}`;
+  return Buffer.from(`${pdf}trailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`,'latin1');
+}
+
+test('simulator PDF extraction honors every selected page and omits the rest',async t=>{
+  const f=await fixture(t),file=join(f.root,'three-pages.pdf');
+  await fs.writeFile(file,textPdf(['ALPHA page one','BRAVO page two','CHARLIE page three']));
+  const extract=async(pages?:number[])=>f.text(await f.call('extract_text',{path:file,...(pages?{pages}:{})}));
+  const one='ALPHA page one\n\n\f',two='BRAVO page two\n\n\f',three='CHARLIE page three\n\n\f';
+  assert.equal(await extract([1]),one);
+  assert.equal(await extract([2]),two);
+  assert.equal(await extract([1,3]),one+three);
+  assert.equal(await extract([3,1]),three+one);
+  assert.equal(await extract(),one+two+three);
+  assert.equal(f.text(await f.call('extract_text',{path:file,pages:[1,3],max_chars:5})),'ALPHA');
+  assert.equal(f.text(await f.call('extract_text',{path:file,pages:[1,4]})),'GUARD_TYPE_UNSUPPORTED');
+});

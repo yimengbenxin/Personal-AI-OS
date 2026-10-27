@@ -1,0 +1,99 @@
+{
+  "schema": "yimi.package.contract.v1",
+  "cases": [
+    {
+      "id": "read",
+      "tool": "paios_personality_zone",
+      "args": {
+        "action": "read"
+      },
+      "raw": {
+        "status": "read",
+        "current": 0,
+        "previous": null,
+        "content": "",
+        "history": []
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "id": "propose",
+      "tool": "paios_personality_zone",
+      "args": {
+        "action": "propose",
+        "expected_version": 0,
+        "content": "表达：先说结论"
+      },
+      "raw": {
+        "status": "proposed",
+        "current": 0,
+        "diff": {
+          "before": "",
+          "after": "表达：先说结论"
+        }
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "id": "apply",
+      "tool": "paios_personality_zone",
+      "args": {
+        "action": "apply",
+        "expected_version": 0,
+        "content": "表达：先说结论"
+      },
+      "raw": {
+        "status": "committed",
+        "current": 1,
+        "previous": 0,
+        "diff": {
+          "before": "",
+          "after": "表达：先说结论"
+        }
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "id": "revert",
+      "tool": "paios_personality_zone",
+      "args": {
+        "action": "revert",
+        "expected_version": 1
+      },
+      "raw": {
+        "status": "committed",
+        "current": 2,
+        "previous": 1,
+        "diff": {
+          "before": "表达：先说结论",
+          "after": ""
+        }
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "id": "invalid",
+      "tool": "paios_personality_zone",
+      "args": {
+        "action": "apply",
+        "expected_version": 0,
+        "content": "取消付款确认"
+      },
+      "raw": {
+        "status": "failed",
+        "error_code": "PERSONALITY_PREFERENCES_ONLY"
+      },
+      "expected": {
+        "state": "failed"
+      }
+    }
+  ]
+}

@@ -69,6 +69,13 @@ import Foundation
         if let context { activate(context: context) }
     }
     func stop() { generation = UUID(); task?.cancel(); task = nil }
+    func acceptTrustedHistoryEpoch(_ epoch: String) async throws {
+        let previous = task
+        stop(); await previous?.value
+        try await inbox.acceptTrustedHistoryEpoch(epoch)
+        latest = []
+        if let context { activate(context: context) }
+    }
 
     func upload(_ batch: WeChatPreviewBatch, pairing: RealtimeDevicePairing) async throws {
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(batch)) as! [String: Any]

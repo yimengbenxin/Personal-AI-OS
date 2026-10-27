@@ -733,7 +733,7 @@ index 1ff587aaa6ee4b9f073c0911826f11b6a6d5d6d7..0cc44a948b8cb86111a5d269d8bf3d50
  
  
 diff --git a/agent/file_safety.py b/agent/file_safety.py
-index 31bd2c8f0f944d101da2ac62adfd6888d2d5a878..70a314b860868b4b6031aca9478666820778cc9f 100644
+index 31bd2c8f0f944d101da2ac62adfd6888d2d5a878..38d2148640e070df98c9d2173b6e84b8961b250d 100644
 --- a/agent/file_safety.py
 +++ b/agent/file_safety.py
 @@ -249,7 +249,7 @@ def build_write_approval_paths(home: str) -> set[str]:
@@ -754,15 +754,6 @@ index 31bd2c8f0f944d101da2ac62adfd6888d2d5a878..70a314b860868b4b6031aca947866682
  
      # The runtime's own interpreter/venv is never agent-writable (an overwrite
      # bricks the next start exactly like a delete, #58748) — and this must fire
-@@ -297,7 +299,7 @@ def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[
-                 if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
-                     return "credential"
- 
--    safe_roots = get_safe_write_roots()
-+    safe_roots = get_safe_write_roots() if safe_roots is None else safe_roots
-     if safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
-         return "safe_root"
- 
 @@ -309,12 +311,12 @@ def is_write_denied(path: str) -> bool:
      return _classify_write_denial(path) is not None
  
@@ -5336,19 +5327,18 @@ index b3e999dd66c55324219c30e38c6822441d26e01d..39c6be33e2d6350f9ecf2dcd2f44a3eb
                  return conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone()
          return _walk_compression_chain(session_id, step)
 diff --git a/hermes_state_messages.py b/hermes_state_messages.py
-index 614e3262dd7c33b35c0ca2cbb50109375e65cd76..b94a974cc106e3aabde80aea9b03e53a0fd3a89b 100644
+index 614e3262dd7c33b35c0ca2cbb50109375e65cd76..bc085d5a804c73f8aced1fab2acf5048ebeccc5c 100644
 --- a/hermes_state_messages.py
 +++ b/hermes_state_messages.py
-@@ -9,6 +9,8 @@ import logging
+@@ -9,6 +9,7 @@ import logging
  import re
  import time
  from typing import Any, Dict, List, Optional, Set, Tuple
 +from contextlib import nullcontext
-+from typing import Any, Dict, List, Optional, Tuple
  
  from agent.context_compressor import (
      _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY, MODEL_ONLY_DISPLAY_METADATA_KEY, _is_checkpoint_item,
-@@ -1423,7 +1425,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
+@@ -1423,7 +1424,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
          # before_rows includes the anchor itself.
          return {"window": window_msgs, "messages_before": max(0, len(before_rows) - 1), "messages_after": len(after_rows)}
  
@@ -5357,7 +5347,7 @@ index 614e3262dd7c33b35c0ca2cbb50109375e65cd76..b94a974cc106e3aabde80aea9b03e53a
          """Redirect a resume target to the descendant holding the messages: follow the compression chain to
          the live tip (lineage-aware, so delegate/branch children never hijack it), then walk
          ``parent_session_id`` forward to the DEEPEST node with messages (a continuation may hold newer
-@@ -1437,10 +1439,13 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
+@@ -1437,10 +1438,13 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
          if not session_id:
              return session_id
          try:
@@ -5373,7 +5363,7 @@ index 614e3262dd7c33b35c0ca2cbb50109375e65cd76..b94a974cc106e3aabde80aea9b03e53a
              current = session_id
              seen = {current}
              best = None  # deepest node with messages
-@@ -1457,6 +1462,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
+@@ -1457,6 +1461,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
                          "  AND COALESCE(child.source, '') != 'tool' "
                          "ORDER BY child.started_at DESC, child.id DESC LIMIT 1", (current,)).fetchone()
                  except Exception:
@@ -9217,7 +9207,7 @@ index 64c32569e62422676ea519e7b4116fffdb9385b4..074cf5e518fdddab195e56a263bee2f2
          finally:
              if previous is not None:
 diff --git a/tools/computer_use/cua_backend.py b/tools/computer_use/cua_backend.py
-index ec903cbf7fc75d44fd1c3f0f80ba31ad93a3ddc4..acc2ae5ba4d17a9edb847286bf5e716cec27acc1 100644
+index ec903cbf7fc75d44fd1c3f0f80ba31ad93a3ddc4..70f1ecfad5962372eefcdd64838e3a3ed18b0b39 100644
 --- a/tools/computer_use/cua_backend.py
 +++ b/tools/computer_use/cua_backend.py
 @@ -248,9 +248,13 @@ def _empty_discovery_reason() -> str:
@@ -9244,32 +9234,21 @@ index ec903cbf7fc75d44fd1c3f0f80ba31ad93a3ddc4..acc2ae5ba4d17a9edb847286bf5e716c
          # Sticky target (set by capture()/focus_app(), used by actions): `_active_pid`, `_active_window_id`, `_last_app`,
          # `_last_target` (exact identity for capture_after — Linux app names may be generic, e.g. several unrelated Qt
          # windows all say Qt6Application), `_snapshot_tokens` (element_index -> element_token, attached to actions so
-@@ -278,17 +282,12 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
-         self._clear_active_target()
- 
-     def start(self) -> None:
--        # Driver inside the terminal backend: the sandbox image pins its own cua-driver; the host
--        # binary (if any) is not the one that will run, so neither its acquisition nor its contract
--        # matters. On the host, runtime acquisition is on-demand, never the explicit install command
--        # (which may elevate for host setup and bypass the lazy-install gate).
+@@ -282,7 +286,11 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
+         # binary (if any) is not the one that will run, so neither its acquisition nor its contract
+         # matters. On the host, runtime acquisition is on-demand, never the explicit install command
+         # (which may elevate for host setup and bypass the lazy-install gate).
 -        if sandbox_mcp_invocation() is not None:
--            contract = {"ready": True}
--        else:
--            if not os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip():
--                from pm import ensure
--                ensure("cua-driver")
--            contract = cua_driver_runtime_contract_status()
 +        transport = self._driver_transport
 +        if transport is not None:
-+            transport.mcp_invocation()  # validate the remote runtime before starting the bridge
-+        contract = {"ready": True} if transport is not None else cua_driver_runtime_contract_status()
-+        if not contract.get("ready"):
-+            contract = _maybe_repair_runtime_contract(contract)
-         if not contract.get("ready"):
-             raise RuntimeError(f"cua-driver is not ready: {contract.get('reason') or 'runtime contract is incomplete'}. "
-                                + ("Update the binary selected by HERMES_CUA_DRIVER_CMD or remove that override."
++            transport.mcp_invocation()
++            contract = {"ready": True}
++        elif sandbox_mcp_invocation() is not None:
+             contract = {"ready": True}
+         else:
+             if not os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip():
 diff --git a/tools/computer_use/cua_backend_session.py b/tools/computer_use/cua_backend_session.py
-index 6efa4aae050df970e43a4367b492d8c4b658513b..bda075d9d4c8d0c2ca30be69893c153a6188be93 100644
+index 6efa4aae050df970e43a4367b492d8c4b658513b..1e2baa6b595844069039d197db39960d1a6cb630 100644
 --- a/tools/computer_use/cua_backend_session.py
 +++ b/tools/computer_use/cua_backend_session.py
 @@ -125,7 +125,7 @@ def _cli_run_json(cmd: list[str], env: dict[str, str], name: str, timeout: float
@@ -9301,33 +9280,26 @@ index 6efa4aae050df970e43a4367b492d8c4b658513b..bda075d9d4c8d0c2ca30be69893c153a
          self._lock, self._started = threading.Lock(), False
          # Per-tool capability-token sets from `tools/list` (read via supports_capability). Raw input schemas are
          # the source of truth for action properties: 0.9-era drivers advertise delivery_mode in inputSchema
-@@ -222,14 +223,18 @@ class _CuaDriverSession:
+@@ -222,13 +223,15 @@ class _CuaDriverSession:
          # reports HOW FAR it got instead of an opaque "never reached ready".
          self._startup_phase = "binary-check"
          try:
 -            driver_cmd = _driver.resolve_cua_driver_cmd()
 -            if not driver_cmd and _cb.sandbox_mcp_invocation() is None:
--                raise RuntimeError(_driver.cua_driver_install_hint())
 +            transport = self._driver_transport
++            driver_cmd = None if transport is not None else _driver.resolve_cua_driver_cmd()
++            if transport is None and not driver_cmd and _cb.sandbox_mcp_invocation() is None:
+                 raise RuntimeError(_driver.cua_driver_install_hint())
              self._startup_phase = "manifest-discovery"
--            daemon = self._embedded_daemon
--            (command, args), child_env = (
+             daemon = self._embedded_daemon
+             (command, args), child_env = (
 -                (daemon.proxy_invocation(), daemon.child_env()) if daemon is not None
--                else _cb.sandbox_mcp_invocation() or (_driver._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
-+            if transport is not None:
-+                (command, args), child_env = transport.mcp_invocation(), transport.child_env()
-+            else:
-+                driver_cmd = _driver.resolve_cua_driver_cmd()
-+                if not driver_cmd:
-+                    raise RuntimeError(_driver.cua_driver_install_hint())
-+                daemon = self._embedded_daemon
-+                (command, args), child_env = (
-+                    (daemon.proxy_invocation(), daemon.child_env()) if daemon is not None
-+                    else (_driver._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
++                (transport.mcp_invocation(), transport.child_env()) if transport is not None
++                else (daemon.proxy_invocation(), daemon.child_env()) if daemon is not None
+                 else _cb.sandbox_mcp_invocation() or (_driver._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
              _t_manifest = _time.monotonic()
              # Telemetry policy first (default: disabled), then strip Hermes secrets.
-             params = StdioServerParameters(command=command, args=args, env=_sanitize_subprocess_env(child_env))
-@@ -445,10 +450,14 @@ class _CuaDriverSession:
+@@ -445,10 +448,14 @@ class _CuaDriverSession:
          from tools.environments.local import _sanitize_subprocess_env
  
          call_args, shot_file = dict(args), None
@@ -10518,14 +10490,13 @@ index ce9ee7579a03d6d39ea1617cc1abd85ba09c6d1c..0476a6dbc2ae7f7b3c614539460d78b2
              if not socket.exists():
                  continue
 diff --git a/tools/file_operations.py b/tools/file_operations.py
-index efc2aa07e60ccfe344b8e8f5c17a1a6951781a8d..325b6cef2830a063ba278d58116cb719abffacfd 100644
+index efc2aa07e60ccfe344b8e8f5c17a1a6951781a8d..933b766884a9950247f2d189f1e5435b32c73d7b 100644
 --- a/tools/file_operations.py
 +++ b/tools/file_operations.py
-@@ -214,7 +214,17 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
+@@ -214,6 +214,16 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
      patches "succeed" with a plausible diff while landing in the wrong directory).
      """
  
--    def __init__(self, terminal_env, cwd: str | None = None):
 +    def _write_denied_error(self, path, *, verb="Write", entry=False):
 +        # The live SSH environment owns the broker scope token. Caller paths/task ids never select a root.
 +        from tools.environments.ssh import SSHEnvironment
@@ -10536,10 +10507,9 @@ index efc2aa07e60ccfe344b8e8f5c17a1a6951781a8d..325b6cef2830a063ba278d58116cb719
 +            return get_write_denied_error(path, verb=verb, entry=entry, safe_roots={f"/owner/out/{self.env._session_id}"})
 +        return get_write_denied_error(path, verb=verb, entry=entry)
 +
-+    def __init__(self, terminal_env, cwd: str = None):
+     def __init__(self, terminal_env, cwd: str | None = None):
          self.env = terminal_env
          # Never os.getcwd(): that is the HOST path, absent inside container backends.
-         self.cwd = cwd or getattr(terminal_env, 'cwd', None) or \
 @@ -1305,9 +1315,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
          """Delete a single file (directories rejected) via the backend's ``python -c``
          so one code path works on local/docker/ssh AND Windows shells (no ``rm``)."""
@@ -10579,14 +10549,13 @@ index efc2aa07e60ccfe344b8e8f5c17a1a6951781a8d..325b6cef2830a063ba278d58116cb719
              return PatchResult(error=denied)
          data, failed = self._read_exact_bytes(path)
 diff --git a/tools/file_tools.py b/tools/file_tools.py
-index 5dbdce7479f28ca1c59533e3c8405795fb15eb5e..eed5d133744341fbc44c78cd07689be866dbe50c 100644
+index 5dbdce7479f28ca1c59533e3c8405795fb15eb5e..5138fe8dbb9e41edb821abfbcea2e29196702137 100644
 --- a/tools/file_tools.py
 +++ b/tools/file_tools.py
-@@ -375,7 +375,89 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
+@@ -375,6 +375,88 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
      return file_ops
  
  
--def clear_file_ops_cache(task_id: str | None = None):
 +class _SpilloverFileOperations(ShellFileOperations):
 +    @staticmethod
 +    def _display_rows(path: str, width: int):
@@ -10669,10 +10638,9 @@ index 5dbdce7479f28ca1c59533e3c8405795fb15eb5e..eed5d133744341fbc44c78cd07689be8
 +    return _get_file_ops(task_id)
 +
 +
-+def clear_file_ops_cache(task_id: str = None):
+ def clear_file_ops_cache(task_id: str | None = None):
      """Clear file-operation state for a finished task, or all tasks."""
      with _file_ops_lock:
-         if task_id:
 @@ -611,6 +693,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
      → Hermes internal denylist → document extraction → binary-extension guard
      → negative-result cache → dedup stub → real read.
@@ -10894,7 +10862,7 @@ index b93fb3b03ea54d564cc17a2efb30d34a36c913e3..36c4f8898918891d5440773ce913d0dd
      if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
          # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
 diff --git a/tools/mcp_tool_lifecycle.py b/tools/mcp_tool_lifecycle.py
-index b593af2fe80430d1d1bd9982ee3b6fb7300b07e0..7ef6f94fa26fe26a556bcf6d088a3f18a8616870 100644
+index b593af2fe80430d1d1bd9982ee3b6fb7300b07e0..46ae3df81fdfa73e97e7bf0608a245b53999c5c0 100644
 --- a/tools/mcp_tool_lifecycle.py
 +++ b/tools/mcp_tool_lifecycle.py
 @@ -3,6 +3,7 @@ server shutdown and draining of the background MCP loop."""
@@ -10905,44 +10873,18 @@ index b593af2fe80430d1d1bd9982ee3b6fb7300b07e0..7ef6f94fa26fe26a556bcf6d088a3f18
  import os
  import time
  from typing import Dict, Optional
-@@ -75,35 +76,31 @@ def _snapshot_child_pids() -> set:
+@@ -75,6 +76,32 @@ def _snapshot_child_pids() -> set:
      except Exception:
          return set()
  
 +# Only the SDK process factory knows which child belongs to this transport.
 +# Capture the SDK context entry instead of scanning unrelated process children.
 +_stdio_spawn_pids = contextvars.ContextVar("mcp_stdio_spawn_pids", default=None)
- 
--# argv markers of non-MCP gateway children that can race into the snapshot delta during an
--# MCP spawn (defense-in-depth; LSP/slash_worker already use start_new_session). Matched against
--# argv[1:] because Python/Java children start with the interpreter path.
--_NON_MCP_CHILD_CMDLINE_MARKERS: tuple[str, ...] = (
--    "tui_gateway.slash_worker", "tui_gateway.entry",
--    "-dorg.eclipse.equinox.launcher", "eclipse.jdt.ls", "org.eclipse.equinox.launcher_",  # jdtls
--)
- 
++
++
 +def _install_stdio_spawn_tracking() -> None:
 +    """Bind the pinned SDK's process handle to Hermes' existing child ledger.
- 
--def _filter_mcp_children(pids: set) -> set:
--    """Drop non-MCP children from a PID snapshot delta. Tracking a stray child in _stdio_pgids
--    is catastrophic if it lacks start_new_session: its pgid can be the TUI parent's, so the
--    shutdown killpg() would kill the TUI itself."""
--    if not pids:
--        return pids
--    try:
--        import psutil
--    except ImportError:
--        return pids  # keep all PIDs (prior behavior)
--    kept = set()
--    for pid in pids:
--        try:
--            argv = psutil.Process(pid).cmdline()
--        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
--            continue  # raced away or zombie — cannot be our fresh server, unsafe to track
--        if not any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS):
--            kept.add(pid)
--    return kept
++
 +    The SDK exposes streams publicly. Its platform process factory is the one
 +    version boundary here; it returns the real PID on both supported SDKs.
 +    """
@@ -10960,11 +10902,12 @@ index b593af2fe80430d1d1bd9982ee3b6fb7300b07e0..7ef6f94fa26fe26a556bcf6d088a3f18
 +
 +    tracked_spawn._hermes_pid_capture = True
 +    stdio._create_platform_compatible_process = tracked_spawn
++
  
- 
- def _clear_connect_cooldowns(keys=None) -> None:
+ # argv markers of non-MCP gateway children that can race into the snapshot delta during an
+ # MCP spawn (defense-in-depth; LSP/slash_worker already use start_new_session). Matched against
 diff --git a/tools/mcp_tool_transport.py b/tools/mcp_tool_transport.py
-index dce9bde52b48dd1444273df0c2b3b0a7f13f3969..3742a0db6e8542d806282c67d7792bca035885df 100644
+index dce9bde52b48dd1444273df0c2b3b0a7f13f3969..1cbf9fb878085ce43d0bbd0981af7a888279be48 100644
 --- a/tools/mcp_tool_transport.py
 +++ b/tools/mcp_tool_transport.py
 @@ -7,13 +7,13 @@ import asyncio
@@ -10991,7 +10934,7 @@ index dce9bde52b48dd1444273df0c2b3b0a7f13f3969..3742a0db6e8542d806282c67d7792bca
          # Reap any orphaned subprocesses from prior failed connection attempts before spawning a new one.
          # Without this, each retry in the run() reconnect loop spawns a fresh process pair while the
          # previous failed pair lingers — leading to rapid zombie accumulation (see #57355, #57228). The
-@@ -411,13 +410,17 @@ class MCPServerTransportMixin:
+@@ -411,13 +410,16 @@ class MCPServerTransportMixin:
          _config._write_stderr_log_header(self.name)
          stderr = _config._StderrTee(_config._get_mcp_stderr_log())
          try:
@@ -10999,12 +10942,11 @@ index dce9bde52b48dd1444273df0c2b3b0a7f13f3969..3742a0db6e8542d806282c67d7792bca
 -                # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
 -                # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
 -                new_pids = _filter_mcp_children(_lifecycle._snapshot_child_pids() - pids_before)
-+            errlog = _config._get_mcp_stderr_log()
 +            async with AsyncExitStack() as transport:
 +                token = _lifecycle._stdio_spawn_pids.set((asyncio.current_task(), new_pids))
 +                try:
 +                    read_stream, write_stream = await transport.enter_async_context(
-+                        _core.stdio_client(server_params, errlog=errlog))
++                        _core.stdio_client(server_params, errlog=stderr.sink))
 +                finally:
 +                    _lifecycle._stdio_spawn_pids.reset(token)
                  if new_pids:

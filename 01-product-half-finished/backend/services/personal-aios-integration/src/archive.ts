@@ -20,9 +20,21 @@ import {discoverSessionRecords} from './session-discovery.ts';
 import type {CallAudioTrack,FinalSession} from './session-records.ts';
 export type {CallAudioTrack} from './session-records.ts';
 import {performance} from 'node:perf_hooks';
+import {setTimeout as sleep} from 'node:timers/promises';
 
-type TierRecord=Omit<ColdRecord,'bytes'>;
-export interface TierUploadPolicy {busy?:()=>boolean;max_upload_kbps?:number;budget_ms?:number}
+type TierRecord=Omit<ColdRecord,'bytes'>&{size?:number;modified?:number};
+export interface TierUploadPolicy {busy?:()=>boolean;max_upload_kbps?:number;budget_ms?:number;paused?:boolean}
+// Immutable archive records use the same cold namespace/key reader. Mutable registries and work intents stay local.
+export const TIER_NAMESPACES=['objects','stream-revisions','manifests','quarantine-manifests',
+  'derived-manifests','derivation-attempts','derivation-settlements','original-source-metadata',
+  'media-source-progress','media-source-failures','media-capture-gaps','media-postarchive-admissions',
+  'media-views','media-vad-selections','processed-media','processed-media-inputs',
+  'media-continuous-candidates','media-continuous-attempts','media-continuous-admitted','media-continuous-dispositions',
+  'media-continuous-selection','media-detection-epochs','media-detection-finished',
+  'audio-consumer-attempts','audio-consumer-accepted','audio-consumer-not-accepted','audio-consumer-results',
+  'audio-consumer-d','audio-consumer-routes','audio-consumer-spans','voice-transcripts'] as const;
+interface TierBacklog {hot_records:number;hot_bytes:number;old_records:number;old_bytes:number;oversized_records:number;
+  oldest_hot_record:{namespace:string;key:string;modified_at:string}|null;observed_at:string|null;complete:boolean}
 class TierUploadDeferred extends Error {}
 class MaintenanceClosed extends Error {}
 
@@ -62,8 +74,13 @@ export class RawArchive implements OriginalArchive {
   private sessionFolding=true;
   private tierScan:AsyncGenerator<TierRecord|null>|undefined;
   private tierNext:TierRecord|undefined;
+  private tierPending:ColdRecord[]=[];
   private nextUploadAt=0;
+  private tierPaused=false;
+  private backlog:TierBacklog={hot_records:0,hot_bytes:0,old_records:0,old_bytes:0,oversized_records:0,oldest_hot_record:null,observed_at:null,complete:false};
+  private readonly tierProgress={verified_records:0,hot_bytes:0,cold_bytes:0,evicted_records:0,evicted_bytes:0};
   private evictionAfter='';
+  private evictionPack:string|undefined;
   private foldWork:Promise<void>|undefined;
   private foldResume:(()=>void)|undefined;
   private foldPaused=Promise.withResolvers<void>();
@@ -272,7 +289,9 @@ export class RawArchive implements OriginalArchive {
   }
   /** Physical tiers preserve every namespace/key and the immutable archive proofs. No clock or media reclassification. */
   packingSnapshot(){const cold=(this.storage as PosixStorage).cold?.snapshot();
-    return {...cold,active:cold?.active??0,queued:cold?.queued??0,folding:this.maintenanceSnapshot()};}
+    return {...cold,active:cold?.active??0,queued:cold?.queued??0,folding:this.maintenanceSnapshot(),
+      tiering:{paused:this.tierPaused,backlog:{...this.backlog},progress:{...this.tierProgress},
+        scope:'physical immutable archive files; sampled during the resumable sweep; SQLite and mutable registries excluded'}};}
   maintenanceSnapshot(){return {...this.folding,discovery:{...this.folding.discovery},files_scope:'tracked loose records in pending folds; refreshed between sessions'};}
   private foldCheckpoint=async()=>{
     await new Promise<void>(resolve=>setImmediate(resolve));
@@ -318,11 +337,12 @@ export class RawArchive implements OriginalArchive {
   }
   maintenance(hotDays=this.hotDays,now=Date.now(),upload:TierUploadPolicy={}){
     return this.exclusively(async()=>{
-      this.setHotDays(hotDays);const started=performance.now(),budget=upload.budget_ms??5000,deadline=started+budget;
-      // Folding and cold packing share this tick's budget, so a large fold cannot starve evacuation.
-      this.maintenanceDeadline=started+budget*((this.storage as PosixStorage).cold?0.5:1);
+      this.setHotDays(hotDays);const started=performance.now(),budget=upload.budget_ms??55000,deadline=started+budget;
+      // The existing minute clock works throughout idle time. Discovery gets a bounded share, then evacuation runs.
+      this.maintenanceDeadline=started+((this.storage as PosixStorage).cold?Math.min(5000,budget*0.1):budget);
       this.maintenanceBusy=upload.busy??(()=>false);
-      if(this.closing||this.maintenanceBusy())return;
+      this.tierPaused=upload.paused??false;
+      if(this.closing||this.tierPaused||this.maintenanceBusy())return;
       if(this.sessionFolding){
         this.foldPaused=Promise.withResolvers<void>();
         if(!this.foldWork)this.foldWork=this.foldSessions(now).catch(error=>{
@@ -332,22 +352,33 @@ export class RawArchive implements OriginalArchive {
         await Promise.race([this.foldWork,this.foldPaused.promise]);
       }
       if((this.storage as PosixStorage).cold&&!this.maintenanceBusy()&&performance.now()<deadline){
-        await this.moveColdOwned({...upload,budget_ms:deadline-performance.now()});
-        if(!this.maintenanceBusy()&&performance.now()<deadline)await this.evictCold(now,false,0,()=>this.maintenanceBusy()||performance.now()>=deadline);
+        await this.moveColdOwned({...upload,budget_ms:deadline-performance.now()},now);
       }
-    });
+      if(this.backlog.old_records)this.notify('L5_TIERING_BACKLOG');
+      if((this.storage as PosixStorage).cold)console.info('L5_TIERING_STATUS',JSON.stringify(this.packingSnapshot().tiering));
+    }).catch(error=>{this.tierFailure(error);throw error;});
   }
   async moveCold(hotDays=2,now=Date.now(),upload:TierUploadPolicy={}):Promise<{segments:number;hot_bytes:number;cold_bytes:number}>{
     this.setHotDays(hotDays);return this.exclusively(async()=>{const result=await this.moveColdOwned(upload);
-      await this.evictCold(now,false);return result;}).catch(error=>{
-        this.notify('L5_TIERING_UNAVAILABLE');
-        if(error instanceof Error&&/^COLD_.*(?:INTEGRITY|INVALID|TRUNCATED)$/u.test(error.message))this.notify('L5_COLD_VERIFICATION_FAILED');
-        throw error;
-      });
+      await this.evictCold(now,false);return result;}).catch(error=>{this.tierFailure(error);throw error;});
   }
+  private tierFailure(error:unknown){this.notify('L5_TIERING_UNAVAILABLE');
+    if(error instanceof Error&&/^COLD_.*(?:INTEGRITY|INVALID|TRUNCATED)$/u.test(error.message))this.notify('L5_COLD_VERIFICATION_FAILED');}
   private async *coldCandidates():AsyncGenerator<TierRecord|null>{
-    // Session folds are immutable. Live journal chunks and loose processing proofs stay hot.
+    // A bounded physical sweep reports all backlog, including records blocked by a live session owner.
+    const sweep:TierBacklog={hot_records:0,hot_bytes:0,old_records:0,old_bytes:0,oversized_records:0,oldest_hot_record:null,observed_at:null,complete:false};
+    const before=Date.now()-this.hotDays*86400000;let oldest=Infinity;
+    for(const namespace of TIER_NAMESPACES)for await(const entry of (this.storage as PosixStorage).hotEntries(namespace)){
+      sweep.hot_records++;sweep.hot_bytes+=entry.size;
+      if(entry.modified<before){sweep.old_records++;sweep.old_bytes+=entry.size;}
+      if(entry.size>64*1024*1024)sweep.oversized_records++;
+      if(entry.modified<oldest){oldest=entry.modified;sweep.oldest_hot_record={namespace,key:entry.key,modified_at:new Date(oldest).toISOString()};}
+      sweep.observed_at=new Date().toISOString();this.backlog={...sweep};yield null;
+    }
+    this.backlog={...sweep,complete:true};
+    // Prefer a final's declared codec. Loose immutable proofs also tier, including unresolved historical leaves.
     for await(const key of this.storage.hotKeys!('session-finals')){
+      if(await (this.storage as PosixStorage).cold?.contains('session-finals',key)){yield null;continue;}
       const final=await this.storage.readFinal!(`l5:${key}`);check(final,'SESSION_FINAL_REQUIRED',500);
       if(await this.storage.hasLiveSessionOwner?.({namespace:'objects',key:final.object_hash})){yield null;continue;}
       // Referenced originals precede metadata so a paused upload cannot strand an unpacked object.
@@ -358,59 +389,86 @@ export class RawArchive implements OriginalArchive {
       // The existing rollback readers cap a decoded cold object at 64 MiB; SQLite still owns oversized metadata.
       if(await this.storage.hotSize!('session-finals',key)<=64*1024*1024)yield {namespace:'session-finals',key};
     }
-    for await(const key of this.storage.hotKeys!('manifests')){
-      let record:ReturnType<RawArchive['sourceMetadata']>;
-      try{check(await this.storage.hotSize!('manifests',key)<=64*1024*1024,'COLD_SEGMENT_LIMIT');
-        record=this.sourceMetadata('manifests',key,await this.storage.read('manifests',key));}
-      catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT'){yield null;continue;}throw error;}
-      check(Number.isFinite(Date.parse(record.received)),'ARCHIVE_TIER_METADATA_INVALID',500);
-      for(const {hash,format} of record.objects)yield {namespace:'objects',key:hash,...(format?{format}:{})};
-      yield {namespace:'manifests',key};
+    for(const namespace of TIER_NAMESPACES)for await(const entry of (this.storage as PosixStorage).hotEntries(namespace)){
+      if(entry.size>64*1024*1024){yield null;continue;}
+      // Pre-ledger journals still prove their live ownership through the producer's original-object edges.
+      if(namespace==='stream-revisions'&&!await this.storage.hasSessionRecord?.({namespace,key:entry.key}))try{
+        const source=this.sourceMetadata(namespace,entry.key,await (this.storage as PosixStorage).readHot(namespace,entry.key));
+        let live=false;for(const object of source.objects)if(await this.storage.hasLiveSessionOwner?.({namespace:'objects',key:object.hash})){live=true;break;}
+        if(live){yield null;continue;}
+      }catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')continue;throw error;}
+      yield {namespace,key:entry.key,size:entry.size,modified:entry.modified};
     }
   }
-  private async moveColdOwned(upload:TierUploadPolicy){
+  private async moveColdOwned(upload:TierUploadPolicy,evictAt?:number){
     check(this.storage.moveCold&&this.storage.hotKeys&&this.storage.hotSize&&this.storage.modifiedAt,'COLD_STORAGE_NOT_CONFIGURED',503);
     const cold=(this.storage as PosixStorage).cold,scan=this.tierScan??=this.coldCandidates();
-    let scanned=0,segments=0,hot_bytes=0,cold_bytes=0,finished=false;const started=performance.now();
+    let segments=0,hot_bytes=0,cold_bytes=0,finished=false;const deadline=performance.now()+(upload.budget_ms??5000);
+    const evictedPacks=new Set<string>();
+    const yielded=()=>this.closing||!!upload.paused||!!upload.busy?.()||performance.now()>=deadline;
+    const gate=()=>{if(this.closing||upload.paused||upload.busy?.())throw new TierUploadDeferred();};
+    const pace=async(bytes:number)=>{
+      gate();if(!upload.max_upload_kbps)return;
+      this.nextUploadAt=Math.max(performance.now(),this.nextUploadAt)+bytes*8/upload.max_upload_kbps;
+      for(;;){const remaining=this.nextUploadAt-performance.now();if(remaining<=0)break;
+        await sleep(Math.min(50,remaining));gate();}
+    };
     try{
-      // At most two 2048-record / 8-MiB packs per tick. One existing object may be up to the 64-MiB codec limit.
-      // A retained directory iterator bounds discovery too; restart safely rescans the authoritative cold index.
-      while(segments<2&&!finished&&scanned<8192&&performance.now()-started<(upload.budget_ms??5000)){
-        if(upload.busy?.()||Date.now()<this.nextUploadAt)break;
-        const records:ColdRecord[]=[],ids=new Set<string>();let size=0;
-        while(records.length<2048&&scanned<8192&&performance.now()-started<(upload.budget_ms??5000)){
-          if(upload.busy?.())throw new TierUploadDeferred();
-          if(!this.tierNext){const next=await scan.next();
-            if(next.done){finished=true;this.tierScan=undefined;break;}
-            scanned++;if(!next.value)continue;this.tierNext=next.value;}
-          const record=this.tierNext;
-          const id=`${record.namespace}:${record.key}`;
-          if(ids.has(id)||await this.storage.hasLiveSessionOwner?.(record)||await cold?.contains(record.namespace,record.key)){this.tierNext=undefined;continue;}
-          try{
-            const next=await this.storage.hotSize!(record.namespace,record.key);check(next<=64*1024*1024,'COLD_SEGMENT_LIMIT');
-            if(records.length&&size+next>8*1024*1024)break;
-            const bytes=await this.storage.read(record.namespace,record.key);records.push({...record,bytes});ids.add(id);size+=bytes.length;
-          }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-          this.tierNext=undefined;if(size>=8*1024*1024)break;
+      if(evictAt!==undefined)await this.evictCold(evictAt,false,0,yielded);
+      // 3072 items keep the existing 1-MiB decoded header contract. No new pack format or index migration.
+      // Pending bytes survive realtime yields; after restart, verified locations are the resume authority.
+      while(!finished&&!yielded()){
+        const records=this.tierPending,ids=new Set(records.map(r=>`${r.namespace}:${r.key}`));let size=records.reduce((n,r)=>n+r.bytes.length,0);
+        while(records.length<3072&&size<16*1024*1024&&!yielded()){
+          const batch:TierRecord[]=[];let planned=size;
+          while(batch.length<8&&records.length+batch.length<3072&&!yielded()){
+            if(!this.tierNext){const next=await scan.next();
+              if(next.done){finished=true;this.tierScan=undefined;break;}
+              if(!next.value)continue;this.tierNext=next.value;}
+            const record=this.tierNext,id=`${record.namespace}:${record.key}`;
+            if(ids.has(id)||await this.storage.hasLiveSessionOwner?.(record)){this.tierNext=undefined;continue;}
+            const location=(await cold?.locations([record]))?.[0];
+            if(location){
+              // Hot discovery, not the size of cold history, determines the age-to-eviction delay.
+              if(evictAt!==undefined&&!evictedPacks.has(location.pack))try{
+                if((record.modified??await this.storage.modifiedAt!(record.namespace,record.key))<evictAt-this.hotDays*86400000){
+                  evictedPacks.add(location.pack);this.evictionPack=location.pack;await this.evictCold(evictAt,false,0,yielded);
+                }
+              }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+              this.tierNext=undefined;continue;
+            }
+            try{
+              const next=record.size??await this.storage.hotSize!(record.namespace,record.key);check(next<=64*1024*1024,'COLD_SEGMENT_LIMIT');
+              if((records.length||batch.length)&&planned+next>16*1024*1024)break;
+              batch.push(record);ids.add(id);planned+=next;
+            }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+            this.tierNext=undefined;if(planned>=16*1024*1024)break;
+          }
+          const physical=batch.filter(r=>r.namespace!=='session-finals'),data=await (this.storage as PosixStorage).readHotMany(physical);let offset=0;
+          for(const record of batch){const bytes=record.namespace==='session-finals'?await this.storage.read(record.namespace,record.key):data[offset++];
+            if(bytes){records.push({namespace:record.namespace,key:record.key,...(record.format?{format:record.format}:{}),bytes});size+=bytes.length;}}
+          if(finished||this.tierNext||!batch.length)break;
         }
-        if(records.length){const receipt=await this.storage.moveCold(records,bytes=>{
-          const now=Date.now();if(upload.busy?.()||now<this.nextUploadAt)throw new TierUploadDeferred();
-          if(upload.max_upload_kbps)this.nextUploadAt=now+bytes*8/upload.max_upload_kbps;
-        });segments++;hot_bytes+=size;cold_bytes+=receipt.bytes;}
+        if(records.length){gate();const receipt=await this.storage.moveCold(records,gate,pace);
+          segments++;hot_bytes+=size;cold_bytes+=receipt.bytes;this.tierProgress.verified_records+=records.length;
+          this.tierProgress.hot_bytes+=size;this.tierProgress.cold_bytes+=receipt.bytes;this.tierPending=[];
+          this.evictionPack=receipt.pack;
+          if(evictAt!==undefined)await this.evictCold(evictAt,false,0,yielded);}
       }
       return {segments,hot_bytes,cold_bytes};
-    }catch(error){await this.tierScan?.return(null);this.tierScan=undefined;this.tierNext=undefined;
-      if(error instanceof TierUploadDeferred)return {segments,hot_bytes,cold_bytes};throw error;}
+    }catch(error){
+      if(error instanceof TierUploadDeferred)return {segments,hot_bytes,cold_bytes};
+      await this.tierScan?.return(null);this.tierScan=undefined;this.tierNext=undefined;this.tierPending=[];throw error;}
   }
   private async evictCold(now:number,emergency:boolean,pendingBytes=0,yieldWork=()=>false){
     const disk=this.storage as PosixStorage,cold=disk.cold;if(!cold)return 0;
-    const before=now-this.hotDays*86400000;let freed=0,removed=0;
-    let packs=await cold.packs(true,this.evictionAfter,8);
-    if(packs.length===0&&this.evictionAfter){this.evictionAfter='';packs=await cold.packs(true,'',8);}
+    const before=now-this.hotDays*86400000;let freed=0;
+    const preferred=this.evictionPack;
+    let packs=preferred?[{key:preferred}]:await cold.packs(true,this.evictionAfter,8);
+    if(!preferred&&packs.length===0&&this.evictionAfter){this.evictionAfter='';packs=await cold.packs(true,'',8);}
     for(const pack of packs){
       if(yieldWork())break;
       if(emergency&&await disk.reserveFits(pendingBytes))break;
-      this.evictionAfter=pack.key;
       const selection=[];
       for(const record of await cold.locations(undefined,pack.key)){
         try{const modified=await disk.modifiedAt(record.namespace,record.key);if(emergency||modified<before)selection.push(record);}
@@ -420,27 +478,36 @@ export class RawArchive implements OriginalArchive {
       catch(error){this.notify('L5_COLD_VERIFICATION_FAILED');throw new AggregateError([error],'L5_COLD_VERIFICATION_FAILED');}
       // Raise the owner notice before crossing the configured hot window, outside the original-write fence.
       if(emergency&&verified.length)await this.alert('L5_HOT_WINDOW_EMERGENCY');
-      for(const record of verified){
+      const batchSize=emergency?1:64;
+      for(let offset=0;offset<verified.length;offset+=batchSize){
         if(yieldWork())return freed;
         const remove=async()=>{
           if(emergency&&await disk.reserveFits(pendingBytes))return false;
-          const current=(await cold.locations([record]))[0];
-          if(!current||current.pack!==record.pack||current.hash!==record.hash||current.size!==record.size)return true;
-          if(await disk.hasLiveSessionOwner(record))return true;
-          if(record.namespace==='objects')for(const key of await disk.listHot('raw-ingress')){
-            const input=JSON.parse(Buffer.from(await disk.readHot('raw-ingress',key)).toString());if(input.object_hash===record.key)return true;}
-          try{
-            if(!emergency&&await disk.modifiedAt(record.namespace,record.key)>=before)return true;
-            // Read the hot name directly: a missing hot copy must never start a remote read under this fence.
-            const bytes=await disk.readHot(record.namespace,record.key);
-            check(bytes.length===record.size&&sha256(bytes)===record.hash,'HOT_EVICTION_CONFLICT',500);
-            await disk.removeOriginals([record]);freed+=bytes.length;removed++;
-          }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+          const batch=verified.slice(offset,offset+batchSize),current=new Map((await cold.locations(batch)).map(r=>[`${r.namespace}:${r.key}`,r]));
+          const ingress=new Set<string>();
+          if(batch.some(r=>r.namespace==='objects'))for(const key of await disk.listHot('raw-ingress')){
+            const input=JSON.parse(Buffer.from(await disk.readHot('raw-ingress',key)).toString());ingress.add(input.object_hash);}
+          const eligible=[];
+          for(const record of batch){const location=current.get(`${record.namespace}:${record.key}`);
+            if(!location||location.pack!==record.pack||location.hash!==record.hash||location.size!==record.size)continue;
+            if(await disk.hasLiveSessionOwner(record)||record.namespace==='objects'&&ingress.has(record.key))continue;
+            try{if(emergency||await disk.modifiedAt(record.namespace,record.key)<before)eligible.push(record);}
+            catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
+          // A missing hot name never starts a remote read under the original-write fence.
+          const data=await disk.readHotMany(eligible),removals=[];let bytes=0;
+          for(let n=0;n<eligible.length;n++){const record=eligible[n]!,value=data[n];if(!value)continue;
+            check(value.length===record.size&&sha256(value)===record.hash,'HOT_EVICTION_CONFLICT',500);
+            removals.push(record);bytes+=value.length;}
+          await disk.removeOriginals(removals);freed+=bytes;
+          this.tierProgress.evicted_records+=removals.length;this.tierProgress.evicted_bytes+=bytes;
           return !emergency||!await disk.reserveFits(pendingBytes);
         };
-        if(!await disk.withOriginalWrite(remove)||removed>=2048)return freed;
+        if(!await disk.withOriginalWrite(remove))return freed;
       }
+      if(preferred)this.evictionPack=undefined;else this.evictionAfter=pack.key;
     }
+    if(emergency&&preferred&&!this.evictionPack&&!await disk.reserveFits(pendingBytes))
+      freed+=await this.evictCold(now,true,pendingBytes,yieldWork);
     return freed;
   }
   readExactChunk(event:ArchivedEvent,chunk:TrackChunk,maxBytes:number){return this.streams.readExactChunk(event,chunk,maxBytes);}
@@ -511,6 +578,8 @@ export class RawArchive implements OriginalArchive {
   }
   private async deleteManyOwned(rawRefs:string[],principal:string):Promise<{status:'deleted'}>{
     check(this.storage.removeOriginals,'OWNER_DELETE_NOT_CONFIGURED',503);
+    // A realtime yield may hold an uncommitted pack. Deletion retires that scan before changing its sources.
+    await this.tierScan?.return(null);this.tierScan=undefined;this.tierNext=undefined;this.tierPending=[];
     const targets=new Set(rawRefs),objects=new Set<string>(),preserved=new Set<string>(),remove:Pick<ColdRecord,'namespace'|'key'>[]=[];
     const transcripts:{raw_ref:string;key:string}[]=[];
     for(const key of await this.storage.list('voice-transcripts')){

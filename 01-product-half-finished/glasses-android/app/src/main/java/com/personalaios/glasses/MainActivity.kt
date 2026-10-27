@@ -54,6 +54,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
     private var scanRecognized = false
     private var afterPermission = "CONNECT"
     private var rendered: String? = null
+    private val companionRendered = linkedSetOf<String>()
     private var presented: HudScreen? = null
     private var presentedCard: HudCard? = null
     private var presentedMenu = emptyList<HudMenuItem>()
@@ -272,6 +273,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
         val lockLine = hud.paymentLock.line(now)
         val activity = activityLine(hud, screen, now, SystemClock.elapsedRealtime())
         if (activity != null) schedule(activity.nextUpdateMs)
+        val companion = companionReplyLine(hud, screen, now, activity != null)
+        if (companion != null) schedule(companion.nextUpdateMs)
         val specialBand = base is HudScreen.Consent || base is HudScreen.Appearance || base == HudScreen.Locked || base == HudScreen.Payment || base is HudScreen.VoiceEnrolment || base is HudScreen.VoiceSupplement || lockLine != null
         avatarView.hosts.forEach { it.alpha = if (base == HudScreen.Talking && !specialBand && hud.conversation?.mode != "thinking") 1f else 0f }
         if (base == HudScreen.Idle && showHint) { showHint = false; hintUntil = now + 3000 }
@@ -288,6 +291,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
         }
         val targets = mutableListOf<View>()
         val cardText = mutableListOf<TextView>()
+        val companionViews = mutableListOf<CompanionReplyHud>()
         var selected = 0
         mBindingPair.updateView {
             val lens = this.lens
@@ -359,7 +363,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
             val thinkingText = hud.conversation?.text ?: hud.conversationError?.let { "切换失败：$it" }
             if (base !is HudScreen.Settings && base !is HudScreen.Summary && base != HudScreen.Paying && moveLayout == null) {
                 val live = hud.callId != null
-                if (!live && activity == null) face(28, 18, 40, 0, base == HudScreen.Idle && now - lastContent >= 10000)
+                if (!live && activity == null && companion == null) face(28, 18, 40, 0, base == HudScreen.Idle && now - lastContent >= 10000)
                 if (base is HudScreen.Pairing || base == HudScreen.Scanning || base is HudScreen.ScanFailed || base is HudScreen.Paired) {
                     place(lens, label("依米", 18, yimi, true), 76, 20, 220, big(28))
                     val status = if (base == HudScreen.Scanning) (if (scanRecognized) "正在配对" else "正在找二维码") else if (hud.paired) "在呢" else "还没连上手机"
@@ -370,6 +374,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
                     } }, 76, stateY + 6, 8, 8)
                 } else if (specialBand) {
                     // The lock and payment notice own this band. No chat, caption or progress is drawn underneath.
+                } else if (companion != null) {
+                    val view = CompanionReplyHud(this@MainActivity, companion, hud.avatar, activity)
+                    lens.addView(view); companionViews.add(view)
                 } else if (activity != null) {
                     lens.addView(activityLineView(this@MainActivity, activity))
                 } else if (card == null && !live) {
@@ -407,7 +414,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
                         schedule(if (age < 4000) 4000 - age else 100)
                     }
                 }
-                legacyProgressCard(hud, activity != null)?.takeIf { !specialBand && (base == HudScreen.Idle || base is HudScreen.Move || screen is HudScreen.Menu || card != null && !choice) }?.let { errand ->
+                legacyProgressCard(hud, activity != null || companion != null)?.takeIf { !specialBand && (base == HudScreen.Idle || base is HudScreen.Move || screen is HudScreen.Menu || card != null && !choice) }?.let { errand ->
                     val (current, total) = errand.progress!!.split('/').map(String::toInt)
                     fun ring(color: Int, leveled: Boolean) = GradientDrawable().apply {
                         shape = GradientDrawable.RING; innerRadius = dp(6); thickness = dp(4); setColor(color); useLevel = leveled
@@ -691,6 +698,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>(), SensorEventListe
         val painting = screen
         mBindingPair.left.lens.doOnPreDraw {
             if (screen == painting) {
+                if (companionViews.size == 2 && companionViews.all { it.textFits() } && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+                    companion?.cards?.forEach { shown -> shown.ack?.let { ack ->
+                        val identity = canonicalJson(ack)
+                        if (companionRendered.add(identity)) { send("RENDERED", shown.id, ack.toString())
+                            while (companionRendered.size > 64) companionRendered.remove(companionRendered.first()) }
+                    } }
                 if (presentedCard?.copy(ack = null) != card?.copy(ack = null)) head.reset()
                 presented = painting; presentedCard = card; presentedMenu = hudMenu(hud, (screen as? HudScreen.Menu)?.modeChoices == true); presentedCallId = hud.callId
                 if (card?.actions?.isEmpty() == true && noticeId != card.id) {
