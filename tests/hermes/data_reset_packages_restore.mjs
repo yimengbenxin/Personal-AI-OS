@@ -22,7 +22,8 @@ const registry=new CapabilityRegistry(root,authority,runner,{},{});
 let result;
 if(operation==='publish'){
   const files=await readPackage(join(ROOT,'capability/templates/yimi-capability-template'));
-  files['server/server.py']=files['server/server.py'].replace('/opt/yimi/capability/contracts/receipt.v1.schema.json',join(ROOT,'capability/contracts/receipt.v1.schema.json'));
+  // Linux uses the real chroot SDK mount; only the Darwin host transport needs a host path.
+  if(process.platform==='darwin')files['server/server.py']=files['server/server.py'].replace('/opt/yimi/capability/contracts/receipt.v1.schema.json',join(ROOT,'capability/contracts/receipt.v1.schema.json'));
   files['scripts/test.py']=files['scripts/test.py'].replace('import runpy','import runpy\nfrom pathlib import Path').replace("'/package/server/server.py'","str(Path(__file__).resolve().parents[1]/'server/server.py')");
   const manifest=JSON.parse(files['plugin.json']);manifest.name=name;manifest.version=version;
   files['plugin.json']=JSON.stringify(manifest);

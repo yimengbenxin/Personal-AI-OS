@@ -18,7 +18,7 @@ from data_reset_sqlite import companions, inventory as payment_inventory
 
 @pytest.fixture(scope='module')
 def old_payment_engine(tmp_path_factory):
-    return export_old_engine(tmp_path_factory.mktemp('payment-78d-engine'))
+    return export_old_engine(tmp_path_factory.mktemp('payment-legacy-engine'))
 
 
 def cut_wal(path, meta_only):
@@ -67,7 +67,7 @@ data_reset.run(settings,'quarantine')
 '''
 
 
-@pytest.mark.parametrize('engine', ['new','78d'])
+@pytest.mark.parametrize('engine', ['new','legacy'])
 @pytest.mark.parametrize('meta_only', [True,False])
 @pytest.mark.parametrize('point', ['intent','stage-built','db-moved','shm-moved','wal-moved',
                                    'fresh-published','shm-journal','wal-journal','db-journal','completed'])
@@ -87,7 +87,7 @@ def test_payment_cut_every_durable_window_rolls_back(tmp_path, old_payment_engin
     assert journal.load(settings,receipt_path)['state'] == 'restored'
 
 
-@pytest.mark.parametrize('engine', ['new','78d'])
+@pytest.mark.parametrize('engine', ['new','legacy'])
 def test_intent_only_payment_publish_crash_finds_cut_in_displaced(tmp_path, old_payment_engine, engine):
     settings = settings_at(tmp_path)
     path = payment(settings)

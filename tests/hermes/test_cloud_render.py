@@ -119,7 +119,8 @@ class CloudRenderTests(unittest.TestCase):
                 script = root / 'deploy/cloud/prepare-build.py'
                 config = script.parent / 'cloud.json'
                 product = json.loads(config.read_text())
-                product.pop('time_zone')  # public deployment has no private instance override
+                product['time_zone'] = 'Asia/Taipei'  # explicit instance override for this fixture
+                del product['time_zone']  # public deployment has no private instance override
                 config.write_text(json.dumps(product))
                 environment = dict(os.environ, PAIOS_PUBLIC_API_URL=CANONICAL,
                                    PAIOS_LEGACY_PUBLIC_API_URLS='', TZ=zone, PAIOS_TIME_ZONE='')

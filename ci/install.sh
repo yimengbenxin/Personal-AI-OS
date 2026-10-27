@@ -29,3 +29,8 @@ else
   node integrations/hermes/verify-producer.mjs --check-running .scratch/hermes-source
   npm exec --yes --package=pnpm@11.9.0 -- pnpm --dir "$backend/phase0/gateway" install --frozen-lockfile
 fi
+# Receipt-only integration fixtures import FastMCP without loading the mobile model stack.
+if [[ $suite == integration ]]; then
+  python3 -m venv .scratch/executor-venv
+  .scratch/executor-venv/bin/python -m pip install mcp==1.30.0
+fi

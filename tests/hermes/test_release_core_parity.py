@@ -166,7 +166,9 @@ def test_builder_waits_for_the_host_parity_receipt_and_surfaces_failure(tmp_path
     host = SimpleNamespace(config={'requests': str(tmp_path)}, locked=lambda **kwargs: nullcontext(None))
     events = []
     monkeypatch.setattr(release_parity, 'ensure', lambda host, lock: events.append('qualified') or {'commit': 'base'})
-    monkeypatch.setattr(preflight.time, 'sleep', lambda _: release_parity.prepare_requests(host))
+    # Keep the request pump local; native background threads use the shared time module.
+    monkeypatch.setattr(preflight, 'time', SimpleNamespace(
+        monotonic=preflight.time.monotonic, sleep=lambda _: release_parity.prepare_requests(host)))
     assert preflight.prepare(tmp_path, '0123456789ab')['base'] == 'base'
     assert events == ['qualified']
     monkeypatch.setattr(release_parity, 'ensure', lambda host, lock: (_ for _ in ()).throw(ValueError('sensitive-detail')))

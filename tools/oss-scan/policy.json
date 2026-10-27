@@ -3524,6 +3524,18 @@
       "file": "01-product-half-finished/backend/services/personal-aios-integration/tests/call-intent-fallback.test.ts",
       "line_pattern": "const\\ token='fake\\-rq115\\-service\\-token\\-abcdefghijklmnop',service=createServer\\(async\\(req,res\\)=>\\{",
       "reason": "Explicit fake service token used only by an isolated loopback integration fixture; no deployed or provider credential."
+    },
+    {
+      "rule": "domain",
+      "file": "tests/hermes/fixtures/data_reset_legacy/deploy/cloud/data_reset_cold.py",
+      "line_pattern": "path\\ =\\ self\\.local/relative",
+      "reason": "Local filesystem path expressions using the self.local attribute; neither line contains a network hostname."
+    },
+    {
+      "rule": "domain",
+      "file": "tests/hermes/fixtures/data_reset_legacy/deploy/cloud/data_reset_cold.py",
+      "line_pattern": "original,\\ destination\\ =\\ self\\.local/source,\\ self\\.local/target",
+      "reason": "Local filesystem path expressions using the self.local attribute; neither line contains a network hostname."
     }
   ],
   "public_namespaces": [

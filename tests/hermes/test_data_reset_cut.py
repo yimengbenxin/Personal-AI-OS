@@ -182,6 +182,9 @@ def test_crash_before_first_move_resumes_same_cut_only_if_capacity_still_fits(st
 
 def test_existing_cold_prefix_refuses_before_any_hot_move(stores, monkeypatch):
     stores.cold.mkdir(stores.cold.prefix)
+    # Reach cold-prefix validation independently of host free space and inodes.
+    monkeypatch.setattr(cut, 'shutil', SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=2**60)))
+    monkeypatch.setattr(cut, 'os', SimpleNamespace(statvfs=lambda path: SimpleNamespace(f_favail=2**30)))
     moved = []; monkeypatch.setattr(moving, 'rename', lambda *a: moved.append(a))
     with pytest.raises(ValueError, match='^RESET_COLD_QUARANTINE_EXISTS$'):
         data_reset.run(stores.settings, 'quarantine', cold=stores.cold)

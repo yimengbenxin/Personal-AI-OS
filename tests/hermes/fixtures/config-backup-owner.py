@@ -13,7 +13,8 @@ spec = importlib.util.spec_from_file_location('cloud_init', root / 'deploy/cloud
 cloud = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cloud)
 
-with tempfile.TemporaryDirectory() as directory:
+# The runtime UID must traverse every parent; Hermes redirects TMPDIR to its private home.
+with tempfile.TemporaryDirectory(dir='/tmp') as directory:
     home = Path(directory)
     home.chmod(0o755)
     os.chown(home, 10000, 10000)  # upstream s6 setup precedes the product hook

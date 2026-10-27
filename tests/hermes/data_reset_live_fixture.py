@@ -13,18 +13,16 @@ from data_reset_inventory import inventory
 from data_reset_policy import EPOCH_PATH
 from data_reset_pg_fixture import realtime
 
-OLD = '78d4a67989521ae7e1b90d31aa1b8573d40a0620'
+LEGACY_ENGINE = Path(__file__).resolve().parent/'fixtures/data_reset_legacy'
 INTEGRATION = '01-product-half-finished/backend/services/personal-aios-integration'
 
 
 def export_old_engine(directory):
-    names = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', OLD, 'deploy/cloud'], cwd=ROOT, text=True).splitlines()
-    names = [name for name in names if Path(name).name.startswith('data_reset') and name.endswith('.py')]
-    names.append(INTEGRATION+'/tools/data-reset-voiceprint.ts')
-    for name in names:
-        target = directory/name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(subprocess.check_output(['git', 'show', OLD+':'+name], cwd=ROOT))
+    shutil.copytree(LEGACY_ENGINE/'deploy', directory/'deploy')
+    tools = directory/INTEGRATION/'tools'
+    tools.mkdir(parents=True)
+    shutil.copyfile(LEGACY_ENGINE/INTEGRATION/'tools/data-reset-voiceprint.ts',
+                    tools/'data-reset-voiceprint.ts')
     (directory/INTEGRATION/'src').symlink_to(ROOT/INTEGRATION/'src', target_is_directory=True)
     (directory/INTEGRATION/'node_modules').symlink_to(
         ROOT/INTEGRATION/'node_modules', target_is_directory=True)

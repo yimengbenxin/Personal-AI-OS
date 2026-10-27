@@ -8,7 +8,7 @@ const base:UsageAttempt={attempt_id:'try-1',request_id:'request-1',environment:'
   captured_at:'2026-10-23T15:59:00.000Z',status:'failed',input_tokens:null,output_tokens:null,
   cost:{kind:'unknown',amount:null,currency:'CNY'}};
 function setup(){let time=Date.parse(base.captured_at);const notices:BudgetNotice[]=[];let resumed=0;
-  const db=new DatabaseSync(':memory:');const usage=new ModelUsage(db,{now:()=>time,
+  const db=new DatabaseSync(':memory:');const usage=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>time,
     notify:async value=>{notices.push(value);},resumeWork:()=>{resumed++;}});
   return {usage,db,notices,advance:(ms:number)=>{time+=ms;},resumed:()=>resumed};}
 
@@ -40,7 +40,7 @@ test('explicit pause preserves forced owner reserve, survives restart and determ
   assert.equal(usage.admission('staging','owner',true).reserve_remaining_cny,1);
   await usage.record({...base,attempt_id:'owner-1',owner_chat:true,cost:{kind:'known',amount:1,currency:'CNY'}});
   assert.equal(usage.admission('staging','owner',true).allowed,false);
-  const recovered=new ModelUsage(db,{now:()=>Date.parse(base.captured_at),notify:async()=>{},resumeWork:()=>{}});
+  const recovered=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>Date.parse(base.captured_at),notify:async()=>{},resumeWork:()=>{}});
   assert.equal(recovered.admission('staging','owner',false).allowed,false);
   usage.resume('staging','owner');assert.equal(resumed(),1);assert.equal(usage.admission('staging','owner',false).allowed,true);
   await usage.record({...base,attempt_id:'later',cost:{kind:'known',amount:1,currency:'CNY'}});
@@ -75,17 +75,17 @@ test('existing budget policy migrates the reserve floor while preserving signed 
  const db=new DatabaseSync(':memory:');db.exec(`CREATE TABLE model_usage_policy(environment TEXT NOT NULL,owner TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 0,paused_at TEXT,resumed_day TEXT,reserve_start_seq INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(environment,owner));
   INSERT INTO model_usage_policy VALUES('staging','owner',1,NULL,'2026-10-23',7);`);
- const usage=new ModelUsage(db,{now:()=>Date.parse(base.captured_at),notify:async()=>{}}),policy=usage.summary('staging','owner');
+ const usage=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>Date.parse(base.captured_at),notify:async()=>{}}),policy=usage.summary('staging','owner');
  assert.equal(policy.pause_on_limit,true);assert.equal(policy.owner_reserve_cny,1);assert.equal(policy.resumed_local_date,'2026-10-23');
  assert.throws(()=>db.prepare('UPDATE model_usage_policy SET reserve_micros=0').run(),/CHECK/);db.close();
 });
 
 test('delivery failure surfaces; durable threshold fact replays with exact bytes through existing delivery dedup',async()=>{
   const db=new DatabaseSync(':memory:');const notices:BudgetNotice[]=[];
-  const usage=new ModelUsage(db,{now:()=>Date.parse(base.captured_at),notify:async n=>{notices.push(n);throw Error('offline');}});
+  const usage=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>Date.parse(base.captured_at),notify:async n=>{notices.push(n);throw Error('offline');}});
   const attempt={...base,cost:{kind:'known' as const,amount:11,currency:'CNY'}};
   await assert.rejects(usage.record(attempt),/offline/);
-  const recovered=new ModelUsage(db,{now:()=>Date.parse(base.captured_at),notify:async n=>{assert.deepEqual(n,notices[0]);}});
+  const recovered=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>Date.parse(base.captured_at),notify:async n=>{assert.deepEqual(n,notices[0]);}});
   await recovered.recover('staging');db.close();
 });
 
@@ -189,7 +189,7 @@ test('source-body migration preserves replay and never retrospectively prices ol
  captured_at TEXT,owner_chat INTEGER,cost_kind TEXT,currency TEXT,amount_micros INTEGER,body TEXT,PRIMARY KEY(environment,owner,attempt_id));`);
  const {canonical}=await import('../src/contracts.ts');
  db.prepare('INSERT INTO model_usage_attempts VALUES(?,?,?,?,?,?,?,?,?,?)').run(base.environment,base.owner,base.attempt_id,'2026-10-23',base.captured_at,0,'unknown','CNY',null,canonical(base));
- const usage=new ModelUsage(db,{now:()=>Date.parse(base.captured_at),notify:async()=>{}});usage.setPrices([price]);await usage.record(base);
+ const usage=new ModelUsage(db,{time_zone:'Asia/Shanghai',now:()=>Date.parse(base.captured_at),notify:async()=>{}});usage.setPrices([price]);await usage.record(base);
  assert.equal(usage.summary('staging','owner').unknown_attempts,1);assert.equal(usage.recentAttempts('staging','owner')[0]!.cost.kind,'unknown');db.close();
 });
 test('nonrun auxiliary started pins price before inference; terminal finalizes same row and exact replays stay idempotent',async()=>{

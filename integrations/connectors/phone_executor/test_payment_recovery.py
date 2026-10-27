@@ -41,7 +41,9 @@ assert.equal(f.authority.store.getPayment(v.payment_id)?.state,'awaiting_owner')
 await f.advance(3001);await f.authority.observePayUtterance('owner',f.utterance());
 assert.equal(f.authority.store.getPayment(v.payment_id)?.state,'granted');await f.complete(v.payment_id);f.setNow(Date.now());
 f.authority.close();
-const authority=PaymentAuthority.open(f.directory,{config:f.config});
+// Use one monotonic epoch clock for the live authority fixture.
+const epoch=Date.now(),started=performance.now(),now=()=>epoch+Math.floor(performance.now()-started);
+const authority=PaymentAuthority.open(f.directory,{config:f.config,now});
 const storage=new PosixStorage(f.directory+'/runtime'),skill=readFileSync('SKILL','utf8');
 let serial=0,nativeInstructions='';const done=new Set<string>(),owners=new Set<string>();
 const native:any={create:async(body:any)=>{nativeInstructions=body.instructions;const id='run-'+(++serial);if(JSON.parse(body.input).origin==='explicit_user_prompt')owners.add(id);return {run_id:id,session_id:'native-'+serial,conversation_session_id:'session',status:'running'};},

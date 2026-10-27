@@ -2553,8 +2553,8 @@ def test_n13_switch_renders_deployment_zone_before_migrate_and_native_init(home,
     render, start = release.render, release.start
     stack = Stack(home / 'release-stack', monkeypatch)
     candidate = stack.root / 'releases/cand'
-    legacy = subprocess.run(['git', '-C', str(ROOT), 'show', '9dff83f4f:deploy/cloud/cloud.json'],
-                            check=True, capture_output=True).stdout
+    # Only the stale time-zone field and byte preservation are relevant to this migration.
+    legacy = (ROOT / 'tests/hermes/fixtures/legacy-cloud-config.json').read_bytes()
     assert 'time_zone' not in json.loads(legacy)
     # A retained owner config and a stale rendered file both lack the new deployment field.
     retained = home / 'mac-product.json'

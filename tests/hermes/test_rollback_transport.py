@@ -88,7 +88,7 @@ def test_manual_rollback_to_n12_restores_its_own_legacy_key_environment(tmp_path
     home = generation_home(tmp_path)
     authority, legacy = releases(tmp_path)
     calls, order = [], []
-    host = SimpleNamespace(suffix='', release=lambda name: {'current': authority, 'previous': legacy}[name],
+    host = SimpleNamespace(config={}, suffix='', release=lambda name: {'current': authority, 'previous': legacy}[name],
                            runner=lambda target: compose_runner(home, calls), root=tmp_path, event=lambda *a, **k: None)
     monkeypatch.setattr(release, 'stop_writers', lambda host, run: order.append('stop'))
     monkeypatch.setattr(release, 'point', lambda *args: None)

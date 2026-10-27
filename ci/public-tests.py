@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / '01-product-half-finished/backend'
@@ -75,7 +76,7 @@ EXECUTOR_OMISSIONS = {
 }
 
 
-def test_environment():
+def test_environment(temp_root, suite):
     env = dict(os.environ)
     source = ROOT / '.scratch/hermes-source'
     hermes_python = ROOT / '.scratch/hermes-venv/bin/python'
@@ -85,7 +86,7 @@ def test_environment():
                GIT_CEILING_DIRECTORIES=str(ROOT.parent),
                NODE_COMPILE_CACHE=str(ROOT / '.scratch/node-compile-cache'),
                PYTHONPATH=os.pathsep.join([str(source), str(ROOT)]),
-               HERMES_HOME=str(ROOT / '.scratch/test-home'),
+               HERMES_HOME=str(temp_root / 'test-home'), TMPDIR=str(temp_root),
                HERMES_SOURCE=str(source), HERMES_NATIVE_SOURCE=str(source),
                PAIOS_HERMES_UPSTREAM_SOURCE=str(source), PAIOS_NATIVE_CONTRACT_SOURCE_ROOT=str(source),
                PAIOS_NATIVE_SOURCE_TEST_ROOT=str(source), PAIOS_HERMES_REBUILD_DIR=str(source),
@@ -93,6 +94,8 @@ def test_environment():
                PAIOS_VISION_PYTHON=env.get('PAIOS_VISION_PYTHON', str(hermes_python)),
                PAIOS_PHONE_LOCK_DIR=str(phone_locks),
                PAIOS_MODEL_ROOT=str(ROOT / '.scratch/no-model-assets'))
+    if suite in ('integration', 'executor'):
+        env['PAIOS_EXECUTOR_PYTHON'] = str(ROOT / '.scratch/executor-venv/bin/python')
     return env
 
 
@@ -104,17 +107,22 @@ def main():
         print(json.dumps({'node': NODE_OMISSIONS, 'python': PYTHON_OMISSIONS,
                           'executor': EXECUTOR_OMISSIONS}, ensure_ascii=False, indent=2))
         return 0
-    env = test_environment()
-    if args.suite in PACKAGES:
-        package = PACKAGES[args.suite]
-        for name, reason in NODE_OMISSIONS[args.suite].items():
+    # Runtime and pytest scratch data must stay outside the protected source tree.
+    with tempfile.TemporaryDirectory(prefix='paios-public-ci-') as folder:
+        return run_suite(args.suite, test_environment(Path(folder), args.suite))
+
+
+def run_suite(suite, env):
+    if suite in PACKAGES:
+        package = PACKAGES[suite]
+        for name, reason in NODE_OMISSIONS[suite].items():
             print(f'OMITTED {name}: {reason}', flush=True)
-        pattern = '|'.join('^' + re.escape(name) + '$' for name in NODE_OMISSIONS[args.suite])
+        pattern = '|'.join('^' + re.escape(name) + '$' for name in NODE_OMISSIONS[suite])
         command = ['node', '--test', '--test-concurrency=1', '--test-reporter=spec',
                    '--test-skip-pattern=' + pattern,
                    *[str(p.relative_to(package)) for p in sorted((package / 'tests').glob('*.test.ts'))]]
         return subprocess.run(command, cwd=package, env=env).returncode
-    if args.suite == 'hermes':
+    if suite == 'hermes':
         for name, reason in PYTHON_OMISSIONS.items():
             print(f'OMITTED {name}: {reason}', flush=True)
         command = [env['PAIOS_HERMES_PYTHON'], '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
